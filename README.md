@@ -155,7 +155,7 @@ cd android
 ./gradlew testDebugUnitTest assembleDebug
 ```
 
-产物位于 `android/app/build/outputs/apk/debug/`。真机使用 `arm64-v8a`，x86_64 模拟器使用对应 ABI 的 APK。
+调试构建的产物位于 `android/app/build/outputs/apk/debug/`。发布包必须使用正式签名构建，不能把 debug APK 当作正式包分发；签名配置和密钥由发布者在本机管理，不进入仓库。
 
 ### 测试
 
@@ -179,7 +179,7 @@ Windows 便携包可以重新生成：
 pwsh scripts/package.ps1
 ```
 
-脚本会收集桌面 exe、`WebView2Loader.dll`、简短说明和 Android APK，并生成 SHA256 校验和。需要 PowerShell 7，Windows PowerShell 5.1 不保证提供 `Get-FileHash`。
+脚本会收集桌面 exe、`WebView2Loader.dll`、简短说明和正式签名 Android APK，并生成 SHA256 校验和。缺少正式签名 APK 时脚本会直接失败，不会用 debug APK 代替。需要 PowerShell 7，Windows PowerShell 5.1 不保证提供 `Get-FileHash`。
 
 ### 关于 vendor 目录
 

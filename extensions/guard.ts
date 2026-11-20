@@ -9,7 +9,6 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export default function (pi: ExtensionAPI) {
   pi.on("tool_call", async (event, ctx) => {
-    if (process.env.PI_CARRY_GUARD === "0") return;
     const payload = {
       toolName: event.toolName,
       toolCallId: event.toolCallId,

@@ -49,7 +49,7 @@ impl Default for NodeConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct TransportConfig {
-    /// n0 / disabled / custom
+    /// n0 / default（n0 别名） / disabled / custom
     pub relay_mode: String,
     pub relay_urls: Vec<String>,
     /// None 表示自动绑定所有网卡；测试用 127.0.0.1:0。
@@ -103,8 +103,10 @@ pub struct SessionsConfig {
     pub scan_limit: usize,
     pub journal_retention_days: i64,
     pub journal_max_events: u32,
-    /// 默认给新手机的能力：read / control。
+    /// 默认给新设备的能力：read / control / full。
     pub default_capability: String,
+    /// 允许创建会话的工作区根目录；为空时仅允许当前用户主目录。
+    pub allowed_roots: Vec<String>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -119,6 +121,7 @@ impl Default for SessionsConfig {
             journal_retention_days: 30,
             journal_max_events: 10_000,
             default_capability: "full".into(),
+            allowed_roots: Vec::new(),
             extra: BTreeMap::new(),
         }
     }
@@ -195,11 +198,12 @@ impl Config {
         if self.node.pi_path.trim().is_empty() {
             return Err(CoreError::Config("node.piPath 不能为空".into()));
         }
+        // 与 Server 的接受集合保持一致：`default` 视为 `n0` 的别名。
         match self.transport.relay_mode.as_str() {
-            "n0" | "disabled" | "custom" => {}
+            "n0" | "default" | "disabled" | "custom" => {}
             other => {
                 return Err(CoreError::Config(format!(
-                    "transport.relayMode 必须是 n0/disabled/custom，实际 {other}"
+                    "transport.relayMode 必须是 n0/default/disabled/custom，实际 {other}"
                 )))
             }
         }
@@ -375,6 +379,14 @@ mod tests {
         cfg.transport.relay_mode = "custom".into();
         assert!(cfg.validate().is_err());
         cfg.transport.relay_urls = vec!["https://relay.example".into()];
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn default_relay_mode_alias_is_accepted() {
+        // 与 Server 一致：`default` 是 `n0` 的别名，不应被配置校验拒绝。
+        let mut cfg = Config::default();
+        cfg.transport.relay_mode = "default".into();
         assert!(cfg.validate().is_ok());
     }
 

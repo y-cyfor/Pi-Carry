@@ -254,6 +254,29 @@ impl PiClient {
         }
     }
 
+    /// 为外部生成的请求 id 登记一次性响应等待（非阻塞消费）。
+    pub fn track_response(&self, id: &str) -> Option<oneshot::Receiver<Result<Value>>> {
+        if self.is_closed() {
+            return None;
+        }
+        let (tx, rx) = oneshot::channel();
+        self.inner
+            .pending
+            .lock()
+            .expect("pending poisoned")
+            .insert(id.to_string(), Pending { tx });
+        Some(rx)
+    }
+
+    /// 放弃一次已登记的等待（例如写 stdin 失败后）。
+    pub fn forget_pending(&self, id: &str) {
+        self.inner
+            .pending
+            .lock()
+            .expect("pending poisoned")
+            .remove(id);
+    }
+
     /// 写一条不等待响应的协议消息（扩展 UI 响应、通知）。
     pub async fn send_raw(&self, value: &Value) -> Result<()> {
         let line = serde_json::to_vec(value)?;

@@ -373,6 +373,27 @@ impl Store {
         Ok(n)
     }
 
+    /// journal 中出现过事件的会话 id（只查索引，不读会话文件）。
+    pub fn journal_session_ids(&self) -> Result<Vec<String>> {
+        let conn = self.conn.lock().expect("db poisoned");
+        let mut stmt = conn.prepare("SELECT DISTINCT session_id FROM journal")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// 删除 ts 早于 cutoff 的 journal 事件；每个会话至少保留最后一条，
+    /// 避免 MAX(seq) 归零导致新事件序号与客户端水位冲突。
+    pub fn prune_journal_before(&self, cutoff: &str) -> Result<usize> {
+        let conn = self.conn.lock().expect("db poisoned");
+        let n = conn.execute(
+            "DELETE FROM journal WHERE ts < ?1 AND seq < (
+                SELECT MAX(seq) FROM journal j2 WHERE j2.session_id = journal.session_id
+             )",
+            params![cutoff],
+        )?;
+        Ok(n)
+    }
+
     // ---------- 审批 ----------
 
     pub fn insert_approval(&self, p: &PendingApproval) -> Result<()> {
@@ -523,7 +544,9 @@ impl Store {
         Ok(count > 0)
     }
 
-    pub fn remember_client_id(
+    /// 原子抢占幂等键：首次见到 (device, clientId) 返回 true，重复返回 false。
+    /// INSERT OR IGNORE 保证并发重试只有一方能抢占成功（TOCTOU 安全）。
+    pub fn claim_client_id(
         &self,
         device_id: &str,
         client_id: &str,
@@ -536,6 +559,16 @@ impl Store {
             params![device_id, client_id, session_id, at],
         )?;
         Ok(n > 0)
+    }
+
+    /// 释放已抢占的幂等键（执行失败时调用，让客户端可以重试）。
+    pub fn release_client_id(&self, device_id: &str, client_id: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("db poisoned");
+        conn.execute(
+            "DELETE FROM outbox_seen WHERE device_id=?1 AND client_id=?2",
+            params![device_id, client_id],
+        )?;
+        Ok(())
     }
 
     pub fn set_ack(&self, device_id: &str, session_id: &str, seq: u64) -> Result<()> {
@@ -609,6 +642,13 @@ impl Store {
         let conn = self.conn.lock().expect("db poisoned");
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM audit", [], |r| r.get(0))?;
         Ok(n as u64)
+    }
+
+    /// 删除 ts 早于 cutoff 的审计记录；返回删除数。
+    pub fn prune_audit_before(&self, cutoff: &str) -> Result<usize> {
+        let conn = self.conn.lock().expect("db poisoned");
+        let n = conn.execute("DELETE FROM audit WHERE ts < ?1", params![cutoff])?;
+        Ok(n)
     }
 }
 
@@ -684,6 +724,25 @@ mod tests {
     }
 
     #[test]
+    fn journal_prune_before_keeps_last_seq() {
+        let s = store();
+        for i in 0..3 {
+            s.append_event("s1", "2000-01-01T00:00:00.000Z", &json!({"n": i}))
+                .unwrap();
+        }
+        assert_eq!(
+            s.prune_journal_before("2100-01-01T00:00:00.000Z").unwrap(),
+            2
+        );
+        assert_eq!(s.last_seq("s1").unwrap(), 3);
+        assert_eq!(
+            s.append_event("s1", "t", &json!({"n": 4})).unwrap(),
+            4,
+            "序号必须继续递增"
+        );
+    }
+
+    #[test]
     fn device_lifecycle_and_revoke() {
         let s = store();
         let d = DeviceRecord {
@@ -740,11 +799,26 @@ mod tests {
     #[test]
     fn idempotency_and_ack() {
         let s = store();
-        assert!(s.remember_client_id("d", "c1", "s", "t").unwrap());
-        assert!(!s.remember_client_id("d", "c1", "s", "t").unwrap());
+        assert!(s.claim_client_id("d", "c1", "s", "t").unwrap());
+        assert!(!s.claim_client_id("d", "c1", "s", "t").unwrap());
         s.set_ack("d", "s", 5).unwrap();
         s.set_ack("d", "s", 3).unwrap();
         assert_eq!(s.get_ack("d", "s").unwrap(), 5);
+    }
+
+    #[test]
+    fn claim_client_id_is_atomic_and_releasable() {
+        let s = store();
+        let at = "2026-11-19T08:00:00.000Z";
+        // 抢占成功后才执行，重复请求直接失败（无需先读）。
+        assert!(s.claim_client_id("d1", "c1", "s1", at).unwrap());
+        assert!(!s.claim_client_id("d1", "c1", "s2", at).unwrap());
+        // 设备与客户端共同构成幂等键，互不干扰。
+        assert!(s.claim_client_id("d2", "c1", "s1", at).unwrap());
+        assert!(s.claim_client_id("d1", "c2", "s1", at).unwrap());
+        // 执行失败释放键后可重新提交。
+        s.release_client_id("d1", "c1").unwrap();
+        assert!(s.claim_client_id("d1", "c1", "s3", at).unwrap());
     }
 
     #[test]

@@ -36,14 +36,27 @@ impl<R: AsyncBufRead + Unpin> JsonlReader<R> {
         }
     }
 
+    /// 逐块读取直到 LF，并在每块之后检查上限；超长行不会无界累积。
     pub async fn next_line(&mut self) -> Result<Option<String>, FrameError> {
         let mut buf = Vec::new();
-        let n = self.inner.read_until(b'\n', &mut buf).await?;
-        if n == 0 {
-            return Ok(None);
+        loop {
+            let chunk = self.inner.fill_buf().await?;
+            if chunk.is_empty() {
+                break;
+            }
+            let end = chunk.iter().position(|b| *b == b'\n').map(|i| i + 1);
+            let take = end.unwrap_or(chunk.len());
+            buf.extend_from_slice(&chunk[..take]);
+            self.inner.consume(take);
+            if buf.len() > self.max_line {
+                return Err(FrameError::LineTooLong(buf.len()));
+            }
+            if end.is_some() {
+                break;
+            }
         }
-        if buf.len() > self.max_line {
-            return Err(FrameError::LineTooLong(buf.len()));
+        if buf.is_empty() {
+            return Ok(None);
         }
         while matches!(buf.last(), Some(b'\n' | b'\r')) {
             buf.pop();
@@ -82,5 +95,18 @@ mod tests {
         let mut reader = JsonlReader::new(input.as_bytes()).with_max_line(16);
         let err = reader.next_value::<Value>().await.unwrap_err();
         assert!(matches!(err, FrameError::LineTooLong(33)));
+    }
+
+    #[tokio::test]
+    async fn long_line_without_lf_is_rejected_with_bounded_read() {
+        // 1MB 输入、无换行：必须报超长，且只读到首个缓冲块就停，不累积整条流。
+        let input = "x".repeat(1024 * 1024);
+        let mut inner = tokio::io::BufReader::with_capacity(64, input.as_bytes());
+        let mut reader = JsonlReader::new(&mut inner).with_max_line(16);
+        let err = reader.next_value::<Value>().await.unwrap_err();
+        match err {
+            FrameError::LineTooLong(n) => assert!(n <= 65, "只应读到首个缓冲块，实际 {n}"),
+            other => panic!("期望 LineTooLong，实际 {other}"),
+        }
     }
 }

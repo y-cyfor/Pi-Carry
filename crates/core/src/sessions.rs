@@ -85,6 +85,8 @@ pub struct SessionManager {
     pi_path: PathBuf,
     guard: PathBuf,
     live: Mutex<HashMap<String, Arc<LiveSession>>>,
+    /// 每个会话 id 一把 attach 互斥锁，防止并发 open 对同一会话双开 pi 进程。
+    spawn_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     events: broadcast::Sender<SessionEvent>,
     ui_waiters: Mutex<HashMap<String, oneshot::Sender<Value>>>,
 }
@@ -111,6 +113,7 @@ impl SessionManager {
             pi_path,
             guard,
             live: Mutex::new(HashMap::new()),
+            spawn_locks: Mutex::new(HashMap::new()),
             events,
             ui_waiters: Mutex::new(HashMap::new()),
         })
@@ -189,7 +192,27 @@ impl SessionManager {
         Ok(out)
     }
 
+    fn spawn_lock(&self, id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self.spawn_locks.lock().expect("spawn locks poisoned");
+        if let Some(l) = locks.get(id) {
+            return l.clone();
+        }
+        let l = Arc::new(tokio::sync::Mutex::new(()));
+        locks.insert(id.to_string(), l.clone());
+        l
+    }
+
     pub async fn open(self: &Arc<Self>, id: &str) -> Result<SessionSummary> {
+        if let Some(l) = self.live.lock().expect("live poisoned").get(id).cloned() {
+            if !l.client.is_closed() {
+                return Ok(l.summary.lock().expect("summary poisoned").clone());
+            }
+            self.live.lock().expect("live poisoned").remove(id);
+        }
+        // 同一 id 的 attach 串行化：等锁期间若别人已经开成功，直接复用。
+        // guard 随函数返回（成功或失败）释放，不会泄漏锁；tokio Mutex 没有 poisoning。
+        let lock = self.spawn_lock(id);
+        let _guard = lock.lock().await;
         if let Some(l) = self.live.lock().expect("live poisoned").get(id).cloned() {
             if !l.client.is_closed() {
                 return Ok(l.summary.lock().expect("summary poisoned").clone());
@@ -201,14 +224,52 @@ impl SessionManager {
     }
 
     /// 新建会话：先写合法 session header，再让 pi attach。
-    pub async fn create(self: &Arc<Self>, cwd: &str) -> Result<SessionSummary> {
-        let cwd = if cwd.trim().is_empty() {
-            std::env::current_dir()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|_| ".".into())
+    /// 校验并归一化会话工作目录：必须是已存在目录，且落在允许的根目录内。
+    fn resolve_cwd(&self, cwd: &str) -> Result<String> {
+        let raw = if cwd.trim().is_empty() {
+            std::env::current_dir()?
         } else {
-            cwd.to_string()
+            let p = PathBuf::from(cwd);
+            if p.is_absolute() {
+                p
+            } else {
+                std::env::current_dir()?.join(p)
+            }
         };
+        let canon = std::fs::canonicalize(&raw).map_err(|e| {
+            CoreError::InvalidArgument(format!("工作目录 {} 不可访问: {e}", raw.display()))
+        })?;
+        let configured = &self.config.sessions.allowed_roots;
+        let roots: Vec<PathBuf> = if configured.is_empty() {
+            let mut v: Vec<PathBuf> = std::env::var_os("USERPROFILE")
+                .or_else(|| std::env::var_os("HOME"))
+                .map(PathBuf::from)
+                .into_iter()
+                .collect();
+            if let Ok(cwd) = std::env::current_dir() {
+                v.push(cwd);
+            }
+            v
+        } else {
+            configured.iter().map(PathBuf::from).collect()
+        };
+        if !roots.is_empty()
+            && !roots.iter().any(|root| {
+                std::fs::canonicalize(root)
+                    .map(|r| canon.starts_with(r))
+                    .unwrap_or(false)
+            })
+        {
+            return Err(CoreError::PermissionDenied(format!(
+                "工作目录 {} 不在允许的根目录内",
+                raw.display()
+            )));
+        }
+        Ok(raw.to_string_lossy().into_owned())
+    }
+
+    pub async fn create(self: &Arc<Self>, cwd: &str) -> Result<SessionSummary> {
+        let cwd = self.resolve_cwd(cwd)?;
         let id = uuid::Uuid::new_v4().to_string();
         let group = format!(
             "--{}--",
@@ -367,8 +428,11 @@ impl SessionManager {
     }
 
     fn resolve_path(&self, id: &str) -> Result<PathBuf> {
-        if id.ends_with(".jsonl") && Path::new(id).is_file() {
-            return Ok(PathBuf::from(id));
+        // id 完全是客户端可控输入：只接受单个普通文件名标识，
+        // 任何路径分隔符、`..`、盘符或 `.jsonl` 后缀都被拒绝，
+        // 防止把 id 当路径打开会话目录之外的文件。
+        if !is_plain_session_id(id) {
+            return Err(CoreError::SessionNotFound(id.into()));
         }
         let dir = self.sessions_dir();
         if let Ok(groups) = std::fs::read_dir(&dir) {
@@ -380,7 +444,7 @@ impl SessionManager {
                             continue;
                         }
                         if let Ok(Some(s)) = scan_one(&p) {
-                            if s.id == id {
+                            if s.id == id && is_within_dir(&dir, &p) {
                                 return Ok(p);
                             }
                         }
@@ -499,11 +563,15 @@ impl SessionManager {
             }),
         );
         // 不等待 pi 的 prompt 响应：该响应在需要审批的 run 中要等审批结束，
-        // 会卡住控制循环，导致审批请求无法被处理。这里只保证写入成功。
+        // 会卡住控制循环。但响应必须被消费：pi 直接拒绝（不开 run）时不会再有
+        // agent_start/agent_settled，若不处理会话会永久停在 streaming。
         let mut request = payload;
         request["type"] = json!("prompt");
-        request["id"] = json!(format!("prompt-{}", self.ids.next_id()));
+        let request_id = format!("prompt-{}", self.ids.next_id());
+        request["id"] = json!(request_id);
+        let response = live.client.track_response(&request_id);
         if let Err(e) = live.client.send_raw(&request).await {
+            live.client.forget_pending(&request_id);
             *live.writer.lock().expect("writer poisoned") = None;
             live.set_status("idle");
             self.emit_logged(
@@ -515,6 +583,32 @@ impl SessionManager {
                 }),
             );
             return Err(e);
+        }
+        if let Some(rx) = response {
+            let mgr = self.clone();
+            let live_for_task = live.clone();
+            // 只有本次 prompt 自己开启的 run 才能在拒绝时回退状态；
+            // 若此前已在 streaming，状态归 pi 的现有 run 所有。
+            let started_run = !streaming;
+            tokio::spawn(async move {
+                let Ok(Err(e)) = rx.await else { return };
+                if started_run && live_for_task.status() == "streaming" {
+                    *live_for_task.writer.lock().expect("writer poisoned") = None;
+                    live_for_task.set_status("idle");
+                    let _ = mgr.emit_live(
+                        &live_for_task,
+                        json!({"type": ev::RUN_STATE, "state": "idle"}),
+                    );
+                }
+                let _ = mgr.emit_live(
+                    &live_for_task,
+                    json!({
+                        "type": ev::ERROR,
+                        "message": e.to_string(),
+                        "source": "prompt",
+                    }),
+                );
+            });
         }
         self.emit_logged(
             &live,
@@ -697,6 +791,12 @@ impl SessionManager {
 
     pub async fn fork(self: &Arc<Self>, id: &str, entry_id: &str) -> Result<SessionSummary> {
         let live = self.require_live(id)?;
+        if live.status() == "streaming" {
+            return Err(CoreError::Protocol(ProtocolError::new(
+                ErrorCode::SessionBusy,
+                "运行中的会话不能 fork，请先停止当前运行",
+            )));
+        }
         let v = live
             .client
             .request("fork", json!({"entryId": entry_id}))
@@ -1179,6 +1279,26 @@ async fn handle_ui_request(mgr: Arc<SessionManager>, live: Arc<LiveSession>, v: 
     let _ = live.client.extension_ui_response(&id, body).await;
 }
 
+/// 会话 id 必须是单个普通标识，不能携带任何路径语义。
+fn is_plain_session_id(id: &str) -> bool {
+    if id.is_empty() || id.len() > 200 {
+        return false;
+    }
+    if id.contains(['/', '\\', ':', '\0']) || id.contains("..") || id.ends_with(".jsonl") {
+        return false;
+    }
+    let path = Path::new(id);
+    !path.is_absolute() && path.components().count() == 1
+}
+
+/// 两侧 canonicalize 后做前缀校验，防止符号链把路径带出会话目录。
+fn is_within_dir(dir: &Path, path: &Path) -> bool {
+    let (Ok(dir), Ok(path)) = (dir.canonicalize(), path.canonicalize()) else {
+        return false;
+    };
+    path.starts_with(&dir)
+}
+
 fn image_json(img: &ImagePayload) -> Value {
     json!({"type": "image", "data": img.data, "mimeType": img.mime_type})
 }
@@ -1398,4 +1518,122 @@ mod tests {
     }
 
     use chrono::Utc;
+
+    fn manager_in(dir: &Path) -> Arc<SessionManager> {
+        let store = Store::open_memory().unwrap();
+        let clock = FixedClock::new(Utc.with_ymd_and_hms(2026, 11, 19, 8, 0, 0).unwrap());
+        let (tx, _) = broadcast::channel(8);
+        let approvals = ApprovalManager::new(
+            store.clone(),
+            Config::default().approvals,
+            Arc::new(clock.clone()),
+            Arc::new(SeqIdGen::new()),
+            tx,
+        );
+        let mut config = Config::default();
+        config.sessions.dir = dir.display().to_string();
+        SessionManager::new(
+            config,
+            Paths::at(dir.to_path_buf()),
+            store,
+            Arc::new(clock),
+            Arc::new(SeqIdGen::new()),
+            approvals,
+            PathBuf::from("pi"),
+            PathBuf::from("guard.ts"),
+        )
+    }
+
+    #[test]
+    fn resolve_path_finds_session_inside_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_session(tmp.path(), "sess-1", "C:/work");
+        let mgr = manager_in(tmp.path());
+        let found = mgr.resolve_path("sess-1").unwrap();
+        assert_eq!(found.canonicalize().unwrap(), path.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn resolve_path_rejects_path_like_ids() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mgr = manager_in(tmp.path());
+        let outside = tempfile::tempdir().unwrap();
+        let outside_file = write_session(outside.path(), "sess-evil", "C:/evil");
+        let sep = std::path::MAIN_SEPARATOR;
+        let bad_ids = [
+            // 会话目录外的绝对 .jsonl 路径。
+            outside_file.display().to_string(),
+            // 会话目录内的绝对 .jsonl 路径（依然是路径，不是 id）。
+            tmp.path()
+                .join("--proj--")
+                .join("2026-11-19T08-00-00_sess-1.jsonl")
+                .display()
+                .to_string(),
+            "../sess-1".to_string(),
+            format!("..{sep}--proj--{sep}x.jsonl"),
+            "sess-1.jsonl".to_string(),
+            "sub/sess-1".to_string(),
+            String::new(),
+        ];
+        for bad in bad_ids {
+            assert!(
+                matches!(mgr.resolve_path(&bad), Err(CoreError::SessionNotFound(_))),
+                "应拒绝非法 id: {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_cwd_rejects_outside_default_roots() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mgr = manager_in(tmp.path());
+        let outside = if cfg!(windows) {
+            PathBuf::from(r"C:\Windows")
+        } else {
+            PathBuf::from("/usr")
+        };
+        if outside.is_dir() {
+            assert!(
+                matches!(
+                    mgr.resolve_cwd(&outside.display().to_string()),
+                    Err(CoreError::PermissionDenied(_))
+                ),
+                "默认根目录之外的工作区必须被拒绝"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_path_ignores_sessions_outside_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mgr = manager_in(tmp.path());
+        let outside = tempfile::tempdir().unwrap();
+        write_session(outside.path(), "sess-out", "C:/evil");
+        assert!(matches!(
+            mgr.resolve_path("sess-out"),
+            Err(CoreError::SessionNotFound(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn spawn_lock_serializes_same_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mgr = manager_in(tmp.path());
+        let lock = mgr.spawn_lock("same");
+        assert!(Arc::ptr_eq(&lock, &mgr.spawn_lock("same")));
+        assert!(!Arc::ptr_eq(&lock, &mgr.spawn_lock("other")));
+
+        let guard = lock.clone().lock_owned().await;
+        let waiter = mgr.spawn_lock("same");
+        let task = tokio::spawn(async move {
+            let _g = waiter.lock().await;
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!task.is_finished(), "同一 id 的第二次 spawn 必须等待");
+        drop(guard);
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("释放后应立即获得锁")
+            .unwrap();
+    }
 }

@@ -509,13 +509,16 @@ fn acquire_single_instance() -> bool {
 }
 
 fn main() {
-    if !acquire_single_instance() {
+    // --smoke 是测试探针，不是第二个桌面实例：不打开窗口、不抢单实例互斥。
+    // 必须先于互斥判定，否则桌面端已运行时会被 exit(0) 提前放行，smoke 假绿。
+    let smoke = std::env::args().any(|a| a == "--smoke");
+    if !smoke && !acquire_single_instance() {
         eprintln!("pi carry 已在运行");
         std::process::exit(0);
     }
 
     init_logging();
-    if std::env::args().any(|a| a == "--smoke") {
+    if smoke {
         if let Err(e) = run_smoke() {
             eprintln!("{e}");
             std::process::exit(1);

@@ -41,6 +41,11 @@ class CarryRepository(context: Context) {
     private val store = NodeStore(appContext)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val syncing = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    // 快照在途时先缓冲事件，避免快照整体覆盖期间到达的增量/最终消息丢失。
+    private val pendingSnapshotEvents =
+        java.util.concurrent.ConcurrentHashMap<String, MutableList<Pair<Long, JsonObject>>>()
+    /** 保护 syncing 与缓冲队列的入队/出队切换，避免旧事件在快照后乱序落地。 */
+    private val snapshotGuard = Any()
 
     private val _nodes = MutableStateFlow(store.loadNodes())
     val nodes: StateFlow<List<Node>> = _nodes.asStateFlow()
@@ -77,6 +82,12 @@ class CarryRepository(context: Context) {
 
     private val connections = java.util.concurrent.ConcurrentHashMap<String, NodeConnection>()
     private val sessionNode = java.util.concurrent.ConcurrentHashMap<String, String>()
+    private val lastSeq = SeqWatermark()
+    private val notifiedApprovals = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    @Volatile private var appForeground = false
+
+    @Volatile private var visibleSessionId: String? = null
 
     init {
         scope.launch { _nodes.value.filter { it.token.isNotBlank() || !it.code.isNullOrBlank() }.forEach { connect(it.id) } }
@@ -86,14 +97,16 @@ class CarryRepository(context: Context) {
 
     fun addNode(node: Node) {
         val existing = _nodes.value.firstOrNull { it.endpointId == node.endpointId }
+        // 重配对沿用旧 id：凭据已更新，但连接、事件键与 UI 都按旧 id 索引。
+        val stored = if (existing == null) node else node.copy(id = existing.id)
         val merged = if (existing == null) {
-            _nodes.value + node
+            _nodes.value + stored
         } else {
-            _nodes.value.map { if (it.id == existing.id) node.copy(id = existing.id) else it }
+            _nodes.value.map { if (it.id == stored.id) stored else it }
         }
         _nodes.value = merged
         store.saveNodes(merged)
-        connect(node.id)
+        connect(stored.id)
     }
 
     fun removeNode(id: String) {
@@ -101,7 +114,22 @@ class CarryRepository(context: Context) {
         val next = _nodes.value.filterNot { it.id == id }
         _nodes.value = next
         store.saveNodes(next)
+        // 节点删除后所有派生状态都要清掉，否则重配对时事件会写进孤儿键。
+        val prefix = "$id::"
+        val removedApprovals = _approvals.value.filter { it.nodeId == id }.map { it.id }.toSet()
+        _link.value = _link.value - id
+        _errors.value = _errors.value - id
         _sessions.value = _sessions.value.filterNot { it.nodeId == id }
+        _approvals.value = _approvals.value.filterNot { it.nodeId == id }
+        _messages.value = _messages.value.filterKeys { !it.startsWith(prefix) }
+        _models.value = _models.value.filterKeys { !it.startsWith(prefix) }
+        _thinkingLevels.value = _thinkingLevels.value.filterKeys { !it.startsWith(prefix) }
+        _runInfo.value = _runInfo.value.filterKeys { !it.startsWith(prefix) }
+        lastSeq.clear(prefix)
+        syncing.removeIf { it.startsWith(prefix) }
+        pendingSnapshotEvents.keys.removeIf { it.startsWith(prefix) }
+        notifiedApprovals.removeAll(removedApprovals)
+        sessionNode.entries.removeIf { it.value == id }
     }
 
     fun connect(id: String) {
@@ -112,8 +140,11 @@ class CarryRepository(context: Context) {
             scope = scope,
             onEvent = { sessionId, seq, event -> onEvent(id, sessionId, seq, event) },
             onState = { state, error ->
-                _link.value = _link.value + (id to state)
-                _errors.value = if (error == null) _errors.value - id else _errors.value + (id to error)
+                // 删除节点后 stop() 与状态回调存在竞态，已删除的节点不再写回链接状态。
+                if (node(id) != null) {
+                    _link.value = _link.value + (id to state)
+                    _errors.value = if (error == null) _errors.value - id else _errors.value + (id to error)
+                }
             },
             onHandshake = { payload -> onHandshake(id, payload) },
         )
@@ -149,16 +180,7 @@ class CarryRepository(context: Context) {
         refreshSessions(nodeId)
         // 重连后补拉已打开会话的完整快照，避免断网期间的事件空洞。
         _messages.value.keys.filter { it.startsWith("$nodeId::") }.forEach { key ->
-            val sid = key.substringAfter("::")
-            if (syncing.add(key)) {
-                scope.launch {
-                    try {
-                        openSession(nodeId, sid)
-                    } finally {
-                        syncing.remove(key)
-                    }
-                }
-            }
+            openSession(nodeId, key.substringAfter("::"))
         }
     }
 
@@ -178,25 +200,54 @@ class CarryRepository(context: Context) {
     fun sessionKey(nodeId: String, sessionId: String) = "$nodeId::$sessionId"
 
     fun openSession(nodeId: String, sessionId: String) {
+        val key = sessionKey(nodeId, sessionId)
+        // 同一会话只允许一个在途快照：ChatScreen 与重连回放并发时，旧快照不能覆盖新消息。
+        if (!syncing.add(key)) return
         scope.launch {
-            runCatching {
-                val conn = connections[nodeId] ?: error("节点未连接")
-                conn.request("session.open", buildJsonObject { put("sessionId", JsonPrimitive(sessionId)) })
-                val snap = conn.request("session.snapshot", buildJsonObject { put("sessionId", JsonPrimitive(sessionId)) })
-                val msgs = (snap["messages"] as? JsonArray)?.mapIndexedNotNull { i, el ->
-                    parseHistoryMessage(sessionId, i, el as? JsonObject ?: return@mapIndexedNotNull null)
-                }.orEmpty()
-                val key = sessionKey(nodeId, sessionId)
-                _messages.value = _messages.value + (key to msgs)
-                val s = snap["session"] as? JsonObject
-                if (s != null) upsertSession(nodeId, parseSession(nodeId, s))
-                (snap["run"] as? JsonObject)?.let { _runInfo.value = _runInfo.value + (key to it) }
-                val pending = (snap["pendingApprovals"] as? JsonArray)?.mapNotNull { parseApproval(nodeId, it as? JsonObject ?: return@mapNotNull null) }.orEmpty()
-                if (pending.isNotEmpty()) {
-                    _approvals.value = (_approvals.value.filterNot { it.sessionId == sessionId } + pending)
+            try {
+                runCatching {
+                    val conn = connections[nodeId] ?: error("节点未连接")
+                    conn.request("session.open", buildJsonObject { put("sessionId", JsonPrimitive(sessionId)) })
+                    val snap = conn.request("session.snapshot", buildJsonObject { put("sessionId", JsonPrimitive(sessionId)) })
+                    // 请求期间节点可能已被删除：不要让在途快照把派生状态写回孤儿键。
+                    if (node(nodeId) == null) return@runCatching
+                    val msgs = (snap["messages"] as? JsonArray)?.mapIndexedNotNull { i, el ->
+                        parseHistoryMessage(sessionId, i, el as? JsonObject ?: return@mapIndexedNotNull null)
+                    }.orEmpty()
+                    // 快照是权威历史，但只含消息正文；保留本地已有、快照未覆盖的工具卡/流式消息/乐观消息。
+                    val known = msgs.mapTo(HashSet()) { it.id }
+                    val extras = (_messages.value[key] ?: emptyList()).filter { m ->
+                        m.id !in known && (m.role == "tool" || m.streaming || m.id.startsWith("local-"))
+                    }
+                    _messages.value = _messages.value + (key to (msgs + extras))
+                    val s = snap["session"] as? JsonObject
+                    if (s != null) upsertSession(nodeId, parseSession(nodeId, s))
+                    (snap["run"] as? JsonObject)?.let { _runInfo.value = _runInfo.value + (key to it) }
+                    // 快照自带水位：已经包含在快照里的事件不应再按重放重复应用。
+                    (snap["lastSeq"]?.jsonPrimitive?.longOrNull ?: 0L).takeIf { it > 0 }?.let { lastSeq.observe(key, it) }
+                    val pending = (snap["pendingApprovals"] as? JsonArray)?.mapNotNull { parseApproval(nodeId, it as? JsonObject ?: return@mapNotNull null) }.orEmpty()
+                    // 快照是服务端当前真值：空列表也要清掉离线期间已处理的旧审批。
+                    _approvals.value = _approvals.value.filterNot { it.sessionId == sessionId } + pending
+                    loadModelCatalog(conn, nodeId, sessionId)
+                }.onFailure { Log.w("CarryRepo", "打开会话失败: ${it.message}") }
+            } finally {
+                // 在锁内取走一批缓冲并决定是否解除 syncing；重放期间新到事件会继续入下一批，
+                // 直到缓冲为空才切到直通，保证顺序且不遗留事件。
+                while (true) {
+                    val batch = synchronized(snapshotGuard) {
+                        val pending = pendingSnapshotEvents.remove(key).orEmpty()
+                        if (pending.isEmpty()) {
+                            syncing.remove(key)
+                            null
+                        } else {
+                            pending.sortedBy { it.first }
+                        }
+                    } ?: break
+                    batch.forEach { (seq, event) ->
+                        onEvent(nodeId, sessionId, seq, event, replayAfterSnapshot = true, allowWhileSyncing = true)
+                    }
                 }
-                loadModelCatalog(conn, nodeId, sessionId)
-            }.onFailure { Log.w("CarryRepo", "打开会话失败: ${it.message}") }
+            }
         }
     }
 
@@ -382,14 +433,6 @@ class CarryRepository(context: Context) {
         }
     }
 
-    fun revokeDevice(nodeId: String, deviceId: String) {
-        scope.launch {
-            runCatching {
-                connections[nodeId]?.request("device.revoke", buildJsonObject { put("deviceId", JsonPrimitive(deviceId)) })
-            }
-        }
-    }
-
     fun renameNode(id: String, name: String) {
         val next = _nodes.value.map { if (it.id == id) it.copy(name = name) else it }
         _nodes.value = next
@@ -410,7 +453,21 @@ class CarryRepository(context: Context) {
         _themeMode.value = mode
     }
 
+    /** 应用是否在前台；由 Activity 生命周期维护。 */
+    fun setAppForeground(foreground: Boolean) {
+        appForeground = foreground
+    }
+
+    /** 当前正在看的会话；聊天页在职时设置，以免用户盯着会话还被通知轰炸。 */
+    fun setVisibleSession(sessionId: String?) {
+        visibleSessionId = sessionId
+    }
+
     private fun notifyApproval(a: Approval) {
+        if (!settingBool("notify_approval", true)) return
+        if (appForeground && visibleSessionId == a.sessionId) return
+        // approval.updated 会重复触发，同一条审批只提醒一次。
+        if (!notifiedApprovals.add(a.id)) return
         val open = PendingIntent.getActivity(
             appContext,
             a.id.hashCode(),
@@ -437,9 +494,37 @@ class CarryRepository(context: Context) {
         }
     }
 
-    private fun onEvent(nodeId: String, sessionId: String?, seq: Long, event: JsonObject) {
+    private fun onEvent(
+        nodeId: String,
+        sessionId: String?,
+        seq: Long,
+        event: JsonObject,
+        replayAfterSnapshot: Boolean = false,
+        allowWhileSyncing: Boolean = false,
+    ) {
         val type = event["type"]?.jsonPrimitive?.contentOrNull ?: return
         val sid = sessionId ?: event["sessionId"]?.jsonPrimitive?.contentOrNull
+        if (sid != null) {
+            val key = sessionKey(nodeId, sid)
+            if (!allowWhileSyncing && syncing.contains(key)) {
+                synchronized(snapshotGuard) {
+                    if (syncing.contains(key)) {
+                        pendingSnapshotEvents
+                            .computeIfAbsent(key) { java.util.concurrent.CopyOnWriteArrayList() }
+                            .add(seq to event)
+                        return
+                    }
+                }
+            }
+            // 快照只包含消息正文，不含工具卡；在途的 tool.* / message.final 必须在快照落地后补放，
+            // 否则这些事件的分片 seq 会被快照水位误判为“已包含”而丢失。
+            val keepAfterSnapshot = replayAfterSnapshot && (type.startsWith("tool.") || type == "message.final")
+            // 重连会重放 journal；已应用过的 seq 直接丢弃，否则流式文本会翻倍。
+            if (!keepAfterSnapshot && !lastSeq.accept(key, seq)) {
+                Log.v("CarryRepo", "丢弃重复事件 $type seq=$seq")
+                return
+            }
+        }
         when (type) {
             "session.updated" -> (event["session"] as? JsonObject)?.let { upsertSession(nodeId, parseSession(nodeId, it)) }
             "message.delta" -> sid?.let { applyDelta(it, event) }
@@ -457,7 +542,10 @@ class CarryRepository(context: Context) {
             "approval.resolved" -> {
                 val id = event["approvalId"]?.jsonPrimitive?.contentOrNull
                 _approvals.value = _approvals.value.filterNot { it.id == id }
-                id?.let { NotificationManagerCompat.from(appContext).cancel(it.hashCode()) }
+                id?.let {
+                    notifiedApprovals.remove(it)
+                    NotificationManagerCompat.from(appContext).cancel(it.hashCode())
+                }
             }
             "run.state" -> sid?.let { onRunState(it, event) }
             "session.conflict" -> sid?.let {
@@ -520,13 +608,15 @@ class CarryRepository(context: Context) {
         val id = event["toolCallId"]?.jsonPrimitive?.contentOrNull ?: return
         val name = event["toolName"]?.jsonPrimitive?.contentOrNull ?: "tool"
         val args = event["args"]?.toString() ?: ""
-        val list = (_messages.value[key] ?: emptyList()) + ChatMessage(
+        val list = _messages.value[key] ?: emptyList()
+        // 快照后补放与 journal 重放都可能重复投递 tool.started，按 toolCallId 去重。
+        if (list.any { it.tool?.id == id }) return
+        _messages.value = _messages.value + (key to (list + ChatMessage(
             id = "tool-$id",
             sessionId = sessionId,
             role = "tool",
             tool = ToolCall(id = id, name = name, args = args, status = "running"),
-        )
-        _messages.value = _messages.value + (key to list)
+        )))
     }
 
     private fun applyToolUpdated(sessionId: String, event: JsonObject) {
@@ -640,3 +730,31 @@ class CarryRepository(context: Context) {
 private fun JsonObject.str(key: String): String? = (this[key] as? JsonPrimitive)?.contentOrNull
 private fun JsonObject.bool(key: String, default: Boolean = false): Boolean =
     (this[key] as? JsonPrimitive)?.contentOrNull?.toBooleanStrictOrNull() ?: default
+
+/**
+ * 每会话事件水位：seq 在会话内单调递增，因此 `seq <= 已知水位` 就是重放或重复投递。
+ * 重连补洞（snapshot 自带 lastSeq）时用 [observe] 抬高水位。
+ */
+internal class SeqWatermark {
+    private val watermarks = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    /** 接受并推进水位；已应用过的 seq 返回 false。 */
+    fun accept(key: String, seq: Long): Boolean {
+        if (seq <= 0) return true
+        while (true) {
+            val previous = watermarks[key] ?: 0L
+            if (seq <= previous) return false
+            if (watermarks.putIfAbsent(key, seq) == null || watermarks.replace(key, previous, seq)) return true
+        }
+    }
+
+    /** 记录服务端已确认的水位（快照 lastSeq），不向前回退。 */
+    fun observe(key: String, seq: Long) {
+        if (seq <= 0) return
+        watermarks.merge(key, seq) { a, b -> maxOf(a, b) }
+    }
+
+    fun clear(keyPrefix: String) {
+        watermarks.keys.removeIf { it.startsWith(keyPrefix) }
+    }
+}

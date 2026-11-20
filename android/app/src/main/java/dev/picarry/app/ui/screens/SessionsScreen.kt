@@ -33,7 +33,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -65,14 +65,21 @@ import dev.picarry.app.ui.theme.Violet
 private val filters = listOf("全部" to "all", "运行中" to "running", "等待审批" to "approval")
 
 @Composable
-fun SessionsScreen(repo: CarryRepository, onOpenChat: (String, String) -> Unit, onPair: () -> Unit) {
+fun SessionsScreen(
+    repo: CarryRepository,
+    filterNodeId: String? = null,
+    onOpenChat: (String, String) -> Unit,
+    onPair: () -> Unit,
+) {
     val sessions by repo.sessions.collectAsState()
     val nodes by repo.nodes.collectAsState()
     val link by repo.link.collectAsState()
-    var query by remember { mutableStateOf("") }
-    var filter by remember { mutableStateOf("all") }
+    var query by rememberSaveable { mutableStateOf("") }
+    var filter by rememberSaveable { mutableStateOf("all") }
 
-    val filtered = sessions.filter { s ->
+    // 从节点卡片进来时只看该节点的会话；底部 tab 不传 nodeId，保持全量。
+    val scoped = if (filterNodeId == null) sessions else sessions.filter { it.nodeId == filterNodeId }
+    val filtered = scoped.filter { s ->
         val matchQuery = query.isBlank() ||
             s.title.contains(query, true) ||
             s.preview.contains(query, true) ||
@@ -93,7 +100,8 @@ fun SessionsScreen(repo: CarryRepository, onOpenChat: (String, String) -> Unit, 
         item {
             ScreenHeader(
                 title = "会话",
-                subtitle = "按节点分组 · 今天 ${sessions.size} 个会话",
+                subtitle = if (filterNodeId == null) "按节点分组 · 今天 ${sessions.size} 个会话"
+                else "${nodes.firstOrNull { it.id == filterNodeId }?.name ?: filterNodeId.take(8)} · ${scoped.size} 个会话",
                 actions = {
                     Box(
                         Modifier
@@ -147,9 +155,9 @@ fun SessionsScreen(repo: CarryRepository, onOpenChat: (String, String) -> Unit, 
                 filters.forEach { (label, id) ->
                     val active = filter == id
                     val count = when (id) {
-                        "running" -> sessions.count { it.isRunning }
-                        "approval" -> sessions.count { it.pendingApprovals > 0 }
-                        else -> sessions.size
+                        "running" -> scoped.count { it.isRunning }
+                        "approval" -> scoped.count { it.pendingApprovals > 0 }
+                        else -> scoped.size
                     }
                     Row(
                         Modifier

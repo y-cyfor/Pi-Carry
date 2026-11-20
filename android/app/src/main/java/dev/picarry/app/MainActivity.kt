@@ -67,9 +67,12 @@ import dev.picarry.app.ui.theme.TextMuted
 import dev.picarry.app.ui.theme.TextPrimary
 import dev.picarry.app.ui.theme.Violet
 
+private const val KEY_PAIR_CONSUMED = "pair_consumed"
+
 class MainActivity : ComponentActivity() {
     private val notifPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
     private var pairUri by mutableStateOf<String?>(null)
+    private var pairConsumed = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -79,7 +82,9 @@ class MainActivity : ComponentActivity() {
             notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
         ContextCompat.startForegroundService(this, Intent(this, CarryService::class.java))
-        pairUri = intent?.data?.toString()
+        // 深链只消费一次：旋转/进程重建后不能再把用户拽回配对页。
+        pairConsumed = savedInstanceState?.getBoolean(KEY_PAIR_CONSUMED) ?: false
+        if (!pairConsumed) pairUri = intent?.data?.toString()
         setContent {
             val repo = (application as PiCarryApp).repo
             val themeMode by repo.themeMode.collectAsState()
@@ -89,7 +94,11 @@ class MainActivity : ComponentActivity() {
                 else -> isSystemInDarkTheme()
             }
             PiCarryTheme(darkTheme = dark) {
-                PiCarryAppRoot(repo, pairUri)
+                PiCarryAppRoot(repo, pairUri) {
+                    pairUri = null
+                    pairConsumed = true
+                    intent?.let { it.data = null }
+                }
             }
         }
     }
@@ -97,33 +106,62 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        pairConsumed = false
         pairUri = intent.data?.toString()
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putBoolean(KEY_PAIR_CONSUMED, pairConsumed)
+        super.onSaveInstanceState(outState)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        (application as PiCarryApp).repo.setAppForeground(true)
+    }
+
+    override fun onStop() {
+        (application as PiCarryApp).repo.setAppForeground(false)
+        super.onStop()
     }
 }
 
 object Routes {
     const val Nodes = "nodes"
+
+    /** 底部 tab：全量会话（单独 destination，避免 restoreState 把节点过滤参数带回来）。 */
     const val Sessions = "sessions"
+
+    /** 节点卡片进入：只着该节点的会话。 */
+    const val SessionsByNode = "sessions?nodeId={nodeId}"
     const val Settings = "settings"
     const val Chat = "chat/{nodeId}/{sessionId}"
     const val Pairing = "pairing?uri={uri}"
+
+    fun sessionsByNode(nodeId: String) =
+        "sessions?nodeId=${java.net.URLEncoder.encode(nodeId, "UTF-8")}"
 
     fun chat(nodeId: String, sessionId: String) = "chat/$nodeId/$sessionId"
     fun pairing(uri: String? = null) = if (uri.isNullOrBlank()) "pairing" else "pairing?uri=${java.net.URLEncoder.encode(uri, "UTF-8")}"
 }
 
 @Composable
-fun PiCarryAppRoot(repo: dev.picarry.app.data.CarryRepository, initialPairUri: String?) {
+fun PiCarryAppRoot(
+    repo: dev.picarry.app.data.CarryRepository,
+    initialPairUri: String?,
+    onPairUriConsumed: () -> Unit = {},
+) {
     val nav = rememberNavController()
     val backStack by nav.currentBackStackEntryAsState()
-    // 从相机/浏览器扫描二维码冷启动或热启动时，直接进入配对页。
+    // 从相机/浏览器扫描二维码冷启动或热启动时，直接进入配对页；消费后置空，避免旋转重新导航。
     LaunchedEffect(initialPairUri) {
         if (!initialPairUri.isNullOrBlank()) {
             nav.navigate(Routes.pairing(initialPairUri)) { launchSingleTop = true }
+            onPairUriConsumed()
         }
     }
     val route = backStack?.destination?.route ?: Routes.Nodes
-    val showBar = route in listOf(Routes.Nodes, Routes.Sessions, Routes.Settings)
+    val showBar = route in setOf(Routes.Nodes, Routes.Sessions, Routes.SessionsByNode, Routes.Settings)
     CarryBackground {
         Column(Modifier.fillMaxSize()) {
             Box(Modifier.weight(1f)) {
@@ -136,12 +174,23 @@ fun PiCarryAppRoot(repo: dev.picarry.app.data.CarryRepository, initialPairUri: S
                         NodesScreen(
                             repo = repo,
                             onPair = { nav.navigate(Routes.pairing()) },
-                            onOpenSessions = { nodeId -> nav.navigate(Routes.Sessions) },
+                            onOpenSessions = { nodeId -> nav.navigate(Routes.sessionsByNode(nodeId)) },
                         )
                     }
                     composable(Routes.Sessions) {
                         SessionsScreen(
                             repo = repo,
+                            onOpenChat = { nodeId, sessionId -> nav.navigate(Routes.chat(nodeId, sessionId)) },
+                            onPair = { nav.navigate(Routes.pairing()) },
+                        )
+                    }
+                    composable(
+                        Routes.SessionsByNode,
+                        arguments = listOf(navArgument("nodeId") { type = NavType.StringType; defaultValue = "" }),
+                    ) { entry ->
+                        SessionsScreen(
+                            repo = repo,
+                            filterNodeId = entry.arguments?.getString("nodeId")?.ifBlank { null },
                             onOpenChat = { nodeId, sessionId -> nav.navigate(Routes.chat(nodeId, sessionId)) },
                             onPair = { nav.navigate(Routes.pairing()) },
                         )
@@ -201,7 +250,7 @@ private fun BottomBar(nav: NavHostController, route: String) {
             BarItem("节点", Icons.Outlined.Hub, route == Routes.Nodes) {
                 nav.navigate(Routes.Nodes) { popUpTo(nav.graph.findStartDestination().id) { saveState = true }; launchSingleTop = true; restoreState = true }
             }
-            BarItem("会话", Icons.Outlined.Forum, route == Routes.Sessions) {
+            BarItem("会话", Icons.Outlined.Forum, route == Routes.Sessions || route == Routes.SessionsByNode) {
                 nav.navigate(Routes.Sessions) { popUpTo(nav.graph.findStartDestination().id) { saveState = true }; launchSingleTop = true; restoreState = true }
             }
             BarItem("设置", Icons.Outlined.Settings, route == Routes.Settings) {

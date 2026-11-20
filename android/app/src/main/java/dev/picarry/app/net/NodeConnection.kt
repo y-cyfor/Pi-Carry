@@ -33,7 +33,6 @@ import tech.annexflow.iroh4k.SendStream
 import tech.annexflow.iroh4k.SocketAddr
 import tech.annexflow.iroh4k.connect
 import tech.annexflow.iroh4k.openBi
-import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
@@ -50,6 +49,10 @@ class NodeConnection(
 ) {
     companion object {
         private const val TAG = "CarryConn"
+        private const val HEARTBEAT_MS = 15_000L
+        // 超过这个时长没收到任何 pong 就认为连接已半开（NAT 超时等），主动断开重连。
+        private const val HEARTBEAT_TIMEOUT_MS = 45_000L
+        private const val PONG = "pong"
         val ALPN = "pi-carry/1".encodeToByteArray()
     }
 
@@ -65,6 +68,10 @@ class NodeConnection(
     @Volatile private var connection: Connection? = null
 
     @Volatile private var send: SendStream? = null
+
+    @Volatile private var lastPongAt: Long = 0L
+
+    private fun now(): Long = System.nanoTime() / 1_000_000
 
     fun start() {
         if (serveJob?.isActive == true) return
@@ -126,12 +133,19 @@ class NodeConnection(
         onHandshake(parsed.payload ?: JsonObject(emptyMap()))
 
         // 响应和事件共用同一条双向控制流，客户端只维护一个读取循环。
+        lastPongAt = now()
         coroutineScope {
             val control = launch { readLoop(bi.recv) }
             val ping = launch {
                 while (isActive) {
-                    delay(15_000)
-                    runCatching { write(Wire.ping(UUID.randomUUID().toString())) }
+                    delay(HEARTBEAT_MS)
+                    val idle = now() - lastPongAt
+                    if (idle > HEARTBEAT_TIMEOUT_MS) {
+                        // 只发不校验会让 NAT 半开连接假在线；这里抛出让 start() 走重连。
+                        Log.w(TAG, "节点 ${node.name} 心跳超时 ${idle}ms，主动断开重连")
+                        throw IllegalStateException("心跳超时")
+                    }
+                    runCatching { write(Wire.ping(System.currentTimeMillis())) }
                 }
             }
             control.join()
@@ -161,15 +175,29 @@ class NodeConnection(
 
     private suspend fun readLoop(recv: RecvStream) {
         while (true) {
-            val frame = Wire.parse(readJson(recv))
-            when (frame.type) {
-                "response" -> frame.id?.let { pending.remove(it)?.complete(frame) }
-                "event" -> {
-                    val event = frame.event ?: continue
-                    onEvent(frame.sessionId, frame.seq, event)
-                    runCatching { write(Wire.ack(frame.sessionId, frame.seq)) }
+            val text = readJson(recv)
+            var ackedSeq = 0L
+            var ackedSession: String? = null
+            var needsAck = false
+            val handled = runCatching {
+                val frame = Wire.parse(text)
+                when (frame.type) {
+                    "response" -> frame.id?.let { pending.remove(it)?.complete(frame) }
+                    "event" -> frame.event?.let {
+                        // 先登记 seq 再回调：回调抛异常时也要 ack，否则服务端会重复重放该帧。
+                        ackedSeq = frame.seq
+                        ackedSession = frame.sessionId
+                        needsAck = true
+                        onEvent(frame.sessionId, frame.seq, it)
+                    }
+                    PONG -> lastPongAt = now()
                 }
             }
+            if (handled.isFailure) {
+                // 单条畸形帧只丢弃（能识别 seq 时仍回 ack），否则会整条连接重连死循环。
+                Log.w(TAG, "丢弃异常帧: ${handled.exceptionOrNull()?.message}")
+            }
+            if (needsAck) runCatching { write(Wire.ack(ackedSession, ackedSeq)) }
         }
     }
 

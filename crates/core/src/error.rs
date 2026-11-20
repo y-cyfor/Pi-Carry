@@ -36,7 +36,7 @@ pub enum CoreError {
 impl CoreError {
     pub fn code(&self) -> ErrorCode {
         match self {
-            Self::Protocol(p) => p.code,
+            Self::Protocol(p) => p.code.clone(),
             Self::Config(_) | Self::Toml(_) => ErrorCode::InvalidArgument,
             Self::PiNotInstalled(_) => ErrorCode::PiNotInstalled,
             Self::Pi(_) => ErrorCode::PiSpawnFailed,

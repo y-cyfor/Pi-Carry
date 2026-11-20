@@ -18,6 +18,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
 
+/// audit 日志保留天数（与 journal 的配置化保留期解耦）。
+const AUDIT_RETENTION_DAYS: i64 = 30;
+
 pub struct BridgeOptions {
     pub config: Config,
     pub paths: Paths,
@@ -145,9 +148,11 @@ impl Bridge {
     fn start_expiry_ticker(self: &Arc<Self>) {
         let approvals = self.approvals.clone();
         let sessions = self.sessions.clone();
+        let bridge = self.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(5));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut ticks: u64 = 0;
             loop {
                 tick.tick().await;
                 if let Err(e) = approvals.expire_due() {
@@ -155,8 +160,31 @@ impl Bridge {
                 }
                 // 保持会话摘要的 updated_at 与磁盘一致，成本很低。
                 let _ = sessions.list();
+                ticks += 1;
+                // 保留策略只需每 5 分钟跑一次。
+                if ticks % 60 == 0 {
+                    if let Err(e) = bridge.retention_sweep() {
+                        tracing::warn!(error = %e, "journal/audit 清理失败");
+                    }
+                }
             }
         });
+    }
+
+    /// 按配置的保留天数与每会话事件上限清理 journal，并清理超过 30 天的 audit。
+    /// 只操作 SQL 行，不读取会话文件内容。
+    fn retention_sweep(&self) -> Result<()> {
+        let now = self.clock.now();
+        let cfg = &self.config.sessions;
+        let journal_cutoff =
+            crate::rfc3339(now - chrono::Duration::days(cfg.journal_retention_days));
+        self.store.prune_journal_before(&journal_cutoff)?;
+        for id in self.store.journal_session_ids()? {
+            self.store.prune_journal(&id, cfg.journal_max_events)?;
+        }
+        let audit_cutoff = crate::rfc3339(now - chrono::Duration::days(AUDIT_RETENTION_DAYS));
+        self.store.prune_audit_before(&audit_cutoff)?;
+        Ok(())
     }
 
     pub fn endpoint_id(&self) -> String {

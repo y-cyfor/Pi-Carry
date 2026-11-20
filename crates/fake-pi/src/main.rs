@@ -238,6 +238,10 @@ async fn handle(state: &Arc<State>, out: &Out, ty: &str, v: &Value) -> Result<Va
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
+            // `!fail` 前缀模拟真 pi 拒绝 prompt（消息非法/队列已满）。
+            if message.starts_with("!fail") {
+                return Err("fake-pi 拒绝该 prompt".to_string());
+            }
             let images = v.get("images").cloned().unwrap_or_else(|| json!([]));
             spawn_run(state.clone(), out.clone(), message, images);
             Ok(json!({}))

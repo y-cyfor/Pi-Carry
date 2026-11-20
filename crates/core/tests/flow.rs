@@ -51,6 +51,53 @@ async fn wait_event(
 }
 
 #[tokio::test]
+async fn rejected_prompt_reports_error_and_returns_idle() {
+    let (bridge, _tmp) = bridge_with("echo").await;
+    let summary = bridge.sessions.create("").await.unwrap();
+    let mut events = bridge.sessions.subscribe();
+
+    // fake-pi 对 `!fail` 开头的 prompt 返回错误（模拟真 pi 拒绝）。
+    bridge
+        .sessions
+        .prompt(
+            PromptPayload {
+                session_id: summary.id.clone(),
+                message: "!fail".into(),
+                mode: "auto".into(),
+                client_id: "c-fail".into(),
+                images: vec![],
+            },
+            "device-1",
+        )
+        .await
+        .unwrap();
+
+    let err = wait_event(&mut events, "error", 5).await;
+    assert_eq!(err["source"], "prompt");
+    assert!(err["message"].as_str().unwrap().contains("拒绝"));
+    // 拒绝后状态必须回到 idle，而不是永久 streaming。
+    assert_eq!(bridge.sessions.summary(&summary.id).unwrap().status, "idle");
+
+    // writer 已释放，可继续正常发送。
+    bridge
+        .sessions
+        .prompt(
+            PromptPayload {
+                session_id: summary.id.clone(),
+                message: "你好".into(),
+                mode: "auto".into(),
+                client_id: "c-ok".into(),
+                images: vec![],
+            },
+            "device-1",
+        )
+        .await
+        .unwrap();
+    let delta = wait_event(&mut events, "message.delta", 5).await;
+    assert_eq!(delta["kind"], "text");
+}
+
+#[tokio::test]
 async fn create_prompt_and_stream() {
     let (bridge, _tmp) = bridge_with("echo").await;
     let summary = bridge.sessions.create("").await.unwrap();

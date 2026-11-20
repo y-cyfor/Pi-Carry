@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// 稳定的错误码字符串。未知码在客户端保留原文，便于前向兼容。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ErrorCode {
     AuthRequired,
     AuthFailed,
@@ -30,10 +30,12 @@ pub enum ErrorCode {
     SlowConsumer,
     Conflict,
     Internal,
+    /// 未知错误码：保留原始字符串，避免整帧反序列化失败。
+    Unknown(String),
 }
 
 impl ErrorCode {
-    pub const fn as_str(self) -> &'static str {
+    pub fn as_str(&self) -> &str {
         match self {
             Self::AuthRequired => "AUTH_REQUIRED",
             Self::AuthFailed => "AUTH_FAILED",
@@ -60,10 +62,11 @@ impl ErrorCode {
             Self::SlowConsumer => "SLOW_CONSUMER",
             Self::Conflict => "CONFLICT",
             Self::Internal => "INTERNAL",
+            Self::Unknown(code) => code.as_str(),
         }
     }
 
-    pub const fn retryable(self) -> bool {
+    pub fn retryable(&self) -> bool {
         matches!(
             self,
             Self::SessionBusy
@@ -119,11 +122,12 @@ impl<'de> Deserialize<'de> for ErrorCode {
             Self::Internal,
         ];
         for code in known {
-            if code.as_str() == s {
+            if code.as_str() == s.as_str() {
                 return Ok(code);
             }
         }
-        Err(serde::de::Error::custom(format!("unknown error code: {s}")))
+        // 未知码不报错：保留原文，前向兼容（旧客户端仍能处理整帧）。
+        Ok(Self::Unknown(s))
     }
 }
 
@@ -140,10 +144,11 @@ pub struct ProtocolError {
 
 impl ProtocolError {
     pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
+        let retryable = code.retryable();
         Self {
             code,
             message: message.into(),
-            retryable: code.retryable(),
+            retryable,
             details: serde_json::Value::Null,
         }
     }
@@ -176,4 +181,29 @@ pub enum FrameError {
     LineTooLong(usize),
     #[error("非法 UTF-8: {0}")]
     Utf8(#[from] std::str::Utf8Error),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn unknown_error_code_keeps_raw_string() {
+        let err: ProtocolError =
+            serde_json::from_value(json!({"code": "FUTURE_CODE", "message": "未来版本"})).unwrap();
+        assert_eq!(err.code, ErrorCode::Unknown("FUTURE_CODE".to_string()));
+        assert_eq!(err.code.as_str(), "FUTURE_CODE");
+        let back = serde_json::to_value(&err).unwrap();
+        assert_eq!(back["code"], "FUTURE_CODE");
+        assert_eq!(back["message"], "未来版本");
+    }
+
+    #[test]
+    fn known_error_code_still_maps_and_stays_retryable() {
+        let code: ErrorCode = serde_json::from_value(json!("SESSION_BUSY")).unwrap();
+        assert_eq!(code, ErrorCode::SessionBusy);
+        assert!(code.retryable());
+        assert!(!ErrorCode::Unknown("X".to_string()).retryable());
+    }
 }

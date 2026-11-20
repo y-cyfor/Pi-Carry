@@ -53,6 +53,7 @@ impl Server {
         let secret = SecretKey::from_bytes(&key);
         let mut builder = match config.transport.relay_mode.as_str() {
             "disabled" => Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled),
+            // 与配置校验保持同一集合：`default` 是 `n0` 的别名。
             "n0" | "default" => Endpoint::builder(presets::N0),
             "custom" => {
                 let urls = config
@@ -424,21 +425,9 @@ impl Server {
                 format!("设备数已达上限 {}", self.config.transport.max_devices),
             )));
         }
-        let capability = if hello.client.device_class == "desktop" {
-            let full = self
-                .store
-                .list_devices()?
-                .into_iter()
-                .filter(|d| d.revoked_at.is_none() && d.capability == "full")
-                .count();
-            if full >= 3 {
-                "control".to_string()
-            } else {
-                "full".to_string()
-            }
-        } else {
-            self.config.sessions.default_capability.clone()
-        };
+        // 新设备能力完全由服务端策略决定：客户端自报的 deviceClass 不可信，
+        // 不能凭它拿到高于 defaultCapability 的能力。
+        let capability = self.config.sessions.default_capability.clone();
         let now = crate::rfc3339(Utc::now());
         let device = DeviceRecord {
             id: remote_id.to_string(),
@@ -603,20 +592,27 @@ impl Server {
                     .map_err(|e| CoreError::InvalidArgument(format!("prompt 载荷非法: {e}")))?;
                 let client_id = p.client_id.clone();
                 let session_id = p.session_id.clone();
-                if !client_id.is_empty() && self.store.has_client_id(&device.id, &client_id)? {
-                    return Ok(json!({"accepted": true, "duplicate": true}));
-                }
-                let result = self.sessions.prompt(p, &device.id).await?;
-                // 只有真正交给 pi 之后才记幂等键，避免失败后重试被误判为重复。
-                if !client_id.is_empty() {
-                    self.store.remember_client_id(
+                // 先原子抢占幂等键再执行：并发重试时只有一方能抢占成功。
+                if !client_id.is_empty()
+                    && !self.store.claim_client_id(
                         &device.id,
                         &client_id,
                         &session_id,
                         &crate::rfc3339(Utc::now()),
-                    )?;
+                    )?
+                {
+                    return Ok(json!({"accepted": true, "duplicate": true}));
                 }
-                Ok(result)
+                match self.sessions.prompt(p, &device.id).await {
+                    Ok(result) => Ok(result),
+                    Err(e) => {
+                        // 执行失败释放幂等键，允许客户端重试同一 clientId。
+                        if !client_id.is_empty() {
+                            self.store.release_client_id(&device.id, &client_id)?;
+                        }
+                        Err(e)
+                    }
+                }
             }
             "prompt.abort" => {
                 require(cap, "control")?;
@@ -758,7 +754,8 @@ impl Server {
                 Ok(json!({"devices": list}))
             }
             "device.revoke" => {
-                require(cap, "full")?;
+                // 吊销属于 owner（本机）职责；full 设备可改模型/设置，但不能互相吊销。
+                require(cap, "owner")?;
                 let id = payload
                     .get("deviceId")
                     .and_then(Value::as_str)

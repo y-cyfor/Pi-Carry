@@ -499,7 +499,7 @@
 
       <!-- 设备 -->
       <section class="page" id="page-devices">
-        <div class="banner"><span class="ico" data-icon="shield" style="width:17px;height:17px"></span><div>设备权限分四级：read 只读、control 可发消息/审批、full 可改模型与设置、owner 可管理设备。桌面设备 full 最多 3 台。</div></div>
+        <div class="banner"><span class="ico" data-icon="shield" style="width:17px;height:17px"></span><div>设备权限分四级：read 只读、control 可发消息/审批、full 可改模型与设置、owner 可管理设备。</div></div>
         <div class="section-head"><h3>已授权设备</h3><span class="caption" id="devices-caption">0 台</span></div>
         <div class="devices" id="devices-list"><div class="empty"><b>还没有配对设备</b>打开配对页生成二维码。</div></div>
       </section>
@@ -535,7 +535,7 @@
               <div class="field"><label>pi 可执行文件</label><input class="input mono" id="set-pi-path" placeholder="pi" /><div class="hint">留空使用 PATH 中的 pi；也可以填写绝对路径。</div></div>
               <div class="field"><label>新设备默认权限</label>
                 <div class="segment" id="set-capability"><button data-value="full">full</button><button data-value="control">control</button><button data-value="read">read</button></div>
-                <div class="hint">手机默认 control；桌面配对会自动申请 full（上限 3 台）。</div>
+                <div class="hint">新设备默认 full：可发消息、审批、切换模型与节点设置；如需限制权限，请在本机修改配置。</div>
               </div>
               <div class="field"><label>审批超时（秒）</label><input class="input mono" id="set-approval-timeout" type="number" min="10" max="3600" /></div>
             </div>

@@ -47,7 +47,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -62,6 +62,7 @@ import dev.picarry.app.ui.components.CarryCard
 import dev.picarry.app.ui.components.DividerLine
 import dev.picarry.app.ui.components.IconBadge
 import dev.picarry.app.ui.components.MonoLabel
+import dev.picarry.app.ui.components.NullableStringSaver
 import dev.picarry.app.ui.components.Pill
 import dev.picarry.app.ui.components.ScreenHeader
 import dev.picarry.app.ui.components.StatusDot
@@ -83,10 +84,8 @@ fun SettingsScreen(repo: CarryRepository, onPair: () -> Unit) {
     val nodes by repo.nodes.collectAsState()
     val link by repo.link.collectAsState()
     val themeMode by repo.themeMode.collectAsState()
-    var directPreferred by remember { mutableStateOf(repo.settingBool("direct_preferred", true)) }
-    var approvalNotify by remember { mutableStateOf(repo.settingBool("notify_approval", true)) }
-    var completeNotify by remember { mutableStateOf(repo.settingBool("notify_complete", false)) }
-    var confirmingRemove by remember { mutableStateOf<String?>(null) }
+    var approvalNotify by rememberSaveable { mutableStateOf(repo.settingBool("notify_approval", true)) }
+    var confirmingRemove by rememberSaveable(stateSaver = NullableStringSaver) { mutableStateOf<String?>(null) }
 
     Column(
         Modifier.fillMaxSize().statusBarsPadding().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp),
@@ -134,12 +133,11 @@ fun SettingsScreen(repo: CarryRepository, onPair: () -> Unit) {
                     trailing = { MonoLabel("n0 / custom", color = TextMuted) },
                 )
                 DividerLine()
-                SettingToggle(
+                SettingRow(
                     icon = Icons.Outlined.Lan,
                     title = "直连优先",
-                    subtitle = "UDP 打洞失败时再走 relay",
-                    checked = directPreferred,
-                    onChange = { directPreferred = it; repo.setSettingBool("direct_preferred", it) },
+                    subtitle = "始终先试 UDP 直连，失败再走 relay",
+                    trailing = { MonoLabel("默认开启", color = TextMuted) },
                 )
                 DividerLine()
                 SettingRow(
@@ -161,14 +159,6 @@ fun SettingsScreen(repo: CarryRepository, onPair: () -> Unit) {
                     subtitle = "高风险操作立即提醒",
                     checked = approvalNotify,
                     onChange = { approvalNotify = it; repo.setSettingBool("notify_approval", it) },
-                )
-                DividerLine()
-                SettingToggle(
-                    icon = Icons.Outlined.Notifications,
-                    title = "完成通知",
-                    subtitle = "会话结束时提醒",
-                    checked = completeNotify,
-                    onChange = { completeNotify = it; repo.setSettingBool("notify_complete", it) },
                 )
             }
         }

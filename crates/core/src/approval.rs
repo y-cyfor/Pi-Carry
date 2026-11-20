@@ -292,7 +292,6 @@ pub enum Decision {
 
 struct Waiter {
     session_id: String,
-    view: ApprovalView,
     tx: oneshot::Sender<Decision>,
 }
 
@@ -404,7 +403,6 @@ impl ApprovalManager {
             view.id.clone(),
             Waiter {
                 session_id: session_id.to_string(),
-                view: view.clone(),
                 tx,
             },
         );
@@ -504,27 +502,12 @@ impl ApprovalManager {
             .parse::<DateTime<Utc>>()
             .map_err(|e| CoreError::Internal(format!("审批过期时间非法: {e}")))?;
         if expires <= now {
-            expire_one(&self.inner, id, "expired")?;
+            // 并发下可能已被过期扫描处理：无论如何都不放行。
+            let _ = expire_one(&self.inner, id, "expired")?;
             return Err(CoreError::Protocol(pi_carry_protocol::ProtocolError::new(
                 pi_carry_protocol::ErrorCode::ApprovalExpired,
                 format!("审批 {id} 已过期"),
             )));
-        }
-        // 先落规则再改状态：状态更新是原子的，规则多存一条无害。
-        if state == "allowed"
-            && remember
-            && self.inner.config.allow_remember
-            && pending.view.category == "exec"
-        {
-            if let Some(cmd) = pending.view.command.as_deref() {
-                self.inner.store.add_remembered_rule(
-                    &self.inner.ids.next_id(),
-                    &pending.view.session_id,
-                    &pending.view.tool_name,
-                    cmd,
-                    &crate::rfc3339(now),
-                )?;
-            }
         }
         if !self
             .inner
@@ -535,6 +518,25 @@ impl ApprovalManager {
                 pi_carry_protocol::ErrorCode::ApprovalAlreadyResolved,
                 format!("审批 {id} 已被处理"),
             )));
+        }
+        // 只有 CAS 成功后才落“记住”规则：并发 deny 抢先时不能留下放行规则。
+        // 规则是附加优化，写入失败不应回滚已生效的审批。
+        if state == "allowed"
+            && remember
+            && self.inner.config.allow_remember
+            && pending.view.category == "exec"
+        {
+            if let Some(cmd) = pending.view.command.as_deref() {
+                if let Err(e) = self.inner.store.add_remembered_rule(
+                    &self.inner.ids.next_id(),
+                    &pending.view.session_id,
+                    &pending.view.tool_name,
+                    cmd,
+                    &crate::rfc3339(now),
+                ) {
+                    tracing::warn!(error = %e, approval = id, "记住审批规则失败");
+                }
+            }
         }
         if let Some(w) = self
             .inner
@@ -584,6 +586,13 @@ impl ApprovalManager {
             )));
         }
         let now = self.inner.clock.now();
+        // 已过期的记录不可续命：否则吊销的审批会被“延长”重新变成有效。
+        if pending.view.expires_at.as_str() <= crate::rfc3339(now).as_str() {
+            return Err(CoreError::Protocol(pi_carry_protocol::ProtocolError::new(
+                pi_carry_protocol::ErrorCode::ApprovalExpired,
+                format!("审批 {id} 已过期，不可延长"),
+            )));
+        }
         let current = pending
             .view
             .expires_at
@@ -616,36 +625,25 @@ impl ApprovalManager {
     }
 
     /// 供测试/定时任务驱动过期。
+    /// 逐个走与 `resolve` 相同的顺序（先原子改状态，再通知 waiter），
+    /// 并且每次都回 store 核对真实 expires_at，避免把已延长的审批误判为过期。
     pub fn expire_due(&self) -> Result<usize> {
         let now = crate::rfc3339(self.inner.clock.now());
-        let due = self.inner.store.expire_approvals(&now)?;
-        if due > 0 {
-            let ids: Vec<String> = self
-                .inner
-                .waiters
-                .lock()
-                .expect("waiters poisoned")
-                .iter()
-                .filter(|(_, w)| w.view.expires_at.as_str() <= now.as_str())
-                .map(|(id, _)| id.clone())
-                .collect();
-            for id in ids {
-                if let Some(w) = self
-                    .inner
-                    .waiters
-                    .lock()
-                    .expect("waiters poisoned")
-                    .remove(&id)
-                {
-                    let _ = w.tx.send(Decision::Deny);
-                    let _ = self.inner.events.send(ApprovalEvent {
-                        session_id: w.session_id.clone(),
-                        event: events::approval_resolved(&id, "expired", "timeout", true),
-                    });
-                }
+        let ids: Vec<String> = self
+            .inner
+            .store
+            .list_pending_approvals(None)?
+            .into_iter()
+            .filter(|v| v.expires_at.as_str() <= now.as_str())
+            .map(|v| v.id)
+            .collect();
+        let mut expired = 0;
+        for id in ids {
+            if expire_one(&self.inner, &id, "timeout")? {
+                expired += 1;
             }
         }
-        Ok(due)
+        Ok(expired)
     }
 
     pub fn config(&self) -> &ApprovalsConfig {
@@ -653,30 +651,41 @@ impl ApprovalManager {
     }
 }
 
-fn expire_one(inner: &Arc<Inner>, id: &str, by: &str) -> Result<()> {
+/// 把一条确实到期的审批置为 expired；返回是否由本次调用完成了状态迁移。
+/// 顺序与 `resolve` 一致：先做 store 的原子 CAS，成功者再移除 waiter 并发送决定，
+/// 避免手机收到 allowed 而工具收到 denied 的 fail-closed 窗口。
+fn expire_one(inner: &Arc<Inner>, id: &str, by: &str) -> Result<bool> {
     let now = crate::rfc3339(inner.clock.now());
     // 可能已被批准、拒绝或延长：只有仍 pending 且确实到期才处理。
     let Some(pending) = inner.store.get_approval(id)? else {
-        return Ok(());
+        return Ok(false);
     };
     if pending.view.state != "pending" || pending.view.expires_at.as_str() > now.as_str() {
-        return Ok(());
+        return Ok(false);
     }
-    let Some(w) = inner.waiters.lock().expect("waiters poisoned").remove(id) else {
-        return Ok(());
-    };
-    inner
+    if !inner
         .store
-        .resolve_approval(id, "expired", by, &now, false)?;
-    let _ = w.tx.send(Decision::Deny);
+        .resolve_approval(id, "expired", by, &now, false)?
+    {
+        // 并发方（手机审批或另一次过期扫描）已完成迁移并负责通知 waiter。
+        return Ok(false);
+    }
+    let waiter = inner.waiters.lock().expect("waiters poisoned").remove(id);
+    let session_id = waiter
+        .as_ref()
+        .map(|w| w.session_id.clone())
+        .unwrap_or_else(|| pending.view.session_id.clone());
+    if let Some(w) = waiter {
+        let _ = w.tx.send(Decision::Deny);
+    }
     let _ = inner.events.send(ApprovalEvent {
-        session_id: w.session_id,
+        session_id,
         event: events::approval_resolved(id, "expired", by, true),
     });
     inner
         .store
         .audit(&now, by, "approval.expired", &json!({"approvalId": id}))?;
-    Ok(())
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -833,6 +842,66 @@ mod tests {
             .unwrap();
         let v = mgr.extend("a1", 300).unwrap();
         assert!(v.expires_at.as_str() <= "2026-11-19T08:07:00.000Z");
+    }
+
+    fn insert_pending(store: &Store, id: &str, expires_at: &str) {
+        let view = ApprovalView {
+            id: id.into(),
+            session_id: "s1".into(),
+            tool_name: "bash".into(),
+            category: "exec".into(),
+            risk: "high".into(),
+            summary: "x".into(),
+            command: Some("cargo test".into()),
+            path: None,
+            args: json!({}),
+            requested_at: "2026-11-19T08:00:00.000Z".into(),
+            expires_at: expires_at.into(),
+            remaining_seconds: 120,
+            state: "pending".into(),
+        };
+        store
+            .insert_approval(&PendingApproval {
+                view,
+                tool_call_id: "tc1".into(),
+                resolved_by: None,
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn extend_rejects_expired_approval() {
+        let (mgr, store, _clock) = setup();
+        insert_pending(&store, "a1", "2026-11-19T08:00:00.000Z");
+        let err = mgr.extend("a1", 60).unwrap_err();
+        assert_eq!(err.code(), pi_carry_protocol::ErrorCode::ApprovalExpired);
+        // 已过期记录不可续命。
+        let pending = store.get_approval("a1").unwrap().unwrap();
+        assert_eq!(pending.view.expires_at, "2026-11-19T08:00:00.000Z");
+    }
+
+    #[test]
+    fn expire_due_skips_extended_approval() {
+        let (mgr, store, clock) = setup();
+        insert_pending(&store, "a1", "2026-11-19T08:00:10.000Z");
+        mgr.extend("a1", 300).unwrap();
+        clock.advance_secs(20);
+        assert_eq!(mgr.expire_due().unwrap(), 0);
+        let pending = store.get_approval("a1").unwrap().unwrap();
+        assert_eq!(pending.view.state, "pending");
+    }
+
+    #[test]
+    fn expire_due_denies_genuinely_expired_without_waiter() {
+        let (mgr, store, clock) = setup();
+        insert_pending(&store, "a1", "2026-11-19T08:00:05.000Z");
+        clock.advance_secs(10);
+        assert_eq!(mgr.expire_due().unwrap(), 1);
+        assert_eq!(
+            store.get_approval("a1").unwrap().unwrap().view.state,
+            "expired"
+        );
+        assert!(mgr.extend("a1", 60).is_err(), "已过期后不可再延长");
     }
 
     #[test]

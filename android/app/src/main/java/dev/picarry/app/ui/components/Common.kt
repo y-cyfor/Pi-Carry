@@ -21,6 +21,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.ReadOnlyComposable
+import androidx.compose.runtime.saveable.Saver
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -41,6 +42,9 @@ import dev.picarry.app.ui.theme.TextMuted
 import dev.picarry.app.ui.theme.TextPrimary
 import dev.picarry.app.ui.theme.TextSecondary
 import dev.picarry.app.ui.theme.Violet
+
+/** `mutableStateOf<String?>` 存不进 Bundle；空串代表“无值”。 */
+internal val NullableStringSaver = Saver<String?, String>(save = { it.orEmpty() }, restore = { it.ifBlank { null } })
 
 @Composable
 fun CarryBackground(content: @Composable () -> Unit) {

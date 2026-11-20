@@ -38,6 +38,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -59,6 +60,7 @@ import dev.picarry.app.data.LinkState
 import dev.picarry.app.data.Node
 import dev.picarry.app.ui.components.CarryCard
 import dev.picarry.app.ui.components.MonoLabel
+import dev.picarry.app.ui.components.NullableStringSaver
 import dev.picarry.app.ui.theme.Amber
 import dev.picarry.app.ui.theme.Cyan
 import dev.picarry.app.ui.theme.Line
@@ -78,16 +80,21 @@ private data class PairInfo(
     val name: String = "",
 )
 
+/** Endpoint ID 是节点公钥的 64 位十六进制串，手输时先校验再落库。 */
+private val ENDPOINT_ID = Regex("^[0-9a-fA-F]{64}$")
+
 @Composable
 fun PairingScreen(repo: CarryRepository, initialUri: String, onBack: () -> Unit, onDone: () -> Unit) {
     val clipboard = LocalClipboardManager.current
     val link by repo.link.collectAsState()
-    var endpoint by remember { mutableStateOf("") }
-    var code by remember { mutableStateOf("") }
-    var uriText by remember { mutableStateOf(initialUri) }
-    var error by remember { mutableStateOf<String?>(null) }
-    var waitingId by remember { mutableStateOf<String?>(null) }
-    var parsed by remember { mutableStateOf<PairInfo?>(null) }
+    // 旋转/进程重建后输入不能丢：基本类型都存 rememberSaveable。
+    var endpoint by rememberSaveable(initialUri) { mutableStateOf(parsePairUri(initialUri)?.endpointId.orEmpty()) }
+    var code by rememberSaveable { mutableStateOf("") }
+    var uriText by rememberSaveable(initialUri) { mutableStateOf(initialUri) }
+    var error by rememberSaveable(stateSaver = NullableStringSaver) { mutableStateOf<String?>(null) }
+    var waitingId by rememberSaveable(stateSaver = NullableStringSaver) { mutableStateOf<String?>(null) }
+    // PairInfo 不是可保存类型：令牌与直连地址按链接文本重新解析，避免退化到只剩 Endpoint ID。
+    val parsed = remember(uriText) { parsePairUri(uriText) }
 
     val scanner = rememberLauncherForActivityResult(ScanContract()) { result ->
         val content = result.contents
@@ -95,18 +102,8 @@ fun PairingScreen(repo: CarryRepository, initialUri: String, onBack: () -> Unit,
             uriText = content
             val info = parsePairUri(content)
             if (info == null) error = "二维码不是有效的 pi-carry 配对链接" else {
-                parsed = info
                 endpoint = info.endpointId
                 error = null
-            }
-        }
-    }
-
-    LaunchedEffect(initialUri) {
-        if (initialUri.isNotBlank()) {
-            parsePairUri(initialUri)?.let {
-                parsed = it
-                endpoint = it.endpointId
             }
         }
     }
@@ -165,12 +162,9 @@ fun PairingScreen(repo: CarryRepository, initialUri: String, onBack: () -> Unit,
         Spacer(Modifier.height(22.dp))
         MonoLabel("或手动输入")
         Spacer(Modifier.height(8.dp))
-        Field(endpoint, { endpoint = it.trim(); parsed = null }, "Endpoint ID（64 位十六进制）")
+        Field(endpoint, { endpoint = it.trim().lowercase(); uriText = "" }, "Endpoint ID（64 位十六进制）")
         Spacer(Modifier.height(9.dp))
         Field(code, { code = it.filter(Char::isDigit).take(6) }, "6 位配对码", KeyboardType.NumberPassword, monospace = true, big = true)
-        if (parsed == null && endpoint.isBlank() && uriText.isBlank()) {
-            // 保持提示，减少空白感
-        }
         Spacer(Modifier.height(9.dp))
         Row(
             Modifier
@@ -183,7 +177,7 @@ fun PairingScreen(repo: CarryRepository, initialUri: String, onBack: () -> Unit,
                     uriText = text
                     val info = parsePairUri(text)
                     if (info == null) error = "剪贴板不是 pi-carry 配对链接" else {
-                        parsed = info; endpoint = info.endpointId; error = null
+                        endpoint = info.endpointId; error = null
                     }
                 }
                 .padding(horizontal = 12.dp, vertical = 11.dp),
@@ -227,8 +221,9 @@ fun PairingScreen(repo: CarryRepository, initialUri: String, onBack: () -> Unit,
         Button(
             onClick = {
                 val info = parsed
-                val id = info?.endpointId?.takeIf { it.isNotBlank() } ?: endpoint.ifBlank { "" }
+                val id = info?.endpointId ?: endpoint.trim()
                 if (id.isBlank()) { error = "请扫描二维码或输入 Endpoint ID"; return@Button }
+                if (!ENDPOINT_ID.matches(id)) { error = "Endpoint ID 必须是 64 位十六进制"; return@Button }
                 val token = info?.token.orEmpty()
                 val c = code.trim()
                 if (token.isBlank() && c.length != 6) { error = "请输入 6 位配对码"; return@Button }
@@ -305,8 +300,8 @@ private fun parsePairUri(raw: String): PairInfo? {
     return runCatching {
         val uri = Uri.parse(text)
         if (uri.scheme != "pi-carry" && uri.scheme != "picarry") return null
-        val endpoint = uri.getQueryParameter("endpoint") ?: uri.getQueryParameter("id") ?: return null
-        if (endpoint.length < 16) return null
+        val endpoint = (uri.getQueryParameter("endpoint") ?: uri.getQueryParameter("id") ?: return null).lowercase()
+        if (!ENDPOINT_ID.matches(endpoint)) return null
         PairInfo(
             endpointId = endpoint,
             token = uri.getQueryParameter("token").orEmpty(),

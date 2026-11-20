@@ -74,5 +74,39 @@ class WireTest {
         Wire.frame("x".repeat(Wire.MAX_EVENT + 1))
     }
 
+    @Test(expected = IllegalArgumentException::class)
+    fun parseRejectsNonObjectFrame() {
+        Wire.parse("[1,2,3]")
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun parseRejectsBrokenJson() {
+        Wire.parse("{\"type\":")
+    }
+
+    @Test
+    fun parseToleratesWrongFieldTypes() {
+        // 单条畸形字段不能让整条连接重连：能解析的部分要保留，不能硬 cast 崩溃。
+        val parsed = Wire.parse("""{"type":"event","sessionId":5,"seq":"x","event":{"type":"message.delta"}}""")
+        assertEquals("event", parsed.type)
+        assertEquals("5", parsed.sessionId)
+        assertEquals("无法解析的 seq 按 0 处理，不丢帧", 0L, parsed.seq)
+        assertEquals("message.delta", parsed.event!!["type"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun pingUsesNumericNonceForRustProtocol() {
+        // 服务端 ClientFrame::Ping.nonce 是 i64；字符串 nonce 会被协议层判为非法帧，永远收不到 pong。
+        val text = Wire.ping(123L)
+        assertTrue(text.contains("\"nonce\":123"))
+        assertFalse(text.contains("\"123\""))
+    }
+
+    @Test
+    fun parseReadsPongFrame() {
+        val parsed = Wire.parse("""{"type":"pong","nonce":"n1"}""")
+        assertEquals("pong", parsed.type)
+    }
+
     private fun kotlinx.serialization.json.JsonElement.jsonObject(): JsonObject = this as JsonObject
 }

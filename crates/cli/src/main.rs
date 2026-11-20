@@ -8,6 +8,7 @@ use pi_carry_core::paths::Paths;
 use pi_carry_core::store::Store;
 use pi_carry_protocol::PromptPayload;
 use serde_json::json;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -66,9 +67,20 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-async fn serve(_json: bool) -> anyhow::Result<()> {
+async fn serve(json: bool) -> anyhow::Result<()> {
     let options = BridgeOptions::load()?;
     let bridge = Bridge::start(options).await?;
+    if json {
+        let sessions = bridge.sessions.list()?.len();
+        let line = json!({
+            "endpointId": bridge.server.endpoint_id().to_string(),
+            "nodeName": bridge.config.node.name.clone(),
+            "relayMode": bridge.config.transport.relay_mode,
+            "sessions": sessions,
+        });
+        println!("{}", serde_json::to_string(&line)?);
+        std::io::stdout().flush()?;
+    }
     bridge.clone().run_until_signal().await?;
     Ok(())
 }

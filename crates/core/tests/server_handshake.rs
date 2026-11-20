@@ -8,12 +8,19 @@ use pi_carry_protocol::{
 use tempfile::TempDir;
 
 async fn start_bridge() -> (TempDir, std::sync::Arc<Bridge>) {
+    start_bridge_with(|_| {}).await
+}
+
+async fn start_bridge_with(
+    configure: impl FnOnce(&mut Config),
+) -> (TempDir, std::sync::Arc<Bridge>) {
     let dir = tempfile::tempdir().unwrap();
     let mut config = Config::default();
     config.node.name = "test-node".into();
     config.transport.relay_mode = "disabled".into();
     config.transport.bind_addr = Some("127.0.0.1:0".into());
     config.sessions.dir = dir.path().join("sessions").display().to_string();
+    configure(&mut config);
     let paths = Paths::at(dir.path().join("home"));
     let bridge = Bridge::start(BridgeOptions {
         config,
@@ -43,6 +50,56 @@ async fn call(
         .unwrap()
         .expect("连接被关闭");
     serde_json::from_slice(&bytes).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn self_reported_desktop_class_does_not_escalate() {
+    // 默认能力是其余新增设备的唯一来源，客户端自报 deviceClass 不得升权。
+    let (_dir, bridge) =
+        start_bridge_with(|c| c.sessions.default_capability = "control".into()).await;
+    let pairing = bridge.begin_pairing(None);
+    let socket = bridge.server.endpoint().bound_sockets()[0];
+    let client = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        .bind()
+        .await
+        .unwrap();
+    let addr = iroh::EndpointAddr::new(bridge.server.endpoint().id()).with_ip_addr(socket);
+    let conn = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        client.connect(addr, ALPN),
+    )
+    .await
+    .expect("connect 超时")
+    .expect("连接失败");
+    let (mut send, mut recv) = conn.open_bi().await.unwrap();
+
+    let hello = call(
+        &mut send,
+        &mut recv,
+        "h1",
+        "hello",
+        serde_json::json!({
+            "protocol": PROTOCOL_VERSION,
+            "client": {"name": "伪桌面", "platform": "windows", "deviceClass": "desktop"},
+            "token": pairing.token,
+        }),
+    )
+    .await;
+    match hello {
+        ServerFrame::Response {
+            ok, payload, error, ..
+        } => {
+            assert!(ok, "hello 失败: {error:?}");
+            let resp: pi_carry_protocol::HelloResponse =
+                serde_json::from_value(payload.unwrap()).unwrap();
+            assert_eq!(resp.device.capability, "control");
+        }
+        other => panic!("期望 response，得到 {other:?}"),
+    }
+
+    conn.close(0u8.into(), b"done");
+    client.close().await;
+    bridge.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

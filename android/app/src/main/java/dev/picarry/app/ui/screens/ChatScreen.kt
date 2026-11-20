@@ -60,11 +60,13 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -107,7 +109,10 @@ import dev.picarry.app.ui.theme.TextMuted
 import dev.picarry.app.ui.theme.TextPrimary
 import dev.picarry.app.ui.theme.TextSecondary
 import dev.picarry.app.ui.theme.Violet
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 
@@ -163,14 +168,24 @@ fun ChatScreen(repo: CarryRepository, nodeId: String, sessionId: String, onBack:
     val clipboard = LocalClipboardManager.current
     val listState = rememberLazyListState()
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val scope = rememberCoroutineScope()
 
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
-        runCatching {
-            val (mime, data) = ImageCompressor.compress(context, uri)
-            pendingImage = Triple(mime, data, "image")
-            imageError = null
-        }.onFailure { imageError = it.message }
+        // 解码 + 缩放 + JPEG + Base64 是重计算，放默认调度器，回来再更新 Compose 状态。
+        scope.launch {
+            val result = withContext(Dispatchers.Default) { runCatching { ImageCompressor.compress(context, uri) } }
+            result.onSuccess { (mime, data) ->
+                pendingImage = Triple(mime, data, "image")
+                imageError = null
+            }.onFailure { imageError = it.message ?: "图片处理失败" }
+        }
+    }
+
+    // 前台且正看着这条会话时不发审批通知（详见 CarryRepository.notifyApproval）。
+    DisposableEffect(sessionId) {
+        repo.setVisibleSession(sessionId)
+        onDispose { repo.setVisibleSession(null) }
     }
 
     LaunchedEffect(nodeId, sessionId) { repo.openSession(nodeId, sessionId) }
@@ -229,8 +244,11 @@ fun ChatScreen(repo: CarryRepository, nodeId: String, sessionId: String, onBack:
                 statusColor(session?.status ?: "idle"),
                 filled = true,
             )
-            Pill("模型 · Sonnet 4.5", Violet).also { }
-            Pill("thinking · high", Cyan)
+            Pill(
+                "模型 · ${models.firstOrNull { it.id == currentModel }?.name ?: currentModel.ifBlank { "默认" }}",
+                Violet,
+            )
+            Pill("thinking · $currentThinking", Cyan)
             MonoLabel(session?.cwd?.substringAfterLast('/')?.ifBlank { "~" } ?: "~", color = TextMuted)
         }
 

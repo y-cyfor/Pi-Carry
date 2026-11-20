@@ -1,33 +1,47 @@
 # 重新打包 dist 产物并生成 SHA256 校验和。
-# 桌面包放运行必需文件和许可证；Android 包放两个 ABI 的 APK、说明和许可证。
+# PC 包：exe、README、WebView2Loader.dll、LICENSE，压缩为 zip。
+# Android：每个 ABI 一个正式签名 APK，直接作为独立资产，不压缩。
+param(
+    [switch]$SkipAndroid
+)
+
 $ErrorActionPreference = 'Stop'
 Set-Location (Join-Path $PSScriptRoot '..')
 
-$desktopDir = 'dist/pi-carry-desktop-win-x64'
-$androidDir = 'dist/android'
-$desktopZip = 'dist/pi-carry-desktop-0.1.0-win-x64.zip'
-$androidZip = 'dist/pi-carry-android-0.1.0-debug.zip'
+$version = '0.1.1'
+$desktopDir = 'dist/pi-carry-windows-10-x64'
+$desktopZip = "dist/pi-carry-windows-10-x64-$version.zip"
+$androidArm64 = "dist/pi-carry-android-8.0-arm64-v8a-$version.apk"
+$androidX64 = "dist/pi-carry-android-8.0-x86_64-$version.apk"
 
-New-Item -ItemType Directory -Force $desktopDir, $androidDir | Out-Null
+New-Item -ItemType Directory -Force $desktopDir | Out-Null
 Get-ChildItem $desktopDir -File -ErrorAction SilentlyContinue | Remove-Item -Force
-Get-ChildItem $androidDir -File -ErrorAction SilentlyContinue | Remove-Item -Force
 
 Copy-Item target/release/pi-carry-desktop.exe $desktopDir/ -Force
 Copy-Item target/release/WebView2Loader.dll $desktopDir/ -Force
 Copy-Item packaging/desktop-README.txt $desktopDir/README.txt -Force
 Copy-Item LICENSE $desktopDir/LICENSE -Force
-Copy-Item android/app/build/outputs/apk/debug/app-arm64-v8a-debug.apk, `
-          android/app/build/outputs/apk/debug/app-x86_64-debug.apk $androidDir/ -Force
-Copy-Item LICENSE $androidDir/LICENSE.txt -Force
-Copy-Item packaging/android-README.txt $androidDir/README.txt -Force
 
-Remove-Item $desktopZip, $androidZip, `
-    dist/pi-carry-0.1.0-win-x64.zip, dist/pi-carry-0.1.0-android-debug.zip -ErrorAction SilentlyContinue
+Remove-Item $desktopZip -ErrorAction SilentlyContinue
 Compress-Archive -Path "$desktopDir/*" -DestinationPath $desktopZip -Force
-Compress-Archive -Path "$androidDir/*" -DestinationPath $androidZip -Force
+$artifacts = @($desktopZip)
 
-$lines = Get-FileHash $desktopZip, $androidZip -Algorithm SHA256 |
+if (-not $SkipAndroid) {
+    $releaseApks = @(
+        @{ Src = 'android/app/build/outputs/apk/release/app-arm64-v8a-release.apk'; Dst = $androidArm64 },
+        @{ Src = 'android/app/build/outputs/apk/release/app-x86_64-release.apk'; Dst = $androidX64 }
+    )
+    foreach ($apk in $releaseApks) {
+        if (-not (Test-Path $apk.Src)) {
+            throw "缺少正式签名 APK：$($apk.Src)。请先完成 release 签名构建，不能用 debug APK 代替。"
+        }
+        Copy-Item $apk.Src $apk.Dst -Force
+        $artifacts += $apk.Dst
+    }
+}
+
+$lines = Get-FileHash $artifacts -Algorithm SHA256 |
     ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" }
 $lines | Set-Content dist/SHA256SUMS.txt -Encoding utf8
-Get-ChildItem dist/*.zip | Format-Table Name, Length
+Get-ChildItem $artifacts | Format-Table Name, Length
 Get-Content dist/SHA256SUMS.txt
