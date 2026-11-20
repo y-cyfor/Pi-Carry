@@ -1,0 +1,53 @@
+//! 集成测试共享辅助：定位或按需构建 fake-pi。
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::Once;
+
+fn find_in(dir: &Path) -> Option<PathBuf> {
+    for name in ["fake-pi.exe", "fake-pi"] {
+        for candidate in [dir.join(name), dir.join("debug").join(name)] {
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+fn repo_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("无法定位仓库根目录")
+        .to_path_buf()
+}
+
+/// 优先使用 `PI_CARRY_FAKE_PI`，其次在 target/debug 中查找；
+/// 都没有时用独立 target 目录构建一次，避免与当前 cargo 进程争锁。
+pub fn fake_pi() -> PathBuf {
+    if let Ok(p) = std::env::var("PI_CARRY_FAKE_PI") {
+        return PathBuf::from(p);
+    }
+    if let Some(p) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.ancestors().skip(1).take(8).find_map(find_in))
+    {
+        return p;
+    }
+
+    static BUILD: Once = Once::new();
+    let root = repo_root();
+    let target = root.join("target/test-fake-pi");
+    BUILD.call_once(|| {
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+        let status = Command::new(cargo)
+            .current_dir(&root)
+            .env("CARGO_TARGET_DIR", &target)
+            .args(["build", "-q", "-p", "pi-carry-fake-pi"])
+            .status()
+            .expect("无法启动 cargo 构建 fake-pi");
+        assert!(status.success(), "cargo build -p pi-carry-fake-pi 失败");
+    });
+    find_in(&target.join("debug")).expect("构建后仍找不到 fake-pi")
+}

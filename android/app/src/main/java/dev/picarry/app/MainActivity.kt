@@ -1,0 +1,239 @@
+package dev.picarry.app
+
+import android.Manifest
+import android.content.Intent
+import android.os.Build
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Forum
+import androidx.compose.material.icons.outlined.Hub
+import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
+import androidx.navigation.NavGraph.Companion.findStartDestination
+import androidx.navigation.NavHostController
+import androidx.navigation.NavType
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.currentBackStackEntryAsState
+import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navArgument
+import dev.picarry.app.net.CarryService
+import dev.picarry.app.ui.components.CarryBackground
+import dev.picarry.app.ui.screens.ChatScreen
+import dev.picarry.app.ui.screens.NodesScreen
+import dev.picarry.app.ui.screens.PairingScreen
+import dev.picarry.app.ui.screens.SessionsScreen
+import dev.picarry.app.ui.screens.SettingsScreen
+import dev.picarry.app.ui.theme.Ink
+import dev.picarry.app.ui.theme.Line
+import dev.picarry.app.ui.theme.PiCarryTheme
+import dev.picarry.app.ui.theme.TextMuted
+import dev.picarry.app.ui.theme.TextPrimary
+import dev.picarry.app.ui.theme.Violet
+
+class MainActivity : ComponentActivity() {
+    private val notifPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    private var pairUri by mutableStateOf<String?>(null)
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        // 透明系统栏；图标明暗由 PiCarryTheme 根据“自动/黑色/白色”设置动态切换。
+        enableEdgeToEdge()
+        if (Build.VERSION.SDK_INT >= 33) {
+            notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        ContextCompat.startForegroundService(this, Intent(this, CarryService::class.java))
+        pairUri = intent?.data?.toString()
+        setContent {
+            val repo = (application as PiCarryApp).repo
+            val themeMode by repo.themeMode.collectAsState()
+            val dark = when (themeMode) {
+                "dark" -> true
+                "light" -> false
+                else -> isSystemInDarkTheme()
+            }
+            PiCarryTheme(darkTheme = dark) {
+                PiCarryAppRoot(repo, pairUri)
+            }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        pairUri = intent.data?.toString()
+    }
+}
+
+object Routes {
+    const val Nodes = "nodes"
+    const val Sessions = "sessions"
+    const val Settings = "settings"
+    const val Chat = "chat/{nodeId}/{sessionId}"
+    const val Pairing = "pairing?uri={uri}"
+
+    fun chat(nodeId: String, sessionId: String) = "chat/$nodeId/$sessionId"
+    fun pairing(uri: String? = null) = if (uri.isNullOrBlank()) "pairing" else "pairing?uri=${java.net.URLEncoder.encode(uri, "UTF-8")}"
+}
+
+@Composable
+fun PiCarryAppRoot(repo: dev.picarry.app.data.CarryRepository, initialPairUri: String?) {
+    val nav = rememberNavController()
+    val backStack by nav.currentBackStackEntryAsState()
+    // 从相机/浏览器扫描二维码冷启动或热启动时，直接进入配对页。
+    LaunchedEffect(initialPairUri) {
+        if (!initialPairUri.isNullOrBlank()) {
+            nav.navigate(Routes.pairing(initialPairUri)) { launchSingleTop = true }
+        }
+    }
+    val route = backStack?.destination?.route ?: Routes.Nodes
+    val showBar = route in listOf(Routes.Nodes, Routes.Sessions, Routes.Settings)
+    CarryBackground {
+        Column(Modifier.fillMaxSize()) {
+            Box(Modifier.weight(1f)) {
+                NavHost(
+                    navController = nav,
+                    startDestination = Routes.Nodes,
+                    modifier = Modifier.fillMaxSize(),
+                ) {
+                    composable(Routes.Nodes) {
+                        NodesScreen(
+                            repo = repo,
+                            onPair = { nav.navigate(Routes.pairing()) },
+                            onOpenSessions = { nodeId -> nav.navigate(Routes.Sessions) },
+                        )
+                    }
+                    composable(Routes.Sessions) {
+                        SessionsScreen(
+                            repo = repo,
+                            onOpenChat = { nodeId, sessionId -> nav.navigate(Routes.chat(nodeId, sessionId)) },
+                            onPair = { nav.navigate(Routes.pairing()) },
+                        )
+                    }
+                    composable(Routes.Settings) {
+                        SettingsScreen(repo = repo, onPair = { nav.navigate(Routes.pairing()) })
+                    }
+                    composable(
+                        Routes.Chat,
+                        arguments = listOf(
+                            navArgument("nodeId") { type = NavType.StringType },
+                            navArgument("sessionId") { type = NavType.StringType },
+                        ),
+                    ) { entry ->
+                        ChatScreen(
+                            repo = repo,
+                            nodeId = entry.arguments?.getString("nodeId").orEmpty(),
+                            sessionId = entry.arguments?.getString("sessionId").orEmpty(),
+                            onBack = { nav.popBackStack() },
+                        )
+                    }
+                    composable(
+                        Routes.Pairing,
+                        arguments = listOf(navArgument("uri") { type = NavType.StringType; defaultValue = "" }),
+                    ) { entry ->
+                        PairingScreen(
+                            repo = repo,
+                            initialUri = entry.arguments?.getString("uri").orEmpty().ifBlank { initialPairUri.orEmpty() },
+                            onBack = { nav.popBackStack() },
+                            onDone = {
+                                nav.navigate(Routes.Nodes) {
+                                    popUpTo(nav.graph.findStartDestination().id) { inclusive = true }
+                                }
+                            },
+                        )
+                    }
+                }
+            }
+            if (showBar) BottomBar(nav, route)
+        }
+    }
+}
+
+@Composable
+private fun BottomBar(nav: NavHostController, route: String) {
+    Column {
+        Box(Modifier.fillMaxWidth().height(0.7.dp).background(Line.copy(alpha = 0.8f)))
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .background(Ink.copy(alpha = 0.96f))
+                .navigationBarsPadding()
+                .height(64.dp),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            BarItem("节点", Icons.Outlined.Hub, route == Routes.Nodes) {
+                nav.navigate(Routes.Nodes) { popUpTo(nav.graph.findStartDestination().id) { saveState = true }; launchSingleTop = true; restoreState = true }
+            }
+            BarItem("会话", Icons.Outlined.Forum, route == Routes.Sessions) {
+                nav.navigate(Routes.Sessions) { popUpTo(nav.graph.findStartDestination().id) { saveState = true }; launchSingleTop = true; restoreState = true }
+            }
+            BarItem("设置", Icons.Outlined.Settings, route == Routes.Settings) {
+                nav.navigate(Routes.Settings) { popUpTo(nav.graph.findStartDestination().id) { saveState = true }; launchSingleTop = true; restoreState = true }
+            }
+        }
+    }
+}
+
+@Composable
+private fun BarItem(label: String, icon: ImageVector, active: Boolean, onClick: () -> Unit) {
+    Column(
+        Modifier
+            .clip(CircleShape)
+            .background(if (active) Violet.copy(alpha = 0.10f) else Color.Transparent)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 18.dp, vertical = 6.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Icon(icon, null, tint = if (active) Violet else TextMuted, modifier = Modifier.size(21.dp))
+        Spacer(Modifier.height(3.dp))
+        Text(
+            label,
+            style = MaterialTheme.typography.labelSmall,
+            color = if (active) TextPrimary else TextMuted,
+        )
+        Box(
+            Modifier
+                .padding(top = 3.dp)
+                .size(3.dp)
+                .clip(CircleShape)
+                .background(if (active) Violet else Color.Transparent)
+        )
+    }
+}

@@ -1,0 +1,998 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>pi carry</title>
+<style>
+  :root {
+    --ink: #05050a;
+    --ink-2: #0a0a13;
+    --panel: #10101b;
+    --panel-2: #151522;
+    --line: #232333;
+    --line-soft: rgba(255,255,255,.055);
+    --text: #f2f1fa;
+    --text-2: #9c9aae;
+    --muted: #858296;
+    --violet: #7c6bff;
+    --violet-soft: rgba(124,107,255,.14);
+    --cyan: #45d9d0;
+    --rose: #ff6b85;
+    --amber: #ffb86b;
+    --mint: #5be7a9;
+    --radius: 18px;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--ink);
+    color: var(--text);
+    font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+    font-size: 14px;
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+  }
+  body::before {
+    content: ""; position: fixed; inset: 0; pointer-events: none;
+    background:
+      radial-gradient(900px 500px at 78% -10%, rgba(124,107,255,.13), transparent 62%),
+      radial-gradient(700px 420px at 4% 106%, rgba(69,217,208,.055), transparent 65%);
+  }
+  button, input, select, textarea { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  .app { display: flex; height: 100vh; position: relative; z-index: 1; }
+
+  /* 侧栏 */
+  .sidebar {
+    width: 228px; flex: 0 0 228px; border-right: 1px solid var(--line-soft);
+    background: rgba(8,8,15,.72); backdrop-filter: blur(22px);
+    display: flex; flex-direction: column; padding: 22px 14px 14px;
+  }
+  .brand { display: flex; align-items: center; gap: 11px; padding: 0 10px 24px; }
+  .brand-mark {
+    width: 36px; height: 36px; border-radius: 12px; display: grid; place-items: center;
+    background: linear-gradient(145deg, #8c7dff, #5a47e8);
+    box-shadow: 0 8px 24px rgba(124,107,255,.30);
+    font-family: "Cascadia Code", Consolas, monospace; font-size: 20px; font-weight: 600;
+  }
+  .brand-name { font-size: 16px; font-weight: 650; letter-spacing: -.2px; }
+  .brand-sub { font-size: 10px; color: var(--muted); letter-spacing: .16em; text-transform: uppercase; margin-top: 2px; }
+  .nav-label { font-size: 10px; color: var(--muted); letter-spacing: .16em; padding: 8px 12px; }
+  .nav { display: flex; flex-direction: column; gap: 3px; }
+  .nav button {
+    border: 0; background: transparent; color: var(--text-2); text-align: left;
+    display: flex; align-items: center; gap: 11px; padding: 10px 12px; border-radius: 11px;
+    font-size: 13.5px; transition: .16s ease;
+  }
+  .nav button:hover { background: rgba(255,255,255,.035); color: var(--text); }
+  .nav button.active { background: var(--violet-soft); color: #bdb4ff; }
+  .nav button.active .ico { color: var(--violet); }
+  .nav .ico { width: 17px; height: 17px; color: var(--muted); display: inline-flex; }
+  .nav .badge { margin-left: auto; font-size: 10px; padding: 2px 7px; border-radius: 20px; background: rgba(255,255,255,.06); color: var(--text-2); }
+  .side-foot { margin-top: auto; border-top: 1px solid var(--line-soft); padding: 14px 10px 4px; }
+  .side-status { display: flex; align-items: center; gap: 9px; font-size: 12px; color: var(--text-2); }
+  .side-status b { color: var(--text); font-weight: 550; }
+  .side-meta { margin-top: 9px; font: 10.5px/1.5 "Cascadia Code", Consolas, monospace; color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: 0 0 auto; }
+  .dot.on { background: var(--mint); box-shadow: 0 0 10px rgba(91,231,169,.7); }
+  .dot.warn { background: var(--amber); }
+  .dot.err { background: var(--rose); }
+
+  /* 主区 */
+  .main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .topbar {
+    height: 66px; flex: 0 0 66px; border-bottom: 1px solid var(--line-soft);
+    display: flex; align-items: center; gap: 14px; padding: 0 30px;
+    background: rgba(5,5,10,.55); backdrop-filter: blur(16px);
+  }
+  .topbar h1 { font-size: 17px; font-weight: 600; margin: 0; letter-spacing: -.2px; }
+  .topbar .sub { color: var(--muted); font-size: 12px; margin-left: 4px; }
+  .top-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 6px; padding: 4px 9px; border-radius: 30px;
+    border: 1px solid var(--line); background: rgba(255,255,255,.025);
+    font-size: 10.5px; color: var(--text-2); font-family: "Cascadia Code", Consolas, monospace;
+  }
+  .pill.violet { color: #bdb4ff; border-color: rgba(124,107,255,.35); background: var(--violet-soft); }
+  .pill.green { color: var(--mint); border-color: rgba(91,231,169,.28); background: rgba(91,231,169,.08); }
+  .pill.rose { color: var(--rose); border-color: rgba(255,107,133,.30); background: rgba(255,107,133,.08); }
+  .pill.amber { color: var(--amber); border-color: rgba(255,184,107,.28); background: rgba(255,184,107,.07); }
+  .btn {
+    border: 1px solid var(--line); background: rgba(255,255,255,.035); color: var(--text-2);
+    padding: 8px 13px; border-radius: 10px; display: inline-flex; align-items: center; gap: 7px;
+    font-size: 12.5px; transition: .16s ease; white-space: nowrap;
+  }
+  .btn:hover { border-color: rgba(255,255,255,.18); color: var(--text); background: rgba(255,255,255,.06); }
+  .btn.primary { background: linear-gradient(145deg, #8b7cff, #6350ee); border-color: transparent; color: #fff; box-shadow: 0 8px 22px rgba(124,107,255,.24); }
+  .btn.primary:hover { filter: brightness(1.08); }
+  .btn.danger { color: var(--rose); border-color: rgba(255,107,133,.25); background: rgba(255,107,133,.06); }
+  .btn.ghost { border-color: transparent; background: transparent; }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .btn .ico { width: 15px; height: 15px; }
+
+  .content { flex: 1; overflow: auto; padding: 26px 30px 42px; scroll-behavior: smooth; }
+  .page { display: none; max-width: 1080px; margin: 0 auto; animation: enter .22s ease both; }
+  .page.active { display: block; }
+  @keyframes enter { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
+
+  .grid { display: grid; gap: 14px; }
+  .g2 { grid-template-columns: 1.55fr 1fr; }
+  .g3 { grid-template-columns: repeat(3, 1fr); }
+  .g4 { grid-template-columns: repeat(4, 1fr); }
+  .card {
+    background: linear-gradient(165deg, rgba(19,19,32,.86), rgba(12,12,22,.90));
+    border: 1px solid var(--line-soft); border-radius: var(--radius);
+    padding: 20px; position: relative; overflow: hidden;
+  }
+  .card::after {
+    content: ""; position: absolute; inset: 0; pointer-events: none; border-radius: inherit;
+    background: linear-gradient(150deg, rgba(255,255,255,.035), transparent 38%);
+  }
+  .card h3 { margin: 0; font-size: 13px; font-weight: 600; color: var(--text); }
+  .card .caption { color: var(--muted); font-size: 11.5px; margin-top: 4px; line-height: 1.55; }
+  .mono { font-family: "Cascadia Code", Consolas, monospace; }
+  .muted { color: var(--muted); }
+  .secondary { color: var(--text-2); }
+  .eyebrow { font: 10px/1 "Cascadia Code", Consolas, monospace; letter-spacing: .15em; color: var(--muted); text-transform: uppercase; }
+  .hero { display: flex; align-items: flex-start; gap: 18px; padding: 24px; }
+  .hero-orb {
+    width: 54px; height: 54px; border-radius: 17px; flex: 0 0 54px; display: grid; place-items: center;
+    background: radial-gradient(circle at 32% 28%, rgba(124,107,255,.35), rgba(124,107,255,.04) 70%);
+    border: 1px solid rgba(124,107,255,.30); font-family: "Cascadia Code", monospace; font-size: 27px; color: #c6beff;
+    box-shadow: inset 0 0 24px rgba(124,107,255,.12);
+  }
+  .hero h2 { font-size: 25px; letter-spacing: -.6px; margin: 3px 0 5px; font-weight: 650; }
+  .hero p { margin: 0; color: var(--text-2); font-size: 12.5px; }
+  .hero-side { margin-left: auto; text-align: right; }
+  .hero-main { min-width: 0; flex: 1; }
+  .endpoint {
+    display: flex; gap: 9px; align-items: center; margin-top: 14px; padding: 9px 11px;
+    border: 1px solid var(--line); border-radius: 10px; background: rgba(0,0,0,.22);
+    font-family: "Cascadia Code", Consolas, monospace; font-size: 11.5px; color: #c7c3db;
+    overflow: hidden;
+  }
+  .endpoint span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .metric { padding: 17px 18px; }
+  .metric .num { font-size: 27px; font-weight: 600; letter-spacing: -.8px; margin-top: 12px; }
+  .metric .num small { font-size: 12px; color: var(--muted); font-weight: 400; margin-left: 5px; }
+  .metric .foot { margin-top: 6px; color: var(--muted); font-size: 11px; }
+  .addresses { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 6px; }
+  .address { font: 10.5px/1.4 "Cascadia Code", Consolas, monospace; color: var(--text-2); padding: 4px 7px; border-radius: 6px; background: rgba(255,255,255,.035); border: 1px solid var(--line-soft); }
+  .section-head { display: flex; align-items: center; gap: 10px; margin: 26px 0 12px; }
+  .section-head h3 { margin: 0; font-size: 13.5px; font-weight: 600; }
+  .section-head .caption { margin: 0; color: var(--muted); font-size: 11.5px; }
+  .section-head .right { margin-left: auto; }
+  .list { display: flex; flex-direction: column; gap: 8px; }
+  .row {
+    display: flex; align-items: center; gap: 12px; padding: 12px 14px; border: 1px solid var(--line-soft);
+    border-radius: 12px; background: rgba(16,16,27,.55); transition: .15s ease;
+  }
+  .row:hover { border-color: rgba(255,255,255,.10); background: rgba(22,22,36,.66); }
+  .row .main-col { min-width: 0; flex: 1; }
+  .row .title { font-size: 12.5px; font-weight: 550; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row .meta { font: 10.5px/1.5 "Cascadia Code", Consolas, monospace; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 3px; }
+  .row .time { color: var(--muted); font-size: 11px; white-space: nowrap; }
+  .avatar {
+    width: 34px; height: 34px; border-radius: 10px; flex: 0 0 34px; display: grid; place-items: center;
+    background: rgba(124,107,255,.12); color: #b7adff; font-size: 12px; font-weight: 600;
+  }
+  .avatar.cyan { background: rgba(69,217,208,.10); color: var(--cyan); }
+  .empty { padding: 34px 20px; text-align: center; color: var(--muted); font-size: 12px; }
+  .empty b { display: block; color: var(--text-2); font-weight: 500; margin-bottom: 4px; }
+  .banner {
+    display: flex; align-items: flex-start; gap: 10px; padding: 11px 13px; border-radius: 11px;
+    border: 1px solid rgba(255,184,107,.20); background: rgba(255,184,107,.055);
+    color: #e8c69e; font-size: 11.5px; line-height: 1.6; margin-bottom: 15px;
+  }
+  .banner.rose { border-color: rgba(255,107,133,.22); background: rgba(255,107,133,.055); color: #f3adb9; }
+  .banner.violet { border-color: rgba(124,107,255,.22); background: rgba(124,107,255,.055); color: #c4bdfa; }
+
+  /* 配对 */
+  .pair-grid { display: grid; grid-template-columns: 360px 1fr; gap: 18px; align-items: start; }
+  .qr-card { padding: 22px; text-align: center; }
+  .qr-frame {
+    background: #fff; border-radius: 16px; padding: 14px; width: 100%; aspect-ratio: 1;
+    display: grid; place-items: center; overflow: hidden;
+  }
+  .qr-frame svg { width: 100%; height: 100%; display: block; }
+  .qr-placeholder { color: #5a5870; font-size: 12px; display: flex; flex-direction: column; align-items: center; gap: 10px; }
+  .code-row { display: flex; gap: 7px; justify-content: center; margin-top: 16px; }
+  .code-digit {
+    width: 39px; height: 48px; display: grid; place-items: center; border-radius: 10px;
+    border: 1px solid rgba(124,107,255,.35); background: rgba(124,107,255,.09);
+    font: 600 21px/1 "Cascadia Code", Consolas, monospace; color: #d8d3ff;
+  }
+  .code-hint { margin-top: 10px; color: var(--muted); font-size: 11px; }
+  .steps { display: flex; flex-direction: column; gap: 11px; }
+  .step { display: flex; gap: 12px; padding: 13px 14px; border-radius: 12px; border: 1px solid var(--line-soft); background: rgba(16,16,27,.5); }
+  .step-num { width: 22px; height: 22px; flex: 0 0 22px; border-radius: 50%; display: grid; place-items: center; font: 10px "Cascadia Code", monospace; color: var(--text-2); border: 1px solid var(--line); }
+  .step b { display: block; font-size: 12px; font-weight: 550; margin-bottom: 3px; }
+  .step p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.6; }
+  .pair-status { display: flex; align-items: center; gap: 8px; margin-top: 4px; font-size: 11.5px; color: var(--text-2); }
+  .safety { margin-top: 14px; padding: 12px 13px; border-radius: 11px; border: 1px solid rgba(69,217,208,.16); background: rgba(69,217,208,.045); color: #9fc9c6; font-size: 11px; line-height: 1.65; }
+
+  /* 设备/会话 */
+  .devices { display: flex; flex-direction: column; gap: 9px; }
+  .device {
+    display: flex; align-items: center; gap: 13px; padding: 15px 16px; border: 1px solid var(--line-soft);
+    border-radius: 13px; background: rgba(16,16,27,.52);
+  }
+  .device .name { font-size: 13px; font-weight: 550; }
+  .device .id { font: 10.5px "Cascadia Code", Consolas, monospace; color: var(--muted); margin-top: 3px; }
+  .device .right { margin-left: auto; display: flex; align-items: center; gap: 9px; }
+  .sessions-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 11px; }
+  .session-card { padding: 15px; border: 1px solid var(--line-soft); border-radius: 13px; background: rgba(16,16,27,.52); }
+  .session-card .top { display: flex; align-items: center; gap: 8px; }
+  .session-card .title { font-size: 12.5px; font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .session-card .cwd { font: 10.5px/1.5 "Cascadia Code", Consolas, monospace; color: var(--muted); margin-top: 7px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .session-card .foot { display: flex; gap: 10px; align-items: center; margin-top: 9px; font-size: 10.5px; color: var(--muted); }
+
+  /* 设置 */
+  .form { display: flex; flex-direction: column; gap: 15px; }
+  .field { display: flex; flex-direction: column; gap: 6px; }
+  .field label { font-size: 11.5px; color: var(--text-2); }
+  .field .hint { font-size: 10.5px; color: var(--muted); line-height: 1.5; }
+  .input, .select, .textarea {
+    width: 100%; border: 1px solid var(--line); background: rgba(5,5,10,.45); border-radius: 10px;
+    padding: 9px 11px; color: var(--text); outline: none; transition: .15s ease; font-size: 12.5px;
+  }
+  .input:focus, .select:focus, .textarea:focus { border-color: rgba(124,107,255,.55); box-shadow: 0 0 0 3px rgba(124,107,255,.10); }
+  .textarea { min-height: 72px; resize: vertical; font-family: "Cascadia Code", Consolas, monospace; font-size: 11.5px; }
+  .segment { display: flex; gap: 4px; padding: 4px; border-radius: 10px; border: 1px solid var(--line); background: rgba(5,5,10,.4); width: fit-content; }
+  .segment button { border: 0; background: transparent; color: var(--muted); padding: 6px 13px; border-radius: 7px; font-size: 11.5px; }
+  .segment button.active { background: var(--violet-soft); color: #c3bbff; }
+  #set-relay { width: 100%; }
+  #set-relay button { flex: 1; white-space: nowrap; padding-left: 6px; padding-right: 6px; }
+  .switch-row { display: flex; align-items: center; gap: 12px; padding: 11px 12px; border: 1px solid var(--line-soft); border-radius: 10px; background: rgba(16,16,27,.4); }
+  .switch-row .main-col { flex: 1; }
+  .switch-row b { display: block; font-size: 12px; font-weight: 500; }
+  .switch-row span { display: block; color: var(--muted); font-size: 10.5px; margin-top: 3px; line-height: 1.5; }
+  .switch { width: 36px; height: 21px; border-radius: 20px; background: #2b2a3b; border: 1px solid var(--line); position: relative; flex: 0 0 36px; transition: .18s ease; }
+  .switch::after { content: ""; position: absolute; width: 15px; height: 15px; border-radius: 50%; background: #a5a2b8; top: 2px; left: 2px; transition: .18s ease; }
+  .switch.on { background: rgba(124,107,255,.45); border-color: rgba(124,107,255,.6); }
+  .switch.on::after { left: 17px; background: #fff; }
+  .settings-actions { display: flex; gap: 9px; justify-content: flex-end; margin-top: 4px; }
+
+  /* 日志 */
+  .log {
+    background: #07070d; border: 1px solid var(--line); border-radius: 12px; padding: 15px;
+    font: 11px/1.75 "Cascadia Code", Consolas, monospace; color: #b9b5cc; max-height: calc(100vh - 260px);
+    overflow: auto; white-space: pre-wrap; word-break: break-word;
+  }
+  .log .warn { color: var(--amber); }
+  .toast {
+    position: fixed; right: 24px; bottom: 22px; z-index: 20; padding: 10px 14px; border-radius: 11px;
+    border: 1px solid rgba(124,107,255,.35); background: #17152a; color: #ded9ff; font-size: 12px;
+    box-shadow: 0 16px 40px rgba(0,0,0,.45); opacity: 0; transform: translateY(8px); transition: .2s ease; pointer-events: none;
+  }
+  .toast.show { opacity: 1; transform: none; }
+  .toast.err { border-color: rgba(255,107,133,.4); color: #ffc4cf; }
+  .link { color: #b6adff; text-decoration: none; cursor: pointer; }
+  .divider { height: 1px; background: var(--line-soft); margin: 18px 0; }
+  @media (max-width: 1050px) {
+    .g4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .g2, .pair-grid { grid-template-columns: 1fr; }
+    .content { padding: 20px 20px 34px; }
+    .hero { flex-wrap: wrap; }
+    .hero-main { flex-basis: calc(100% - 72px); }
+    .hero-side { margin-left: 72px; text-align: left; width: 100%; }
+  }
+  @media (max-width: 900px) {
+    .g3, .sessions-grid { grid-template-columns: 1fr; }
+    .g4 { grid-template-columns: 1fr; }
+    .sidebar { width: 190px; flex-basis: 190px; }
+  }
+
+  /* ── 白色主题：同一套深空语言的纸白翻译，保留电紫/青/玫瑰强调色 ── */
+  html[data-theme="light"] {
+    --ink: #f6f5fb;
+    --ink-2: #ffffff;
+    --panel: #ffffff;
+    --panel-2: #f0eef8;
+    --line: #dcd9e8;
+    --line-soft: rgba(27,24,38,.08);
+    --text: #1b1826;
+    --text-2: #5e5a70;
+    --muted: #6f6b80;
+    --violet: #5b4be8;
+    --violet-soft: rgba(91,75,232,.10);
+    --cyan: #0b7f79;
+    --rose: #c73552;
+    --amber: #9a5b00;
+    --mint: #0a7b52;
+    color-scheme: light;
+  }
+  html[data-theme="light"] body { background: var(--ink); }
+  html[data-theme="light"] body::before {
+    background:
+      radial-gradient(900px 500px at 78% -10%, rgba(91,75,232,.10), transparent 62%),
+      radial-gradient(700px 420px at 4% 106%, rgba(11,127,121,.05), transparent 65%);
+  }
+  html[data-theme="light"] .sidebar { background: rgba(249,248,254,.84); border-right-color: var(--line-soft); }
+  html[data-theme="light"] .topbar { background: rgba(255,255,255,.72); border-bottom-color: var(--line-soft); }
+  html[data-theme="light"] .nav button:hover { background: rgba(27,24,38,.045); }
+  html[data-theme="light"] .nav button.active { background: var(--violet-soft); color: #4d3bd6; }
+  html[data-theme="light"] .nav .badge { background: rgba(27,24,38,.06); }
+  html[data-theme="light"] .pill { color: #464254; background: rgba(27,24,38,.045); border-color: var(--line); }
+  html[data-theme="light"] .pill.violet { color: #4d3bd6; border-color: rgba(91,75,232,.26); background: rgba(91,75,232,.075); }
+  html[data-theme="light"] .pill.green { border-color: rgba(10,123,82,.22); background: rgba(10,123,82,.07); }
+  html[data-theme="light"] .pill.rose { border-color: rgba(199,53,82,.22); background: rgba(199,53,82,.06); }
+  html[data-theme="light"] .pill.amber { border-color: rgba(154,91,0,.22); background: rgba(154,91,0,.06); }
+  html[data-theme="light"] .btn { background: #fff; border-color: var(--line); color: var(--text-2); box-shadow: 0 1px 2px rgba(20,18,40,.04); }
+  html[data-theme="light"] .btn:hover { background: #f8f7fd; border-color: rgba(27,24,38,.18); color: var(--text); }
+  html[data-theme="light"] .btn.primary { background: linear-gradient(145deg,#6c5bf0,#5140d8); color: #fff; box-shadow: 0 8px 22px rgba(91,75,232,.20); }
+  html[data-theme="light"] .btn.danger { color: var(--rose); border-color: rgba(199,53,82,.22); background: rgba(199,53,82,.05); }
+  html[data-theme="light"] .btn.ghost { background: transparent; box-shadow: none; }
+  html[data-theme="light"] .card {
+    background: linear-gradient(165deg,#ffffff,#fcfbff);
+    border-color: rgba(27,24,38,.075);
+    box-shadow: 0 1px 3px rgba(20,18,40,.05), 0 8px 24px rgba(20,18,40,.03);
+  }
+  html[data-theme="light"] .card::after { background: linear-gradient(150deg,rgba(255,255,255,.65),transparent 40%); }
+  html[data-theme="light"] .hero-orb {
+    background: radial-gradient(circle at 32% 28%, rgba(91,75,232,.16), rgba(91,75,232,.03) 70%);
+    border-color: rgba(91,75,232,.22); color: #4d3bd6; box-shadow: inset 0 0 24px rgba(91,75,232,.06);
+  }
+  html[data-theme="light"] .endpoint { background: #f7f6fc; color: #4b475c; border-color: var(--line); }
+  html[data-theme="light"] .address { background: #f8f7fc; border-color: var(--line); }
+  html[data-theme="light"] .row,
+  html[data-theme="light"] .device,
+  html[data-theme="light"] .session-card,
+  html[data-theme="light"] .step { background: #fff; border-color: rgba(27,24,38,.07); }
+  html[data-theme="light"] .row:hover { background: #faf9fe; border-color: rgba(27,24,38,.13); }
+  html[data-theme="light"] .avatar { background: rgba(91,75,232,.09); color: #4d3bd6; }
+  html[data-theme="light"] .banner { color: #7a4a00; background: rgba(154,91,0,.055); border-color: rgba(154,91,0,.18); }
+  html[data-theme="light"] .banner.rose { color: #9e1f38; background: rgba(199,53,82,.05); border-color: rgba(199,53,82,.18); }
+  html[data-theme="light"] .banner.violet { color: #4333b8; background: rgba(91,75,232,.05); border-color: rgba(91,75,232,.16); }
+  html[data-theme="light"] .code-digit { background: rgba(91,75,232,.06); border-color: rgba(91,75,232,.24); color: #4333b8; }
+  html[data-theme="light"] .safety { color: #0b5f5a; background: rgba(11,127,121,.045); border-color: rgba(11,127,121,.16); }
+  html[data-theme="light"] .input,
+  html[data-theme="light"] .select,
+  html[data-theme="light"] .textarea { background: #fbfaff; border-color: var(--line); color: var(--text); }
+  html[data-theme="light"] .segment { background: #f3f1fa; border-color: var(--line); }
+  html[data-theme="light"] .segment button.active { background: #fff; color: #4333b8; box-shadow: 0 1px 2px rgba(20,18,40,.08); }
+  html[data-theme="light"] .switch-row { background: #fbfaff; border-color: rgba(27,24,38,.07); }
+  html[data-theme="light"] .switch { background: #e5e2ee; border-color: var(--line); }
+  html[data-theme="light"] .switch::after { background: #8b879c; }
+  html[data-theme="light"] .switch.on { background: rgba(91,75,232,.32); border-color: rgba(91,75,232,.46); }
+  html[data-theme="light"] .switch.on::after { background: #fff; }
+  html[data-theme="light"] .log { background: #fbfaff; color: #3b384a; border-color: var(--line); }
+  html[data-theme="light"] .toast { background: #fff; color: #2a215e; border-color: rgba(91,75,232,.24); box-shadow: 0 16px 40px rgba(20,18,40,.15); }
+  html[data-theme="light"] .toast.err { color: #9e1f38; border-color: rgba(199,53,82,.3); }
+  html[data-theme="light"] .link { color: #4d3bd6; }
+  html[data-theme="light"] .qr-placeholder { color: #5a5870; }
+  html[data-theme="light"] .qr-frame { border: 1px solid rgba(27,24,38,.06); }
+</style>
+<script>
+  // 首屏前先套用本地镜像，避免强制白/黑主题时闪一帧。
+  (() => {
+    try {
+      const mode = localStorage.getItem('pi_carry_theme') || 'auto';
+      const dark = mode === 'dark' || (mode === 'auto' && matchMedia('(prefers-color-scheme: dark)').matches);
+      document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+      document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
+    } catch { document.documentElement.dataset.theme = 'dark'; }
+  })();
+</script>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">π</div>
+      <div>
+        <div class="brand-name">pi carry</div>
+        <div class="brand-sub">local bridge</div>
+      </div>
+    </div>
+    <div class="nav-label">控制台</div>
+    <nav class="nav">
+      <button data-page="overview" class="active"><span class="ico" data-icon="grid"></span>概览</button>
+      <button data-page="pairing"><span class="ico" data-icon="qr"></span>配对手机</button>
+      <button data-page="devices"><span class="ico" data-icon="phone"></span>设备<span class="badge" id="nav-devices">0</span></button>
+      <button data-page="sessions"><span class="ico" data-icon="chat"></span>会话<span class="badge" id="nav-sessions">0</span></button>
+      <button data-page="settings"><span class="ico" data-icon="sliders"></span>设置</button>
+      <button data-page="logs"><span class="ico" data-icon="terminal"></span>诊断日志</button>
+    </nav>
+    <div class="side-foot">
+      <div class="side-status"><span class="dot" id="side-dot"></span><span id="side-state">正在启动…</span></div>
+      <div class="side-meta" id="side-endpoint">—</div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <h1 id="page-title">概览</h1>
+      <span class="sub" id="page-sub">本机桥接与连接状态</span>
+      <div class="top-actions">
+        <span class="pill" id="top-relay">relay · —</span>
+        <span class="pill green" id="top-pi">pi · 检测中</span>
+        <button class="btn primary" data-go="pairing"><span class="ico" data-icon="qr"></span>配对手机</button>
+      </div>
+    </header>
+
+    <div class="content">
+      <!-- 概览 -->
+      <section class="page active" id="page-overview">
+        <div class="card hero">
+          <div class="hero-orb">π</div>
+          <div class="hero-main">
+            <div class="eyebrow">NODE STATUS</div>
+            <h2 id="hero-title">正在启动桥接服务</h2>
+            <p id="hero-sub">正在读取本机配置并初始化 iroh endpoint…</p>
+            <div class="endpoint"><span class="mono" id="hero-endpoint">—</span><button class="btn ghost" id="copy-endpoint" title="复制 Endpoint ID"><span class="ico" data-icon="copy"></span></button></div>
+          </div>
+          <div class="hero-side">
+            <div class="pill green" id="hero-state">● 启动中</div>
+            <div class="caption" style="margin-top:9px" id="hero-version"></div>
+          </div>
+        </div>
+
+        <div class="grid g4" style="margin-top:14px">
+          <div class="card metric"><div class="eyebrow">PAIRED</div><div class="num" id="m-devices">0<small>台</small></div><div class="foot">已授权设备</div></div>
+          <div class="card metric"><div class="eyebrow">ONLINE</div><div class="num" id="m-online">0<small>台</small></div><div class="foot">当前在线</div></div>
+          <div class="card metric"><div class="eyebrow">SESSIONS</div><div class="num" id="m-sessions">0<small>个</small></div><div class="foot" id="m-running">0 个运行中</div></div>
+          <div class="card metric"><div class="eyebrow">APPROVALS</div><div class="num" id="m-approvals">0<small>待处理</small></div><div class="foot">手机端审批队列</div></div>
+        </div>
+
+        <div class="grid g2" style="margin-top:14px">
+          <div class="card">
+            <div style="display:flex;align-items:center"><div><h3>传输与直连</h3><div class="caption">iroh QUIC · 直连优先，失败自动回退 relay</div></div><span class="pill violet" id="relay-pill">—</span></div>
+            <div class="addresses" id="addresses"><span class="address">等待 endpoint 就绪…</span></div>
+            <div class="divider"></div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <button class="btn" id="btn-restart"><span class="ico" data-icon="refresh"></span>重启服务</button>
+              <button class="btn" id="btn-data"><span class="ico" data-icon="folder"></span>打开数据目录</button>
+              <button class="btn" data-go="settings"><span class="ico" data-icon="sliders"></span>连接设置</button>
+            </div>
+          </div>
+          <div class="card">
+            <div style="display:flex;align-items:center"><div><h3>配对入口</h3><div class="caption">二维码 10 分钟有效，一次性 token</div></div></div>
+            <div style="display:flex;align-items:center;gap:14px;margin-top:18px">
+              <div style="width:54px;height:54px;border-radius:14px;border:1px solid rgba(124,107,255,.3);display:grid;place-items:center;background:rgba(124,107,255,.08)"><span class="ico" data-icon="qr" style="width:26px;height:26px;color:#b7adff"></span></div>
+              <div style="flex:1"><div style="font-size:12.5px;font-weight:550">用手机扫描二维码</div><div class="caption">或手动输入 6 位码。配对在局域网内完成，不经过云端账号。</div></div>
+            </div>
+            <div style="margin-top:16px"><button class="btn primary" data-go="pairing" style="width:100%;justify-content:center">生成配对二维码</button></div>
+            <div class="safety">手机端默认 full 权限：可以发消息、审批、切换模型与节点设置；设备吊销仍只限本机。</div>
+          </div>
+        </div>
+
+        <div class="section-head"><h3>最近设备</h3><span class="caption">只显示已授权设备</span><span class="right"><button class="btn ghost" data-go="devices">查看全部 →</button></span></div>
+        <div class="list" id="recent-devices"><div class="empty"><b>还没有配对设备</b>打开配对页，用手机扫描二维码。</div></div>
+
+        <div class="section-head"><h3>会话索引</h3><span class="caption">来自本机 pi 会话文件，只读展示</span><span class="right"><button class="btn ghost" data-go="sessions">查看全部 →</button></span></div>
+        <div class="list" id="recent-sessions"><div class="empty"><b>暂无会话</b>手机端发起对话后，这里会出现索引。</div></div>
+      </section>
+
+      <!-- 配对 -->
+      <section class="page" id="page-pairing">
+        <div class="banner violet"><span class="ico" data-icon="shield" style="width:17px;height:17px"></span><div>二维码包含 endpoint ID、一次性 token 和局域网直连地址。请只给信任的设备扫描；配对成功后 token 立即失效。</div></div>
+        <div class="pair-grid">
+          <div class="card qr-card">
+            <div class="qr-frame" id="qr-frame"><div class="qr-placeholder"><span class="ico" data-icon="qr" style="width:40px;height:40px;color:#9892b5"></span><span>点击下方按钮生成二维码</span></div></div>
+            <div class="code-row" id="code-row"><div class="code-digit">·</div><div class="code-digit">·</div><div class="code-digit">·</div><div class="code-digit">·</div><div class="code-digit">·</div><div class="code-digit">·</div></div>
+            <div class="code-hint" id="pair-expiry">等待生成配对会话</div>
+            <div style="display:flex;gap:8px;margin-top:16px">
+              <button class="btn primary" id="btn-pair" style="flex:1;justify-content:center"><span class="ico" data-icon="qr"></span>生成二维码</button>
+              <button class="btn danger" id="btn-cancel-pair" disabled>取消</button>
+            </div>
+            <div style="margin-top:11px"><button class="btn ghost" id="copy-uri" style="width:100%;justify-content:center" disabled>复制配对链接</button></div>
+          </div>
+          <div>
+            <div class="card">
+              <h3>配对步骤</h3>
+              <div class="steps" style="margin-top:14px">
+                <div class="step"><div class="step-num">01</div><div><b>在手机上打开 pi carry</b><p>节点页右上角 +，选择“扫描二维码”。相机权限只用于扫码。</p></div></div>
+                <div class="step"><div class="step-num">02</div><div><b>扫描左侧二维码</b><p>二维码 10 分钟有效。也可以手动输入下方 6 位码，配合 Endpoint ID 使用。</p></div></div>
+                <div class="step"><div class="step-num">03</div><div><b>设备出现在列表即完成</b><p>手机端会显示“已配对”。默认 full 权限，可随时在本机吊销。</p></div></div>
+              </div>
+              <div class="divider"></div>
+              <div class="pair-status"><span class="dot" id="pair-dot"></span><span id="pair-status-text">没有进行中的配对</span></div>
+              <div class="mono muted" style="font-size:10.5px;margin-top:8px;line-height:1.7">Endpoint ID<br><span id="pair-endpoint" style="color:#c8c4da;word-break:break-all">—</span></div>
+            </div>
+            <div class="safety" style="margin-top:13px">如果手机与电脑不在同一局域网，请先在设置中启用 relay，或填写自托管 relay 地址。二维码中的直连地址只在同一网络内有效。</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 设备 -->
+      <section class="page" id="page-devices">
+        <div class="banner"><span class="ico" data-icon="shield" style="width:17px;height:17px"></span><div>设备权限分四级：read 只读、control 可发消息/审批、full 可改模型与设置、owner 可管理设备。桌面设备 full 最多 3 台。</div></div>
+        <div class="section-head"><h3>已授权设备</h3><span class="caption" id="devices-caption">0 台</span></div>
+        <div class="devices" id="devices-list"><div class="empty"><b>还没有配对设备</b>打开配对页生成二维码。</div></div>
+      </section>
+
+      <!-- 会话 -->
+      <section class="page" id="page-sessions">
+        <div class="section-head" style="margin-top:0"><h3>本机会话</h3><span class="caption">索引来自 pi 的 .jsonl 会话文件</span><span class="right"><button class="btn" id="btn-refresh-sessions"><span class="ico" data-icon="refresh"></span>刷新</button></span></div>
+        <div class="sessions-grid" id="sessions-list"><div class="empty" style="grid-column:1/-1"><b>暂无会话</b>从手机端发起对话后，这里会出现会话索引。</div></div>
+      </section>
+
+      <!-- 设置 -->
+      <section class="page" id="page-settings">
+        <div class="banner" id="settings-banner"><span class="ico" data-icon="info" style="width:17px;height:17px"></span><div>修改 relay、节点名或 pi 路径后需要重启桥接服务才能生效。审批超时与权限默认值可即时保存。</div></div>
+        <div class="card" style="margin-bottom:14px">
+          <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+            <div style="flex:1;min-width:220px">
+              <h3>外观</h3>
+              <div class="caption">跟随 Windows 的黑夜 / 白天模式，或固定为黑色、白色。切换立即生效，并记住选择。</div>
+            </div>
+            <div class="segment" id="set-theme">
+              <button data-value="auto">自动</button>
+              <button data-value="dark">黑色</button>
+              <button data-value="light">白色</button>
+            </div>
+          </div>
+        </div>
+        <div class="grid g2">
+          <div class="card">
+            <h3>节点</h3>
+            <div class="caption">显示在手机节点列表中的名称，以及要托管的 pi 可执行文件。</div>
+            <div class="form" style="margin-top:16px">
+              <div class="field"><label>节点名称</label><input class="input" id="set-node-name" placeholder="STUDIO PC" /></div>
+              <div class="field"><label>pi 可执行文件</label><input class="input mono" id="set-pi-path" placeholder="pi" /><div class="hint">留空使用 PATH 中的 pi；也可以填写绝对路径。</div></div>
+              <div class="field"><label>新设备默认权限</label>
+                <div class="segment" id="set-capability"><button data-value="full">full</button><button data-value="control">control</button><button data-value="read">read</button></div>
+                <div class="hint">手机默认 control；桌面配对会自动申请 full（上限 3 台）。</div>
+              </div>
+              <div class="field"><label>审批超时（秒）</label><input class="input mono" id="set-approval-timeout" type="number" min="10" max="3600" /></div>
+            </div>
+          </div>
+          <div class="card">
+            <h3>传输</h3>
+            <div class="caption">直连优先；relay 只用于 NAT 穿透失败时中继加密流量。</div>
+            <div class="form" style="margin-top:16px">
+              <div class="field"><label>Relay 模式</label>
+                <div class="segment" id="set-relay"><button data-value="n0">n0 公共 relay</button><button data-value="disabled">禁用（仅局域网）</button><button data-value="custom">自托管</button></div>
+                <div class="hint" id="relay-hint">n0 提供开箱即用的穿透，但中继节点会看到连接元数据。</div>
+              </div>
+              <div class="field" id="relay-urls-field"><label>Relay URL</label><textarea class="textarea" id="set-relay-urls" placeholder="https://relay.example.com"></textarea><div class="hint">每行一个，仅“自托管”模式使用。</div></div>
+              <div class="switch-row"><div class="main-col"><b>局域网 mDNS 发现</b><span>在同一网段广播节点地址；需要系统允许组播。</span></div><div class="switch" id="set-mdns"></div></div>
+            </div>
+          </div>
+        </div>
+        <div class="grid g2" style="margin-top:14px">
+          <div class="card">
+            <h3>托盘与启动</h3>
+            <div class="form" style="margin-top:14px">
+              <div class="switch-row"><div class="main-col"><b>关闭窗口时最小化到托盘</b><span>桥接服务继续运行，手机仍可连接。</span></div><div class="switch" id="set-close-tray"></div></div>
+              <div class="switch-row"><div class="main-col"><b>开机自动启动</b><span>登录 Windows 后在托盘启动 pi carry。</span></div><div class="switch" id="set-autostart"></div></div>
+            </div>
+          </div>
+          <div class="card">
+            <h3>数据与诊断</h3>
+            <div class="caption">配置、密钥、SQLite 状态库与日志都在本机数据目录。</div>
+            <div class="addresses" style="margin-top:14px"><span class="address" id="data-dir">—</span></div>
+            <div style="display:flex;gap:8px;margin-top:16px">
+              <button class="btn" id="btn-open-data"><span class="ico" data-icon="folder"></span>打开数据目录</button>
+              <button class="btn" data-go="logs"><span class="ico" data-icon="terminal"></span>查看日志</button>
+            </div>
+          </div>
+        </div>
+        <div class="settings-actions"><button class="btn" id="btn-reload-settings">重新读取</button><button class="btn primary" id="btn-save-settings">保存设置</button></div>
+      </section>
+
+      <!-- 日志 -->
+      <section class="page" id="page-logs">
+        <div class="section-head" style="margin-top:0"><h3>运行日志</h3><span class="caption" id="log-path">desktop.log</span><span class="right"><button class="btn" id="btn-refresh-logs"><span class="ico" data-icon="refresh"></span>刷新</button></span></div>
+        <div class="log" id="log-view">正在读取日志…</div>
+      </section>
+    </div>
+  </main>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+(() => {
+  const icons = {
+    grid: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
+    qr: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM20 14h1M14 20h1M18 18h3v3h-3z"/>',
+    phone: '<rect x="6" y="2" width="12" height="20" rx="2.5"/><path d="M11 18h2"/>',
+    chat: '<path d="M21 12a8 8 0 0 1-8 8H5l-2 2V12a8 8 0 0 1 8-8h2a8 8 0 0 1 8 8z"/>',
+    sliders: '<path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h10M18 18h2"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="16" cy="18" r="2"/>',
+    terminal: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M13 15h4"/>',
+    copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/>',
+    refresh: '<path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/>',
+    folder: '<path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+    shield: '<path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/>',
+    info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>',
+    trash: '<path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/>',
+    phone2: '<rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/>'
+  };
+
+  const $ = (sel, root = document) => root.querySelector(sel);
+  const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
+  const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+  const icon = (name, size = 16) => `<svg class="ico" viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${icons[name] || ''}</svg>`;
+
+  const api = window.__TAURI__;
+  const invoke = api?.core?.invoke;
+  const listen = api?.event?.listen;
+
+  let status = { running: false };
+  let devices = [];
+  let sessions = [];
+  let settings = null;
+  let pairing = null;
+  let pairingTimer = null;
+  let pollTimer = null;
+  let page = 'overview';
+  let themeMode = 'auto';
+  const systemTheme = window.matchMedia('(prefers-color-scheme: dark)');
+
+  const titles = {
+    overview: ['概览', '本机桥接与连接状态'],
+    pairing: ['配对手机', '扫描二维码，把手机接到这台电脑'],
+    devices: ['设备', '已授权设备与权限边界'],
+    sessions: ['会话', '本机会话索引，只读'],
+    settings: ['设置', '传输、权限与托盘行为'],
+    logs: ['诊断日志', '本机运行记录，不上传'],
+  };
+
+  function toast(message, isError = false) {
+    const el = $('#toast');
+    el.textContent = message;
+    el.classList.toggle('err', isError);
+    el.classList.add('show');
+    clearTimeout(toast._t);
+    toast._t = setTimeout(() => el.classList.remove('show'), 3200);
+  }
+
+  function go(next) {
+    if (!titles[next]) return;
+    page = next;
+    $$('.page').forEach((el) => el.classList.toggle('active', el.id === `page-${next}`));
+    $$('.nav button').forEach((el) => el.classList.toggle('active', el.dataset.page === next));
+    const [title, sub] = titles[next];
+    $('#page-title').textContent = title;
+    $('#page-sub').textContent = sub;
+    if (next === 'settings') loadSettings();
+    if (next === 'logs') loadLogs();
+    if (next === 'devices') renderDevices();
+    if (next === 'sessions') renderSessions();
+  }
+
+  function relTime(value) {
+    if (!value) return '—';
+    const t = Date.parse(value);
+    if (!Number.isFinite(t)) return value;
+    const diff = Math.max(0, Date.now() - t);
+    if (diff < 60_000) return '刚刚';
+    if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`;
+    if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前`;
+    return `${Math.floor(diff / 86_400_000)} 天前`;
+  }
+
+  function statusTone(statusName) {
+    return statusName === 'streaming' ? 'green' : statusName === 'waiting_approval' ? 'amber' : statusName === 'error' ? 'rose' : '';
+  }
+
+  function statusLabel(statusName) {
+    return { streaming: '运行中', waiting_approval: '等待审批', waiting_input: '等待输入', error: '出错', idle: '空闲' }[statusName] || statusName || '空闲';
+  }
+
+  function renderStatus() {
+    const running = !!status.running;
+    $('#side-dot').className = `dot ${running ? 'on' : status.lastError ? 'err' : ''}`;
+    $('#side-state').textContent = running ? '桥接运行中' : status.lastError ? '启动失败' : '已停止';
+    $('#side-endpoint').textContent = status.endpointId ? status.endpointId.slice(0, 18) + '…' : '—';
+    $('#top-relay').textContent = `relay · ${status.relayMode || '—'}`;
+    $('#top-relay').className = `pill ${status.relayMode === 'disabled' ? 'amber' : 'violet'}`;
+    $('#top-pi').textContent = status.piInstalled ? 'pi · 已安装' : 'pi · 未找到';
+    $('#top-pi').className = `pill ${status.piInstalled ? 'green' : 'rose'}`;
+    $('#hero-title').textContent = running ? (status.nodeName || 'pi carry 节点') : status.lastError ? '桥接启动失败' : '正在启动桥接服务';
+    $('#hero-sub').textContent = running
+      ? 'pi 正在本机运行；手机通过加密 QUIC 连接，不经过云端账号。'
+      : status.lastError || '正在读取本机配置并初始化 iroh endpoint…';
+    $('#hero-endpoint').textContent = status.endpointId || '—';
+    $('#hero-state').textContent = running ? '● 运行中' : status.lastError ? '● 失败' : '● 启动中';
+    $('#hero-state').className = `pill ${running ? 'green' : status.lastError ? 'rose' : 'amber'}`;
+    $('#hero-version').textContent = status.version ? `core ${status.version}` : '';
+    $('#m-devices').innerHTML = `${status.deviceCount || 0}<small>台</small>`;
+    $('#m-online').innerHTML = `${status.onlineDevices || 0}<small>台</small>`;
+    $('#m-sessions').innerHTML = `${status.sessionCount || 0}<small>个</small>`;
+    $('#m-running').textContent = `${status.runningSessions || 0} 个运行中`;
+    $('#m-approvals').innerHTML = `${status.pendingApprovals || 0}<small>待处理</small>`;
+    $('#nav-devices').textContent = status.deviceCount || 0;
+    $('#nav-sessions').textContent = status.sessionCount || 0;
+    $('#relay-pill').textContent = status.relayMode === 'disabled' ? '仅局域网' : status.relayMode === 'custom' ? '自托管 relay' : 'n0 relay';
+    const addrs = status.directAddresses || [];
+    $('#addresses').innerHTML = addrs.length
+      ? addrs.map((a) => `<span class="address">${esc(a)}</span>`).join('')
+      : '<span class="address">relay 就绪后显示直连地址</span>';
+    if (status.lastError) {
+      $('#settings-banner').classList.add('rose');
+      $('#settings-banner').innerHTML = `${icon('info', 17)}<div>${esc(status.lastError)}</div>`;
+    }
+    $('#pair-endpoint').textContent = status.endpointId || '—';
+  }
+
+  function renderDevices() {
+    const list = devices.filter((d) => !d.revokedAt);
+    $('#devices-caption').textContent = `${list.length} 台`;
+    $('#nav-devices').textContent = list.length;
+    const html = list.length ? list.map((d) => `
+      <div class="device">
+        <div class="avatar ${d.deviceClass === 'desktop' ? '' : 'cyan'}">${d.deviceClass === 'desktop' ? '▣' : '▯'}</div>
+        <div style="min-width:0;flex:1">
+          <div class="name">${esc(d.name)} ${d.online ? '<span class="pill green" style="margin-left:6px">在线</span>' : ''}</div>
+          <div class="id">${esc(d.id.slice(0, 22))}… · ${esc(d.platform)}</div>
+        </div>
+        <div class="right">
+          <span class="pill ${d.capability === 'full' ? 'violet' : ''}">${esc(d.capability)}</span>
+          <span class="time">${esc(relTime(d.lastSeen))}</span>
+          <button class="btn danger" data-revoke="${esc(d.id)}">${icon('trash', 14)}吊销</button>
+        </div>
+      </div>`).join('') : '<div class="empty"><b>还没有配对设备</b>打开配对页，用手机扫描二维码。</div>';
+    $('#devices-list').innerHTML = html;
+    $('#recent-devices').innerHTML = list.length ? list.slice(0, 3).map((d) => `
+      <div class="row">
+        <div class="avatar ${d.deviceClass === 'desktop' ? '' : 'cyan'}">${d.deviceClass === 'desktop' ? '▣' : '▯'}</div>
+        <div class="main-col"><div class="title">${esc(d.name)} ${d.online ? '<span class="dot on" style="display:inline-block;margin-left:5px"></span>' : ''}</div><div class="meta">${esc(d.platform)} · ${esc(d.capability)}</div></div>
+        <div class="time">${esc(relTime(d.lastSeen))}</div>
+      </div>`).join('') : '<div class="empty"><b>还没有配对设备</b>打开配对页，用手机扫描二维码。</div>';
+    $$('[data-revoke]').forEach((btn) => btn.addEventListener('click', () => revoke(btn.dataset.revoke)));
+  }
+
+  function renderSessions() {
+    const list = sessions || [];
+    $('#nav-sessions').textContent = list.length;
+    $('#sessions-list').innerHTML = list.length ? list.map((s) => `
+      <div class="session-card">
+        <div class="top"><span class="dot ${s.status === 'streaming' ? 'on' : s.status === 'waiting_approval' ? 'warn' : ''}"></span><span class="title">${esc(s.name || s.preview || '未命名会话')}</span><span class="pill ${statusTone(s.status)}" style="margin-left:auto">${esc(statusLabel(s.status))}</span></div>
+        <div class="cwd">${esc(s.cwd || '—')}</div>
+        <div class="foot"><span>${s.messageCount || 0} 条消息</span><span>·</span><span>${esc(relTime(s.updatedAt))}</span>${s.pendingApprovals ? `<span class="pill rose" style="margin-left:auto">${s.pendingApprovals} 待审批</span>` : ''}</div>
+      </div>`).join('') : '<div class="empty" style="grid-column:1/-1"><b>暂无会话</b>从手机端发起对话后，这里会出现会话索引。</div>';
+    $('#recent-sessions').innerHTML = list.length ? list.slice(0, 4).map((s) => `
+      <div class="row">
+        <div class="avatar">▤</div>
+        <div class="main-col"><div class="title">${esc(s.name || s.preview || '未命名会话')}</div><div class="meta">${esc(s.cwd || '')}</div></div>
+        <span class="pill ${statusTone(s.status)}">${esc(statusLabel(s.status))}</span>
+        <div class="time">${esc(relTime(s.updatedAt))}</div>
+      </div>`).join('') : '<div class="empty"><b>暂无会话</b>手机端发起对话后，这里会出现索引。</div>';
+  }
+
+  async function refresh() {
+    if (!invoke) {
+      $('#hero-title').textContent = '桌面运行时不可用';
+      $('#hero-sub').textContent = '请通过 pi-carry-desktop 启动，而不是直接用浏览器打开。';
+      return;
+    }
+    try {
+      const s = await invoke('get_status');
+      status = s || { running: false };
+      renderStatus();
+      if (status.running) {
+        const [d, ss] = await Promise.all([invoke('list_devices'), invoke('list_sessions')]);
+        devices = d || [];
+        sessions = ss || [];
+        renderDevices();
+        renderSessions();
+      }
+    } catch (err) {
+      $('#side-state').textContent = '读取状态失败';
+      console.error(err);
+    }
+  }
+
+  async function startPairing() {
+    try {
+      const p = await invoke('start_pairing', { relay: null });
+      pairing = p;
+      $('#qr-frame').innerHTML = p.qrSvg || '<div class="qr-placeholder">二维码生成失败</div>';
+      const digits = String(p.code || '').padStart(6, '0').split('');
+      $('#code-row').innerHTML = digits.map((d) => `<div class="code-digit">${esc(d)}</div>`).join('');
+      $('#btn-cancel-pair').disabled = false;
+      $('#copy-uri').disabled = false;
+      $('#pair-status-text').textContent = '等待手机扫描或输入 6 位码…';
+      $('#pair-dot').className = 'dot warn';
+      updatePairingExpiry();
+      clearInterval(pairingTimer);
+      pairingTimer = setInterval(() => { updatePairingExpiry(); pollPairing(); }, 1000);
+      toast('配对会话已生成，10 分钟内有效');
+    } catch (err) {
+      toast(String(err), true);
+    }
+  }
+
+  function updatePairingExpiry() {
+    if (!pairing?.expiresAt) return;
+    const left = Math.max(0, Math.floor((Date.parse(pairing.expiresAt) - Date.now()) / 1000));
+    const mm = String(Math.floor(left / 60)).padStart(2, '0');
+    const ss = String(left % 60).padStart(2, '0');
+    $('#pair-expiry').textContent = left > 0 ? `有效期 ${mm}:${ss} · 过期后自动作废` : '已过期，请重新生成';
+    if (left <= 0) {
+      $('#pair-dot').className = 'dot err';
+      $('#pair-status-text').textContent = '配对已过期';
+      clearInterval(pairingTimer);
+      $('#btn-cancel-pair').disabled = true;
+      $('#copy-uri').disabled = true;
+    }
+  }
+
+  async function pollPairing() {
+    try {
+      const res = await invoke('pairing_status');
+      const st = res?.status;
+      if (!st?.active) {
+        $('#pair-dot').className = 'dot on';
+        $('#pair-status-text').textContent = st?.verified ? '配对完成，设备已接入' : '配对会话已结束';
+        $('#btn-cancel-pair').disabled = true;
+        $('#copy-uri').disabled = true;
+        clearInterval(pairingTimer);
+        refresh();
+        return;
+      }
+      if (st.verified) {
+        $('#pair-dot').className = 'dot on';
+        $('#pair-status-text').textContent = '已校验配对码，等待设备接入…';
+      } else {
+        $('#pair-status-text').textContent = `等待手机扫码 · 剩余 ${st.attemptsRemaining ?? 5} 次尝试`;
+      }
+    } catch { /* 轮询失败不打扰用户 */ }
+  }
+
+  async function cancelPairing() {
+    try {
+      await invoke('cancel_pairing');
+      pairing = null;
+      clearInterval(pairingTimer);
+      $('#qr-frame').innerHTML = '<div class="qr-placeholder"><span>配对已取消</span></div>';
+      $('#code-row').innerHTML = Array.from({ length: 6 }, () => '<div class="code-digit">·</div>').join('');
+      $('#pair-expiry').textContent = '等待生成配对会话';
+      $('#pair-status-text').textContent = '没有进行中的配对';
+      $('#pair-dot').className = 'dot';
+      $('#btn-cancel-pair').disabled = true;
+      $('#copy-uri').disabled = true;
+      toast('已取消配对');
+    } catch (err) { toast(String(err), true); }
+  }
+
+  async function revoke(id) {
+    if (!confirm('吊销后这台设备会立即断开，且无法再次连接。确定继续？')) return;
+    try {
+      await invoke('revoke_device', { id });
+      toast('设备已吊销');
+      refresh();
+    } catch (err) { toast(String(err), true); }
+  }
+
+  async function loadSettings() {
+    try {
+      settings = await invoke('get_settings');
+      $('#set-node-name').value = settings.node?.name || '';
+      $('#set-pi-path').value = settings.node?.piPath || '';
+      $('#set-approval-timeout').value = settings.approvals?.timeoutSecs ?? 120;
+      $('#set-relay-urls').value = (settings.transport?.relayUrls || []).join('\n');
+      $('#set-mdns').classList.toggle('on', !!settings.transport?.enableMdns);
+      $('#set-close-tray').classList.toggle('on', !!settings.closeToTray);
+      $('#set-autostart').classList.toggle('on', !!settings.service?.autostart);
+      $('#data-dir').textContent = settings.dataDir || '—';
+      selectSegment('set-relay', settings.transport?.relayMode || 'n0');
+      selectSegment('set-capability', settings.sessions?.defaultCapability || 'full');
+      applyTheme(settings.ui?.theme || 'auto', false);
+      updateRelayHint();
+    } catch (err) { toast(String(err), true); }
+  }
+
+  function applyTheme(mode, persist) {
+    themeMode = ['auto', 'dark', 'light'].includes(mode) ? mode : 'auto';
+    const dark = themeMode === 'dark' || (themeMode === 'auto' && systemTheme.matches);
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+    document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
+    localStorage.setItem('pi_carry_theme', themeMode);
+    selectSegment('set-theme', themeMode);
+    if (invoke) {
+      invoke('set_window_theme', { theme: themeMode }).catch(() => {});
+      if (persist) {
+        invoke('update_settings', { values: { theme: themeMode } }).catch((err) => toast(String(err), true));
+      }
+    }
+  }
+
+  function selectSegment(id, value) {
+    const root = document.getElementById(id);
+    if (!root) return;
+    root.dataset.value = value;
+    $$('button', root).forEach((b) => b.classList.toggle('active', b.dataset.value === value));
+  }
+
+  function segmentValue(id) {
+    return document.getElementById(id)?.dataset.value || '';
+  }
+
+  function updateRelayHint() {
+    const mode = segmentValue('set-relay');
+    $('#relay-urls-field').style.display = mode === 'custom' ? '' : 'none';
+    $('#relay-hint').textContent = mode === 'disabled'
+      ? '禁用 relay 后只能在同一局域网直连；跨网络将无法连接。'
+      : mode === 'custom'
+        ? '使用你信任的 relay 服务；直连仍然优先。'
+        : 'n0 提供开箱即用的穿透，但中继节点会看到连接元数据。';
+  }
+
+  async function saveSettings() {
+    const urls = $('#set-relay-urls').value.split('\n').map((s) => s.trim()).filter(Boolean);
+    const payload = {
+      nodeName: $('#set-node-name').value.trim(),
+      piPath: $('#set-pi-path').value.trim() || 'pi',
+      approvalTimeoutSecs: Number($('#set-approval-timeout').value) || 120,
+      relayMode: segmentValue('set-relay'),
+      relayUrls: urls,
+      enableMdns: $('#set-mdns').classList.contains('on'),
+      closeToTray: $('#set-close-tray').classList.contains('on'),
+      autoStart: $('#set-autostart').classList.contains('on'),
+      defaultCapability: segmentValue('set-capability'),
+      theme: themeMode,
+    };
+    try {
+      const res = await invoke('update_settings', { values: payload });
+      toast(res.restartRequired ? '设置已保存；重启桥接后生效' : '设置已保存');
+      refresh();
+    } catch (err) { toast(String(err), true); }
+  }
+
+  async function restartService() {
+    if (!confirm('重启桥接会断开当前设备连接，手机会自动重连。继续？')) return;
+    try {
+      toast('正在重启…');
+      await invoke('restart_service');
+      toast('桥接已重启');
+      refresh();
+    } catch (err) { toast(String(err), true); }
+  }
+
+  async function loadLogs() {
+    try {
+      const res = await invoke('get_logs', { lines: 300 });
+      $('#log-path').textContent = res.path || 'desktop.log';
+      const lines = (res.lines || []).join('\n');
+      $('#log-view').textContent = lines || '（暂无日志）';
+    } catch (err) { $('#log-view').textContent = String(err); }
+  }
+
+  async function copyText(text, label) {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast(`${label}已复制`);
+    } catch { toast('复制失败', true); }
+  }
+
+  function bind() {
+    $$('[data-icon]').forEach((el) => { el.innerHTML = icon(el.dataset.icon, el.dataset.size || 16); });
+    $$('.nav button').forEach((b) => b.addEventListener('click', () => go(b.dataset.page)));
+    $$('[data-go]').forEach((b) => b.addEventListener('click', () => go(b.dataset.go)));
+    $('#copy-endpoint').addEventListener('click', () => copyText(status.endpointId || '', 'Endpoint ID'));
+    $('#copy-uri').addEventListener('click', () => pairing?.uri && copyText(pairing.uri, '配对链接'));
+    $('#btn-pair').addEventListener('click', startPairing);
+    $('#btn-cancel-pair').addEventListener('click', cancelPairing);
+    $('#btn-restart').addEventListener('click', restartService);
+    $('#btn-data').addEventListener('click', () => invoke('open_data_dir').catch((e) => toast(String(e), true)));
+    $('#btn-open-data').addEventListener('click', () => invoke('open_data_dir').catch((e) => toast(String(e), true)));
+    $('#btn-refresh-sessions').addEventListener('click', refresh);
+    $('#btn-refresh-logs').addEventListener('click', loadLogs);
+    $('#btn-save-settings').addEventListener('click', saveSettings);
+    $('#btn-reload-settings').addEventListener('click', loadSettings);
+    $$('#set-relay button').forEach((b) => b.addEventListener('click', () => { selectSegment('set-relay', b.dataset.value); updateRelayHint(); }));
+    $$('#set-capability button').forEach((b) => b.addEventListener('click', () => selectSegment('set-capability', b.dataset.value)));
+    $$('#set-theme button').forEach((b) => b.addEventListener('click', () => applyTheme(b.dataset.value, true)));
+    systemTheme.addEventListener('change', () => { if (themeMode === 'auto') applyTheme('auto', false); });
+    [['set-mdns'], ['set-close-tray'], ['set-autostart']].forEach(([id]) => $('#' + id).addEventListener('click', (e) => e.currentTarget.classList.toggle('on')));
+    if (listen) {
+      listen('navigate', (event) => go(event.payload)).catch(() => {});
+      listen('bridge-status', () => refresh()).catch(() => {});
+    }
+  }
+
+  bind();
+  applyTheme(localStorage.getItem('pi_carry_theme') || 'auto', false);
+  invoke?.('get_settings').then((s) => applyTheme(s.ui?.theme || 'auto', false)).catch(() => {});
+  refresh();
+  pollTimer = setInterval(refresh, 5000);
+  window.addEventListener('beforeunload', () => clearInterval(pollTimer));
+})();
+</script>
+</body>
+</html>
