@@ -157,6 +157,17 @@ cd android
 
 调试构建的产物位于 `android/app/build/outputs/apk/debug/`。发布包必须使用正式签名构建，不能把 debug APK 当作正式包分发；签名配置和密钥由发布者在本机管理，不进入仓库。
 
+正式签名构建需要一个 Android keystore，并在 `android/keystore.properties` 中提供以下字段（该文件已被 `.gitignore` 排除）：
+
+```properties
+storeFile=keystore/release.p12
+storePassword=***
+keyAlias=pi-carry
+keyPassword=***
+```
+
+然后执行 `./gradlew assembleRelease`，产物位于 `android/app/build/outputs/apk/release/`。缺少 keystore 时只会得到 unsigned APK，`scripts/package.ps1` 会拒绝打包。
+
 ### 测试
 
 ```bash
