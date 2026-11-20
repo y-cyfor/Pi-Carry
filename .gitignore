@@ -56,6 +56,10 @@ Thumbs.db
 .fleet/
 node_modules/
 
+# 项目级系统提示词仅保留在本地，不纳入版本控制
+AGENTS.md
+AGENTS.override.md
+
 # 其他常见构建/崩溃产物
 *.hprof
 hs_err_pid*
