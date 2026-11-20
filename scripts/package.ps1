@@ -1,5 +1,5 @@
 # 重新打包 dist 产物并生成 SHA256 校验和。
-# 桌面包只放运行必需文件：exe、WebView2Loader.dll、简短说明。
+# 桌面包放运行必需文件和许可证；Android 包放两个 ABI 的 APK、说明和许可证。
 $ErrorActionPreference = 'Stop'
 Set-Location (Join-Path $PSScriptRoot '..')
 
@@ -15,8 +15,11 @@ Get-ChildItem $androidDir -File -ErrorAction SilentlyContinue | Remove-Item -For
 Copy-Item target/release/pi-carry-desktop.exe $desktopDir/ -Force
 Copy-Item target/release/WebView2Loader.dll $desktopDir/ -Force
 Copy-Item packaging/desktop-README.txt $desktopDir/README.txt -Force
+Copy-Item LICENSE $desktopDir/LICENSE -Force
 Copy-Item android/app/build/outputs/apk/debug/app-arm64-v8a-debug.apk, `
           android/app/build/outputs/apk/debug/app-x86_64-debug.apk $androidDir/ -Force
+Copy-Item LICENSE $androidDir/LICENSE.txt -Force
+Copy-Item packaging/android-README.txt $androidDir/README.txt -Force
 
 Remove-Item $desktopZip, $androidZip, `
     dist/pi-carry-0.1.0-win-x64.zip, dist/pi-carry-0.1.0-android-debug.zip -ErrorAction SilentlyContinue
