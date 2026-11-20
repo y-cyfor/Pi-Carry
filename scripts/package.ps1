@@ -42,6 +42,7 @@ if (-not $SkipAndroid) {
 
 $lines = Get-FileHash $artifacts -Algorithm SHA256 |
     ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" }
-$lines | Set-Content dist/SHA256SUMS.txt -Encoding utf8
+$text = ($lines -join "`n") + "`n"
+[System.IO.File]::WriteAllText((Join-Path (Get-Location) 'dist/SHA256SUMS.txt'), $text, [System.Text.UTF8Encoding]::new($false))
 Get-ChildItem $artifacts | Format-Table Name, Length
 Get-Content dist/SHA256SUMS.txt
