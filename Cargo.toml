@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 license = "AGPL-3.0-only"
 rust-version = "1.91"
@@ -33,7 +33,7 @@ thiserror = "2.0"
 tokio = { version = "1.43", features = ["full"] }
 toml = "0.8"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "chrono"] }
 ulid = "1.1"
 uuid = { version = "1", features = ["v4"] }
 

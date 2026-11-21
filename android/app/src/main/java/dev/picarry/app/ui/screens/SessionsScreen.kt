@@ -92,6 +92,9 @@ fun SessionsScreen(
         matchQuery && matchFilter
     }
     val grouped = filtered.groupBy { it.nodeId }
+    val scopedNodeName = filterNodeId?.let { id ->
+        nodes.firstOrNull { it.id == id }?.name ?: id.take(8)
+    }
 
     LazyColumn(
         Modifier.fillMaxSize().statusBarsPadding(),
@@ -99,9 +102,9 @@ fun SessionsScreen(
     ) {
         item {
             ScreenHeader(
-                title = "会话",
+                title = scopedNodeName ?: "会话",
                 subtitle = if (filterNodeId == null) "按节点分组 · 今天 ${sessions.size} 个会话"
-                else "${nodes.firstOrNull { it.id == filterNodeId }?.name ?: filterNodeId.take(8)} · ${scoped.size} 个会话",
+                else "节点会话 · ${scoped.size} 个会话",
                 actions = {
                     Box(
                         Modifier

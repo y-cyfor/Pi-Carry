@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -692,35 +693,43 @@ private fun ModelSheet(
     onModel: (ModelOption) -> Unit,
     onThinking: (String) -> Unit,
 ) {
-    Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp).padding(bottom = 28.dp)) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .fillMaxHeight(0.82f)
+            .padding(horizontal = 18.dp)
+            .padding(bottom = 28.dp),
+    ) {
         Text("模型与思考等级", style = MaterialTheme.typography.headlineMedium, color = TextPrimary)
         Spacer(Modifier.height(4.dp))
         Text("切换只影响下一次运行，不会中断当前生成。", style = MaterialTheme.typography.bodySmall, color = TextMuted)
         Spacer(Modifier.height(14.dp))
-        models.forEach { m ->
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(13.dp))
-                    .background(PanelHigh.copy(alpha = if (m.id == currentModel) 0.7f else 0.35f))
-                    .border(0.7.dp, if (m.id == currentModel) Violet.copy(alpha = 0.5f) else Line, RoundedCornerShape(13.dp))
-                    .clickable { onModel(m) }
-                    .padding(12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Box(Modifier.size(30.dp).clip(RoundedCornerShape(9.dp)).background(Violet.copy(alpha = 0.12f)), contentAlignment = Alignment.Center) {
-                    Text(m.name.take(1), style = MaterialTheme.typography.titleMedium, color = Violet)
+        LazyColumn(Modifier.weight(1f).fillMaxWidth()) {
+            items(models) { m ->
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(13.dp))
+                        .background(PanelHigh.copy(alpha = if (m.id == currentModel) 0.7f else 0.35f))
+                        .border(0.7.dp, if (m.id == currentModel) Violet.copy(alpha = 0.5f) else Line, RoundedCornerShape(13.dp))
+                        .clickable { onModel(m) }
+                        .padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(Modifier.size(30.dp).clip(RoundedCornerShape(9.dp)).background(Violet.copy(alpha = 0.12f)), contentAlignment = Alignment.Center) {
+                        Text(m.name.take(1), style = MaterialTheme.typography.titleMedium, color = Violet)
+                    }
+                    Spacer(Modifier.size(10.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(m.name, style = MaterialTheme.typography.titleMedium, color = TextPrimary)
+                        MonoLabel("${m.provider} · ${m.context}", color = TextMuted)
+                    }
+                    MonoLabel(m.price, color = TextMuted)
+                    Spacer(Modifier.size(8.dp))
+                    if (m.id == currentModel) Icon(Icons.Outlined.Check, null, tint = Violet, modifier = Modifier.size(17.dp))
                 }
-                Spacer(Modifier.size(10.dp))
-                Column(Modifier.weight(1f)) {
-                    Text(m.name, style = MaterialTheme.typography.titleMedium, color = TextPrimary)
-                    MonoLabel("${m.provider} · ${m.context}", color = TextMuted)
-                }
-                MonoLabel(m.price, color = TextMuted)
-                Spacer(Modifier.size(8.dp))
-                if (m.id == currentModel) Icon(Icons.Outlined.Check, null, tint = Violet, modifier = Modifier.size(17.dp))
+                Spacer(Modifier.height(7.dp))
             }
-            Spacer(Modifier.height(7.dp))
         }
         Spacer(Modifier.height(12.dp))
         MonoLabel("思考等级")

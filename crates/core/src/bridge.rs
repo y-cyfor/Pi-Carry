@@ -68,6 +68,8 @@ impl Bridge {
         })?;
         let guard_path = guard::ensure(&paths)?;
         let store = Store::open(&paths.db())?;
+        // 上一次进程退出时遗留的 online=1 不能带到本次运行。
+        store.mark_all_devices_offline()?;
         let secrets = Secrets::load_or_create(&paths)?;
         let clock: Arc<dyn Clock> = clock.unwrap_or_else(|| Arc::new(SystemClock));
         let ids: Arc<dyn IdGen> = Arc::new(UlidGen);

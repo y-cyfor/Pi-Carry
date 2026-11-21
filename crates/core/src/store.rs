@@ -234,6 +234,13 @@ impl Store {
         Ok(())
     }
 
+    /// 进程重启后不可能还有已建立的连接，先把持久化的在线标记清零。
+    pub fn mark_all_devices_offline(&self) -> Result<()> {
+        let conn = self.conn.lock().expect("db poisoned");
+        conn.execute("UPDATE devices SET online=0", [])?;
+        Ok(())
+    }
+
     // ---------- 会话索引 ----------
 
     pub fn upsert_session(&self, s: &SessionSummary, file_path: &str) -> Result<()> {
@@ -758,6 +765,10 @@ mod tests {
         };
         s.upsert_device(&d).unwrap();
         assert_eq!(s.list_devices().unwrap().len(), 1);
+        s.touch_device("dev1", "t1", true).unwrap();
+        assert!(s.get_device("dev1").unwrap().unwrap().online);
+        s.mark_all_devices_offline().unwrap();
+        assert!(!s.get_device("dev1").unwrap().unwrap().online);
         assert!(s.revoke_device("dev1", "t1").unwrap());
         assert!(!s.revoke_device("dev1", "t2").unwrap());
         assert!(s.get_device("dev1").unwrap().unwrap().revoked_at.is_some());

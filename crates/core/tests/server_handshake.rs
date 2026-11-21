@@ -258,3 +258,102 @@ async fn pairing_hello_and_node_status() {
     other_client.close().await;
     bridge.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn same_client_key_reconnects_as_one_device_and_refreshes_name() {
+    let (_dir, bridge) = start_bridge_with(|c| c.sessions.default_capability = "full".into()).await;
+    let pairing = bridge.begin_pairing(None);
+    let socket = bridge.server.endpoint().bound_sockets()[0];
+    let addr = iroh::EndpointAddr::new(bridge.server.endpoint().id()).with_ip_addr(socket);
+    let secret = iroh::SecretKey::generate();
+    let client = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        .secret_key(secret)
+        .bind()
+        .await
+        .unwrap();
+
+    let connect = || {
+        let addr = addr.clone();
+        let client = client.clone();
+        async move {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                client.connect(addr, ALPN),
+            )
+            .await
+            .expect("connect 超时")
+            .expect("连接失败")
+        }
+    };
+
+    let conn1 = connect().await;
+    let (mut send1, mut recv1) = conn1.open_bi().await.unwrap();
+    let hello1 = call(
+        &mut send1,
+        &mut recv1,
+        "h1",
+        "hello",
+        serde_json::json!({
+            "protocol": PROTOCOL_VERSION,
+            "client": {"name": "张三的手机 小米15", "platform": "android", "deviceClass": "phone"},
+            "token": pairing.token,
+        }),
+    )
+    .await;
+    assert!(
+        matches!(hello1, ServerFrame::Response { ok: true, .. }),
+        "{hello1:?}"
+    );
+    conn1.close(0u8.into(), b"rotate");
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let conn2 = connect().await;
+    let (mut send2, mut recv2) = conn2.open_bi().await.unwrap();
+    let hello2 = call(
+        &mut send2,
+        &mut recv2,
+        "h2",
+        "hello",
+        serde_json::json!({
+            "protocol": PROTOCOL_VERSION,
+            "client": {"name": "李四的手机 小米15", "platform": "android", "deviceClass": "phone"},
+        }),
+    )
+    .await;
+    assert!(
+        matches!(hello2, ServerFrame::Response { ok: true, .. }),
+        "{hello2:?}"
+    );
+
+    let devices = call(
+        &mut send2,
+        &mut recv2,
+        "d1",
+        "device.list",
+        serde_json::json!({}),
+    )
+    .await;
+    let list = match devices {
+        ServerFrame::Response {
+            ok: true, payload, ..
+        } => payload.unwrap(),
+        other => panic!("device.list 失败: {other:?}"),
+    };
+    let rows = list["devices"].as_array().expect("devices 数组");
+    assert_eq!(rows.len(), 1, "同一客户端密钥只能对应一台设备: {rows:?}");
+    assert_eq!(rows[0]["name"], "李四的手机 小米15");
+    let device_id = rows[0]["id"].as_str().unwrap().to_string();
+
+    conn2.close(0u8.into(), b"done");
+    let mut offline = false;
+    for _ in 0..30 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        if !bridge.store.get_device(&device_id).unwrap().unwrap().online {
+            offline = true;
+            break;
+        }
+    }
+    assert!(offline, "最后一条连接断开后设备必须离线");
+    client.close().await;
+    bridge.shutdown().await;
+}

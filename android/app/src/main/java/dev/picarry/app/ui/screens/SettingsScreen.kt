@@ -81,6 +81,9 @@ import dev.picarry.app.ui.theme.Violet
 @Composable
 fun SettingsScreen(repo: CarryRepository, onPair: () -> Unit) {
     val context = LocalContext.current
+    val appVersion = runCatching {
+        context.packageManager.getPackageInfo(context.packageName, 0).versionName
+    }.getOrNull() ?: "0.1.2"
     val nodes by repo.nodes.collectAsState()
     val link by repo.link.collectAsState()
     val themeMode by repo.themeMode.collectAsState()
@@ -282,7 +285,7 @@ fun SettingsScreen(repo: CarryRepository, onPair: () -> Unit) {
         SectionLabel("关于")
         CarryCard(Modifier.fillMaxWidth()) {
             Column {
-                SettingRow(icon = Icons.Outlined.Science, title = "pi carry", subtitle = "远程驾驶舱 · Android", trailing = { MonoLabel("0.1.0", color = TextMuted) })
+                SettingRow(icon = Icons.Outlined.Science, title = "pi carry", subtitle = "远程驾驶舱 · Android", trailing = { MonoLabel(appVersion, color = TextMuted) })
                 DividerLine()
                 SettingRow(icon = Icons.Outlined.Security, title = "隐私", subtitle = "无账号、无云同步、凭据仅存本机", trailing = {})
                 DividerLine()
@@ -291,7 +294,7 @@ fun SettingsScreen(repo: CarryRepository, onPair: () -> Unit) {
                     title = "开源许可",
                     subtitle = "iroh4k · Kotlin · Compose",
                     onClick = {
-                        runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/ranxianglei/billion-context"))) }
+                        runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/y-cyfor/Pi-Carry/"))) }
                     },
                     trailing = { Icon(Icons.Outlined.ChevronRight, null, tint = TextMuted, modifier = Modifier.size(16.dp)) },
                 )

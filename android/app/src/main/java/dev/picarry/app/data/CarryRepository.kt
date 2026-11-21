@@ -39,6 +39,26 @@ import java.util.UUID
 class CarryRepository(context: Context) {
     private val appContext = context.applicationContext
     private val store = NodeStore(appContext)
+    private val clientVersion: String by lazy {
+        runCatching {
+            appContext.packageManager.getPackageInfo(appContext.packageName, 0).versionName
+        }.getOrNull() ?: "0.1.2"
+    }
+
+    /** 电脑端看到的是“用户设备名 + 型号”，不再统一显示 pi carry。 */
+    private fun clientName(): String {
+        val deviceName = runCatching {
+            android.provider.Settings.Global.getString(
+                appContext.contentResolver,
+                android.provider.Settings.Global.DEVICE_NAME,
+            )
+        }.getOrNull()?.trim().orEmpty()
+        val model = Build.MODEL?.trim().orEmpty()
+        return listOfNotNull(
+            deviceName.takeIf { it.isNotEmpty() },
+            model.takeIf { it.isNotEmpty() && !it.equals(deviceName, ignoreCase = true) },
+        ).joinToString(" ").ifBlank { "Android" }
+    }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val syncing = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     // 快照在途时先缓冲事件，避免快照整体覆盖期间到达的增量/最终消息丢失。
@@ -137,6 +157,9 @@ class CarryRepository(context: Context) {
         connections[id]?.stop()
         val conn = NodeConnection(
             node = node,
+            clientSecret = store.clientSecret(),
+            clientName = clientName(),
+            clientVersion = clientVersion,
             scope = scope,
             onEvent = { sessionId, seq, event -> onEvent(id, sessionId, seq, event) },
             onState = { state, error ->

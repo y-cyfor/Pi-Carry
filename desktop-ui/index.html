@@ -549,7 +549,7 @@
                 <div class="hint" id="relay-hint">n0 提供开箱即用的穿透，但中继节点会看到连接元数据。</div>
               </div>
               <div class="field" id="relay-urls-field"><label>Relay URL</label><textarea class="textarea" id="set-relay-urls" placeholder="https://relay.example.com"></textarea><div class="hint">每行一个，仅“自托管”模式使用。</div></div>
-              <div class="switch-row"><div class="main-col"><b>局域网 mDNS 发现</b><span>在同一网段广播节点地址；需要系统允许组播。</span></div><div class="switch" id="set-mdns"></div></div>
+              <div class="switch-row"><div class="main-col"><b>局域网发现</b><span>配对二维码已包含局域网直连地址，无需额外 mDNS 服务。</span></div></div>
             </div>
           </div>
         </div>
@@ -866,7 +866,6 @@
       $('#set-pi-path').value = settings.node?.piPath || '';
       $('#set-approval-timeout').value = settings.approvals?.timeoutSecs ?? 120;
       $('#set-relay-urls').value = (settings.transport?.relayUrls || []).join('\n');
-      $('#set-mdns').classList.toggle('on', !!settings.transport?.enableMdns);
       $('#set-close-tray').classList.toggle('on', !!settings.closeToTray);
       $('#set-autostart').classList.toggle('on', !!settings.service?.autostart);
       $('#data-dir').textContent = settings.dataDir || '—';
@@ -921,7 +920,6 @@
       approvalTimeoutSecs: Number($('#set-approval-timeout').value) || 120,
       relayMode: segmentValue('set-relay'),
       relayUrls: urls,
-      enableMdns: $('#set-mdns').classList.contains('on'),
       closeToTray: $('#set-close-tray').classList.contains('on'),
       autoStart: $('#set-autostart').classList.contains('on'),
       defaultCapability: segmentValue('set-capability'),
@@ -932,6 +930,20 @@
       toast(res.restartRequired ? '设置已保存；重启桥接后生效' : '设置已保存');
       refresh();
     } catch (err) { toast(String(err), true); }
+  }
+
+  // 开关类设置点击即落盘，避免切到其他页面后 loadSettings() 又读回旧值。
+  async function persistSwitch(id, key) {
+    const el = $('#' + id);
+    const next = !el.classList.contains('on');
+    el.classList.toggle('on', next);
+    try {
+      await invoke('update_settings', { values: { [key]: next } });
+      toast(next ? '已开启' : '已关闭');
+    } catch (err) {
+      el.classList.toggle('on', !next);
+      toast(String(err), true);
+    }
   }
 
   async function restartService() {
@@ -979,7 +991,8 @@
     $$('#set-capability button').forEach((b) => b.addEventListener('click', () => selectSegment('set-capability', b.dataset.value)));
     $$('#set-theme button').forEach((b) => b.addEventListener('click', () => applyTheme(b.dataset.value, true)));
     systemTheme.addEventListener('change', () => { if (themeMode === 'auto') applyTheme('auto', false); });
-    [['set-mdns'], ['set-close-tray'], ['set-autostart']].forEach(([id]) => $('#' + id).addEventListener('click', (e) => e.currentTarget.classList.toggle('on')));
+    $('#set-close-tray').addEventListener('click', () => persistSwitch('set-close-tray', 'closeToTray'));
+    $('#set-autostart').addEventListener('click', () => persistSwitch('set-autostart', 'autoStart'));
     if (listen) {
       listen('navigate', (event) => go(event.payload)).catch(() => {});
       listen('bridge-status', () => refresh()).catch(() => {});

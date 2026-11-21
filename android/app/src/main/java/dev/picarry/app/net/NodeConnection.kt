@@ -30,6 +30,7 @@ import tech.annexflow.iroh4k.EndpointPreset
 import tech.annexflow.iroh4k.RecvStream
 import tech.annexflow.iroh4k.RelayMode
 import tech.annexflow.iroh4k.SendStream
+import tech.annexflow.iroh4k.SecretKey
 import tech.annexflow.iroh4k.SocketAddr
 import tech.annexflow.iroh4k.connect
 import tech.annexflow.iroh4k.openBi
@@ -42,6 +43,9 @@ import java.util.concurrent.atomic.AtomicLong
  */
 class NodeConnection(
     val node: Node,
+    private val clientSecret: ByteArray,
+    private val clientName: String,
+    private val clientVersion: String,
     private val scope: CoroutineScope,
     private val onEvent: (sessionId: String?, seq: Long, event: JsonObject) -> Unit,
     private val onState: (LinkState, String?) -> Unit,
@@ -113,6 +117,7 @@ class NodeConnection(
         }
         val cfg = EndpointConfig(
             preset = if (relayMode is RelayMode.Disabled) EndpointPreset.Minimal else EndpointPreset.N0,
+            secretKey = SecretKey.fromBytes(clientSecret),
             relayMode = relayMode,
             bindAddrs = listOf(SocketAddr.parse("0.0.0.0:0")),
             alpns = listOf(ALPN),
@@ -247,9 +252,9 @@ class NodeConnection(
         put("payload", buildJsonObject {
             put("protocol", JsonPrimitive("carry.v1"))
             put("client", buildJsonObject {
-                put("name", JsonPrimitive("pi carry"))
+                put("name", JsonPrimitive(clientName))
                 put("platform", JsonPrimitive("android"))
-                put("appVersion", JsonPrimitive("0.1.0"))
+                put("appVersion", JsonPrimitive(clientVersion))
                 put("deviceClass", JsonPrimitive("phone"))
                 put("locale", JsonPrimitive("zh-CN"))
             })

@@ -17,9 +17,11 @@ use pi_carry_protocol::{
     UiResponsePayload, ALPN, MAX_CONTROL_FRAME,
 };
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
 
 pub struct Server {
@@ -30,6 +32,8 @@ pub struct Server {
     pairing: PairingManager,
     secrets: Secrets,
     pi_installed: bool,
+    /// 同一设备可能短暂存在新旧两条连接（重连竞态）；只有最后一条断开才算离线。
+    active_connections: Mutex<HashMap<String, usize>>,
 }
 
 struct Auth {
@@ -102,6 +106,7 @@ impl Server {
             pairing,
             secrets,
             pi_installed,
+            active_connections: Mutex::new(HashMap::new()),
         });
         let _ = clock.now();
         let s = server.clone();
@@ -300,6 +305,7 @@ impl Server {
         write_frame(&mut send, &resp, MAX_CONTROL_FRAME)
             .await
             .map_err(|e| CoreError::Internal(format!("发送 hello 响应失败: {e}")))?;
+        self.connection_opened(&auth.device.id);
 
         // 事件和控制响应共用同一条双向控制流：
         // 1) 顺序有保证，客户端不需要额外 accept_uni；
@@ -357,11 +363,35 @@ impl Server {
         drop(out_tx);
         forwarder.abort();
         let _ = writer.await;
-        let _ = self
-            .store
-            .touch_device(&auth.device.id, &crate::rfc3339(Utc::now()), false);
+        // 旧连接清理不能把刚建立的新连接误标为离线。
+        if self.connection_closed(&auth.device.id) {
+            let _ = self
+                .store
+                .touch_device(&auth.device.id, &crate::rfc3339(Utc::now()), false);
+        }
         conn.close(0u32.into(), b"bye");
         result
+    }
+
+    fn connection_opened(&self, device_id: &str) {
+        let mut active = self.active_connections.lock().expect("active poisoned");
+        *active.entry(device_id.to_string()).or_insert(0) += 1;
+    }
+
+    /// 返回 true 表示这是该设备最后一条连接。
+    fn connection_closed(&self, device_id: &str) -> bool {
+        let mut active = self.active_connections.lock().expect("active poisoned");
+        match active.get_mut(device_id) {
+            Some(count) if *count > 1 => {
+                *count -= 1;
+                false
+            }
+            Some(_) => {
+                active.remove(device_id);
+                true
+            }
+            None => true,
+        }
     }
 
     async fn authenticate(&self, remote_id: &str, hello: &HelloPayload) -> Result<Auth> {
@@ -387,11 +417,22 @@ impl Server {
                 self.verify_password(pw)?;
             }
             let now = crate::rfc3339(Utc::now());
-            self.store.touch_device(remote_id, &now, true)?;
+            let mut d = d;
+            // 设备重连时刷新展示信息；手机型号/系统名可能升级后变化。
+            if !hello.client.name.trim().is_empty() {
+                d.name = hello.client.name.clone();
+            }
+            if !hello.client.platform.trim().is_empty() {
+                d.platform = hello.client.platform.clone();
+            }
+            if !hello.client.device_class.trim().is_empty() {
+                d.device_class = hello.client.device_class.clone();
+            }
+            d.online = true;
+            d.last_seen = now.clone();
+            self.store.upsert_device(&d)?;
             self.store
                 .audit(&now, remote_id, "device.connect", &json!({"name": d.name}))?;
-            let mut d = d;
-            d.online = true;
             return Ok(Auth { device: d });
         }
 
@@ -479,11 +520,20 @@ impl Server {
         node: &NodeInfo,
     ) -> Result<()> {
         loop {
-            let frame = match read_frame(recv, MAX_CONTROL_FRAME).await {
-                Ok(Some(b)) => b,
-                Ok(None) => break,
-                Err(e) => {
+            // 手机每 15 秒发一次 ping/ACK；60 秒收不到任何帧说明连接已半开，
+            // 必须主动结束并把设备标记离线，否则电脑端会一直显示“在线”。
+            let read =
+                tokio::time::timeout(Duration::from_secs(60), read_frame(recv, MAX_CONTROL_FRAME))
+                    .await;
+            let frame = match read {
+                Ok(Ok(Some(b))) => b,
+                Ok(Ok(None)) => break,
+                Ok(Err(e)) => {
                     tracing::warn!(device = %auth.device.id, error = %e, "控制流读取失败");
+                    break;
+                }
+                Err(_) => {
+                    tracing::warn!(device = %auth.device.id, "控制流 60 秒无数据，判定离线");
                     break;
                 }
             };

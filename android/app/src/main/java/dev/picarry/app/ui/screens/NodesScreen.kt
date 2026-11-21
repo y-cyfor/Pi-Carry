@@ -16,7 +16,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
@@ -76,17 +75,6 @@ fun NodesScreen(repo: CarryRepository, onPair: () -> Unit, onOpenSessions: (Stri
             ScreenHeader(
                 title = "节点",
                 subtitle = "$online 在线 · 直连优先",
-                actions = {
-                    Box(
-                        Modifier
-                            .size(38.dp)
-                            .clip(CircleShape)
-                            .background(Violet.copy(alpha = 0.18f))
-                            .border(0.7.dp, Violet.copy(alpha = 0.5f), CircleShape)
-                            .clickable(onClick = onPair),
-                        contentAlignment = Alignment.Center,
-                    ) { Icon(Icons.Outlined.Add, "配对节点", tint = Violet, modifier = Modifier.size(20.dp)) }
-                },
             )
         }
         item { RelayBar(nodes, link) }

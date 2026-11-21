@@ -248,15 +248,28 @@ private fun BottomBar(nav: NavHostController, route: String) {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             BarItem("节点", Icons.Outlined.Hub, route == Routes.Nodes) {
-                nav.navigate(Routes.Nodes) { popUpTo(nav.graph.findStartDestination().id) { saveState = true }; launchSingleTop = true; restoreState = true }
+                nav.switchTab(Routes.Nodes)
             }
             BarItem("会话", Icons.Outlined.Forum, route == Routes.Sessions || route == Routes.SessionsByNode) {
-                nav.navigate(Routes.Sessions) { popUpTo(nav.graph.findStartDestination().id) { saveState = true }; launchSingleTop = true; restoreState = true }
+                nav.switchTab(Routes.Sessions)
             }
             BarItem("设置", Icons.Outlined.Settings, route == Routes.Settings) {
-                nav.navigate(Routes.Settings) { popUpTo(nav.graph.findStartDestination().id) { saveState = true }; launchSingleTop = true; restoreState = true }
+                nav.switchTab(Routes.Settings)
             }
         }
+    }
+}
+
+/**
+ * 底部 tab 直接回到根目的地再切页。
+ * 之前用 saveState/restoreState，从“某节点的会话”回“节点”时会把
+ * sessions?nodeId 的保存状态恢复回来，表现为按钮有动效但页面不切换。
+ */
+private fun NavHostController.switchTab(route: String) {
+    if (currentDestination?.route == route) return
+    val poppedToRoot = popBackStack(Routes.Nodes, false)
+    if (!poppedToRoot || route != Routes.Nodes) {
+        navigate(route) { launchSingleTop = true }
     }
 }
 

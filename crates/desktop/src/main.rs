@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WindowEvent};
+use tracing_subscriber::fmt::time::ChronoLocal;
 
 struct AppState {
     bridge: Mutex<Option<Arc<Bridge>>>,
@@ -380,6 +381,8 @@ fn set_autostart(enable: bool) -> Result<(), String> {
         let exe = std::env::current_exe().map_err(|e| format!("无法获取程序路径: {e}"))?;
         let key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
         if enable {
+            // Run 键的值必须是带引号的完整路径，否则路径含空格时开机不会启动。
+            let command = format!("\"{}\"", exe.display());
             let status = std::process::Command::new("reg")
                 .args([
                     "add",
@@ -389,7 +392,7 @@ fn set_autostart(enable: bool) -> Result<(), String> {
                     "/t",
                     "REG_SZ",
                     "/d",
-                    &exe.display().to_string(),
+                    command.as_str(),
                     "/f",
                 ])
                 .status()
@@ -449,6 +452,7 @@ fn init_logging() {
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     let builder = tracing_subscriber::fmt()
         .with_env_filter(filter)
+        .with_timer(ChronoLocal::rfc_3339())
         .with_ansi(false);
     if let Ok(file) = file {
         let writer = Mutex::new(file);

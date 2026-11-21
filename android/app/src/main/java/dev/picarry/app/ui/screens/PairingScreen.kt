@@ -165,6 +165,12 @@ fun PairingScreen(repo: CarryRepository, initialUri: String, onBack: () -> Unit,
         Field(endpoint, { endpoint = it.trim().lowercase(); uriText = "" }, "Endpoint ID（64 位十六进制）")
         Spacer(Modifier.height(9.dp))
         Field(code, { code = it.filter(Char::isDigit).take(6) }, "6 位配对码", KeyboardType.NumberPassword, monospace = true, big = true)
+        Spacer(Modifier.height(6.dp))
+        Text(
+            "扫码会自动使用二维码里的一次性令牌；6 位码是没有摄像头时的备用方式。",
+            style = MaterialTheme.typography.bodySmall,
+            color = TextMuted,
+        )
         Spacer(Modifier.height(9.dp))
         Row(
             Modifier
