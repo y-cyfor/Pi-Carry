@@ -70,6 +70,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -584,23 +585,26 @@ private fun ImageStrip(images: List<ImagePart>, modifier: Modifier = Modifier) {
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         images.forEachIndexed { index, part ->
-            val bitmap = remember(part.data) { decodeImage(part) }
-            if (bitmap != null) {
-                androidx.compose.foundation.Image(
-                    bitmap = bitmap.asImageBitmap(),
-                    contentDescription = "图片 ${index + 1}",
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier
-                        .size(150.dp)
-                        .clip(RoundedCornerShape(10.dp))
-                        .border(0.7.dp, Line, RoundedCornerShape(10.dp))
-                        .clickable { preview = part },
-                )
+            val bitmap by produceState<android.graphics.Bitmap?>(null, part.data) {
+                value = withContext(Dispatchers.IO) { decodeImage(part) }
             }
+            val image = bitmap ?: return@forEachIndexed
+            androidx.compose.foundation.Image(
+                bitmap = image.asImageBitmap(),
+                contentDescription = "图片 ${index + 1}",
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .size(150.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .border(0.7.dp, Line, RoundedCornerShape(10.dp))
+                    .clickable { preview = part },
+            )
         }
     }
     preview?.let { part ->
-        val bitmap = remember(part.data) { decodeImage(part) }
+        val bitmap by produceState<android.graphics.Bitmap?>(null, part.data) {
+            value = withContext(Dispatchers.IO) { decodeImage(part) }
+        }
         Dialog(onDismissRequest = { preview = null }) {
             Column(
                 Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Color.Black).padding(8.dp),
