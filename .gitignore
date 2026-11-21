@@ -4,12 +4,8 @@
 /design/
 /.pi/
 
-# docs 仅发布面向使用者的文档；缺陷清单等内部记录保留在本地
-/docs/*
-!/docs/implementation-status.md
-!/docs/operations.md
-!/docs/protocol.md
-!/docs/verification.md
+# docs 目录为内部文档，不发布到开源仓库
+/docs/
 
 # Rust 构建产物
 /target/

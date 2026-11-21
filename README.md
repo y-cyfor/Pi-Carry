@@ -51,7 +51,7 @@ Pi Carry is a remote control layer for the pi coding agent. pi keeps running on 
 
 It does not copy sessions and does not require a cloud account. The bridge runs as a tray app or CLI and talks to pi over its RPC mode. The phone can store multiple nodes, connect directly on the LAN, and fall back to the n0 relay or a self-hosted relay when NAT traversal is required. Tool calls are intercepted by a pi extension and arbitrated by the bridge; approvals time out to deny. It is built for following long-running work while away from the desk — not for handing code, sessions, or credentials to a third-party service.
 
-Current release: `0.1.3`. The verified production targets are **Windows 10/11 x64 and Android 8.0+**. Linux and macOS keep a source-build path but have not been validated for tray, autostart, single-instance, or packaging. Features that appear in the design documents but are not implemented are listed in [`docs/implementation-status.md`](docs/implementation-status.md).
+Current release: `0.1.3`. The verified production targets are **Windows 10/11 x64 and Android 8.0+**. Linux and macOS keep a source-build path but have not been validated for tray, autostart, single-instance, or packaging. The main documented-but-unimplemented features are listed under [Known limitations](#known-limitations).
 
 ## Installation
 
@@ -137,7 +137,7 @@ Uninstalling the Android app removes its private data. Revoking a device makes t
 - **Missing UI entry points**: approval extension, session fork/rename/entries, generic extension UI, device capability changes, desktop device rename, diagnostics bundle.
 - **Delivery**: no Tauri installer, auto-update, code signing/notarization, or Android instrumented tests.
 
-See [`docs/implementation-status.md`](docs/implementation-status.md) for the full list and reasons.
+See [Known limitations](#known-limitations) for the main gaps and reasons.
 
 ## Disclaimer
 
