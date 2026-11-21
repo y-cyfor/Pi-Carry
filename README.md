@@ -4,12 +4,20 @@
 
 <h1 align="center">Pi Carry</h1>
 
-<p align="center"><strong>把电脑上运行的 pi 变成手机可远程驾驶的编程智能体。会话、审批与模型设置在你的设备之间流转，不经过云端账号。</strong></p>
+<p align="center">
+  <a href="README.md">English</a> ·
+  <a href="README.zh-CN.md">简体中文</a> ·
+  <a href="README.ja.md">日本語</a> ·
+  <a href="README.ko.md">한국어</a> ·
+  <a href="README.ru.md">Русский</a>
+</p>
+
+<p align="center"><strong>Turn pi on your computer into a coding agent you can drive from your phone. Sessions, approvals, and model settings stay on your devices — not in a cloud account.</strong></p>
 
 <p align="center">
   <img alt="Windows 10/11" src="https://img.shields.io/badge/Windows-10%2F11-0078D4?logo=windows&logoColor=white">
-  <img alt="Linux" src="https://img.shields.io/badge/Linux-x64-FCC624?logo=linux&logoColor=black">
-  <img alt="macOS" src="https://img.shields.io/badge/macOS-12%2B-000000?logo=apple&logoColor=white">
+  <img alt="Linux source only" src="https://img.shields.io/badge/Linux-source--only-FCC624?logo=linux&logoColor=black">
+  <img alt="macOS source only" src="https://img.shields.io/badge/macOS-source--only-000000?logo=apple&logoColor=white">
   <img alt="Android 8.0+" src="https://img.shields.io/badge/Android-8.0%2B-3DDC84?logo=android&logoColor=white">
 </p>
 
@@ -21,125 +29,141 @@
   <img alt="Jetpack Compose" src="https://img.shields.io/badge/Compose-Material%203-4285F4?logo=jetpackcompose&logoColor=white">
 </p>
 
-## 界面
+## Interface
 
-### 桌面受控端
+### Desktop bridge
 
-| 深色概览 | 浅色设置 |
+| Dark overview | Light settings |
 | :---: | :---: |
-| <img src="assets/screenshots/desktop-dark.png" width="520" alt="Pi Carry 桌面端深色概览"> | <img src="assets/screenshots/desktop-light.png" width="520" alt="Pi Carry 桌面端浅色设置"> |
+| <img src="assets/screenshots/desktop-dark.png" width="520" alt="Pi Carry desktop dark overview"> | <img src="assets/screenshots/desktop-light.png" width="520" alt="Pi Carry desktop light settings"> |
 
-桌面端是常驻系统托盘的受控端，负责本机 pi 进程、配对、设备和诊断。概览页展示节点状态、已授权设备、会话数量、待审批数量，以及 relay 和局域网直连地址；设置页可修改节点名、pi 路径、默认设备权限、relay 模式和审批超时，并在自动、黑色、白色三档外观之间切换。桌面端不提供聊天和审批入口，避免在电脑上绕过手机端的审批流程。
+The desktop app is a tray-resident bridge. It owns the local pi processes, pairing, devices, and diagnostics. The overview shows node status, authorized devices, session counts, pending approvals, relay mode, and LAN addresses. Settings let you change the node name, pi path, default capability for new devices, relay mode, approval timeout, and theme. **The desktop app deliberately has no chat or approval UI**, so approvals cannot be bypassed on the controlled machine.
 
-### Android 控制端
+### Android controller
 
-<img src="assets/screenshots/android.png" width="100%" alt="Pi Carry Android 端节点、会话、对话与配对界面">
+<img src="assets/screenshots/android.png" width="100%" alt="Pi Carry Android nodes, sessions, chat, and pairing">
 
-Android 端是主要控制界面：节点页管理多台电脑并显示直连或 relay 状态；会话页按节点分组，支持搜索和运行状态筛选；对话页显示流式文本、思考过程、工具调用和审批卡片，可发送、插话、排队、打断和附加图片；配对页支持扫码、粘贴配对链接或手动输入 Endpoint ID 与 6 位码。
+The Android app is the primary controller. The nodes screen manages multiple computers and shows direct/relay status. Sessions are grouped by node and can be searched and filtered. The chat screen renders streaming text, thinking, tool calls, approval cards, Markdown, and images; it supports send, steer, queue, abort, and image attachments. Pairing works by QR code, pasted `pi-carry://` link, or manual endpoint ID plus 6-digit code.
 
-## 关于 Pi Carry
+## About Pi Carry
 
-Pi Carry 是 pi 编程智能体的远程控制层。pi 仍在电脑上运行，继续读写原有的会话文件；Pi Carry 在手机和电脑之间建立加密通道，把手机变成第二块屏幕：查看流式回复、思考过程和工具执行，发送新指令，插话、排队或打断，处理高风险操作审批，切换模型和思考等级。
+Pi Carry is a remote control layer for the pi coding agent. pi keeps running on your computer and keeps using its existing session files. Pi Carry opens an encrypted channel between the phone and the computer, turning the phone into a second screen: watch streaming replies, thinking, and tool execution; send instructions; steer, queue, or abort; approve risky operations; switch models and thinking levels.
 
-它不创建会话副本，也不依赖云端账号。桌面受控端以系统托盘应用或 CLI 运行，通过 pi 的 RPC 与本地会话协作；手机可以保存多个节点，在局域网内直连，必要时经 n0 或自托管 relay 穿透 NAT。工具调用通过 pi 扩展拦截后交给桥接核心仲裁，审批超时默认拒绝，桌面端没有审批入口。它适合在离开电脑时继续跟进长任务，而不是把代码、会话或密钥交给第三方服务。
+It does not copy sessions and does not require a cloud account. The bridge runs as a tray app or CLI and talks to pi over its RPC mode. The phone can store multiple nodes, connect directly on the LAN, and fall back to the n0 relay or a self-hosted relay when NAT traversal is required. Tool calls are intercepted by a pi extension and arbitrated by the bridge; approvals time out to deny. It is built for following long-running work while away from the desk — not for handing code, sessions, or credentials to a third-party service.
 
-## 安装
+Current release: `0.1.3`. The verified production targets are **Windows 10/11 x64 and Android 8.0+**. Linux and macOS keep a source-build path but have not been validated for tray, autostart, single-instance, or packaging. Features that appear in the design documents but are not implemented are listed in [`docs/implementation-status.md`](docs/implementation-status.md).
 
-### 系统要求
+## Installation
 
-| 平台 | 要求 |
+### Requirements
+
+| Platform | Requirement |
 | --- | --- |
-| Windows | Windows 10/11 x64；Microsoft Edge WebView2 Runtime；建议 4GB 以上内存 |
-| Linux | glibc 2.31+；WebKitGTK 4.1；libayatana-appindicator3；librsvg2；从源码构建 |
-| macOS | macOS 12+；Intel 或 Apple Silicon；从源码构建，当前未提供公证安装包 |
-| Android | Android 8.0（API 26）及以上；arm64-v8a 或 x86_64；约 100MB 可用空间 |
-| 运行环境 | 已安装并完成配置的 pi 1.5.2 或更高版本；安装 pi 需要 Node.js 20+ |
-| 网络 | 局域网直连可离线使用；跨网段或 4G 需要 n0 公共 relay 或自托管 relay |
+| Windows | Windows 10/11 x64; Microsoft Edge WebView2 Runtime; 4 GB RAM recommended; verified |
+| Linux | glibc 2.31+; WebKitGTK 4.1; libayatana-appindicator3; librsvg2; source build only, not verified |
+| macOS | macOS 12+; Intel or Apple Silicon; source build only, not verified, no notarized build |
+| Android | Android 8.0 (API 26)+; arm64-v8a or x86_64; about 100 MB free space |
+| Runtime | pi 1.5.2 or newer, already configured; installing pi requires Node.js 20+ |
+| Network | LAN direct connection works offline; cross-network or 4G needs the n0 relay or a self-hosted relay |
 
-Pi Carry 不捆绑 pi、Node.js 或模型凭据。请先确认在终端中可以直接运行 `pi --version`，并已经完成 pi 的模型配置。
+Pi Carry does not bundle pi, Node.js, or model credentials. Make sure `pi --version` works in a terminal and pi is already configured with a model.
 
-### 桌面端
+### Desktop
 
-从仓库 Releases 下载 Windows 便携包，解压到任意目录，保持 `pi-carry-desktop.exe` 与 `WebView2Loader.dll` 在同一个文件夹，然后运行 exe。程序默认最小化到系统托盘；首次启动会生成 `~/.pi-carry/config.toml`、`~/.pi-carry/secrets.json` 和本地状态数据库。
+Download the Windows portable zip from Releases, extract it anywhere, keep `pi-carry-desktop.exe` and `WebView2Loader.dll` in the same folder, and run the exe. By default the window closes to the tray. On first launch it creates `~/.pi-carry/config.toml`, `~/.pi-carry/secrets.json`, and the local state database.
 
-如果系统没有 WebView2 Runtime，请先从 Microsoft 官网安装 Evergreen Runtime。Linux 和 macOS 目前请按下文“构建”一节从源码编译。
+If WebView2 Runtime is missing, install the Evergreen Runtime from Microsoft. Linux and macOS currently require a source build (see “Build”).
 
 ### Android
 
-从 Releases 下载对应 ABI 的 APK：真机通常使用 `arm64-v8a`，x86_64 模拟器使用另一个包。安装时系统可能要求允许来自浏览器或文件管理器的未知来源应用。
+Download the APK for your ABI from Releases: `arm64-v8a` for most phones, `x86_64` for x86_64 emulators. Android may ask you to allow installation from a browser or file manager.
 
-### 首次配对
+### First pairing
 
-在桌面端打开“配对手机”，生成二维码或复制 `pi-carry://pair?...` 链接。手机端进入“节点”，点击“配对新的电脑”，扫码或粘贴链接；也可以手动输入桌面端显示的 Endpoint ID 和 6 位码。二维码和 6 位码默认 10 分钟有效，连续 5 次输错会锁定一段时间。
+On the desktop, open “Pair phone” and generate a QR code or copy the `pi-carry://pair?...` link. On the phone, open “Nodes” → “Pair a new computer” and scan or paste the link. You can also enter the endpoint ID and 6-digit code manually. QR codes and codes are valid for 10 minutes; five wrong code attempts trigger a temporary lock.
 
-配对成功后，电脑会出现在节点列表中。手机默认获得 `full` 权限，可在桌面端设置中改为 `control` 或 `read`。设备列表中可以随时吊销某台设备，吊销会立即断开连接。
+After pairing, the computer appears in the node list. New devices get `full` capability by default. “Default capability for new devices” in desktop settings can change this for future devices to `control` or `read`. An existing device cannot be changed in place; revoke it and pair again. You can revoke a device at any time from the desktop; its next request is rejected and it must pair again.
 
-## 数据处理与权限
+## Data handling and permissions
 
-Pi Carry 不运营账号系统，不收集遥测，不把会话上传到自有服务器。数据只在手机、受控端电脑和用户选择的 relay 之间流动。
+Pi Carry has no account system, no telemetry, and no project-operated server for session data. Data moves only between the phone, the controlled computer, and the relay you choose.
 
-### 本地数据
+### Local data
 
-| 位置 | 内容 | 说明 |
+| Location | Content | Notes |
 | --- | --- | --- |
-| `~/.pi/agent/sessions/**/*.jsonl` | pi 的会话历史 | 唯一事实源；Pi Carry 只 attach，不复制、不改写既有历史 |
-| `~/.pi-carry/config.toml` | 节点、传输、审批、界面配置 | 明文配置，可手工编辑 |
-| `~/.pi-carry/secrets.json` | iroh 端点私钥、可选密码哈希 | Unix 下权限 0600，Windows 继承当前用户目录 ACL；丢失后需重新配对 |
-| `~/.pi-carry/state.db` | 设备、journal、审批与审计记录 | SQLite，本地保存 |
-| `~/.pi-carry/logs/` | 诊断日志 | 不记录 prompt 正文、配对 token 或私钥 |
-| Android SharedPreferences | 节点列表、主题和本地开关 | 应用私有目录；卸载应用时删除 |
-| Android 应用私有缓存 | 待发送图片的压缩结果 | 仅保存用户主动选择的图片 |
+| `~/.pi/agent/sessions/**/*.jsonl` | pi session history | Source of truth; Pi Carry attaches and does not copy or rewrite existing history |
+| `~/.pi-carry/config.toml` | Node, transport, approval, UI settings | Plain text, editable by hand |
+| `~/.pi-carry/secrets.json` | iroh endpoint secret, optional password hash | Mode 0600 on Unix; Windows inherits the user-profile ACL; losing it requires re-pairing |
+| `~/.pi-carry/state.db` | Devices, journal, approvals, audit records | Local SQLite database |
+| `~/.pi-carry/logs/` | Diagnostic logs | Does not log prompt bodies, pairing tokens, or private keys |
+| Android SharedPreferences | Node list, theme, local switches | App-private storage; removed on uninstall |
+| Android app cache | Compressed images waiting to be sent | Only images explicitly selected by the user |
 
-手机不是会话的第二份长期存储。消息和工具事件通过持久连接实时接收，断线重连后从受控端的 journal 或会话快照补齐；真正长期保存会话的是 pi 自己的 `.jsonl` 文件。
+The phone is not a second long-term session store. Messages and tool events arrive over the live connection; after a reconnect, the bridge journal or a session snapshot fills the gap. The durable session record remains pi’s own `.jsonl` file.
 
-### Android 权限
+### Android permissions
 
-| 权限 | 用途 | 处理方式 |
+| Permission | Purpose | Handling |
 | --- | --- | --- |
-| `INTERNET`、`ACCESS_NETWORK_STATE` | 建立 iroh QUIC 连接、检测网络变化 | 仅用于与已配对节点通信 |
-| `CHANGE_NETWORK_STATE` | 网络切换后重新绑定 iroh 端点 | 不修改用户的网络配置 |
-| `CAMERA` | 扫描配对二维码 | 运行时申请；画面仅用于本地识别，不保存、不上传 |
-| `POST_NOTIFICATIONS` | 审批提醒和会话完成提醒 | Android 13+ 运行时申请，可拒绝 |
-| `FOREGROUND_SERVICE`、`FOREGROUND_SERVICE_CONNECTED_DEVICE` | 保持与电脑的长连接 | 常驻通知可见，可随时停止服务 |
-| `RECEIVE_BOOT_COMPLETED` | 开机后恢复连接服务 | 可在系统设置中禁止自启动 |
-| `WAKE_LOCK` | 网络切换或短任务期间保持唤醒 | 不用于后台常驻唤醒 |
-| `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` | 用户主动打开电池优化设置 | 只在用户点击时跳转，不静默申请 |
+| `INTERNET`, `ACCESS_NETWORK_STATE` | iroh QUIC connection and network changes | Only used with paired nodes |
+| `CHANGE_NETWORK_STATE` | Re-bind the iroh endpoint after network changes | Does not change user network settings |
+| `CAMERA` | Scan pairing QR codes | Runtime permission; frames are processed locally and never stored or uploaded |
+| `POST_NOTIFICATIONS` | Approval and completion alerts | Runtime permission on Android 13+; may be denied |
+| `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_CONNECTED_DEVICE` | Keep the long-lived connection | Persistent notification; user can stop the service |
+| `RECEIVE_BOOT_COMPLETED` | Start the connection foreground service after boot | Can be disabled in system settings; this version does not automatically restore node connections |
+| `WAKE_LOCK` | Reserved for network changes/short tasks | Declared but not actively held in this version |
+| `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` | Open battery optimization settings on user request | Only opens the system screen; never requested silently |
 
-应用不申请通讯录、短信、位置、麦克风或全盘存储权限。发送图片使用系统照片选择器，只读取用户明确选择的图片；图片在手机上压缩为长边 1568、JPEG q85 后发送给已配对的受控端。
+The app does not request contacts, SMS, location, microphone, or broad storage access. Images are chosen through the system photo picker, read only when selected, and compressed to long edge 1568 / JPEG q85 before being sent to a paired bridge.
 
-### 桌面端权限
+### Desktop permissions
 
-桌面端以当前用户身份运行，不需要管理员权限。它读取和写入 pi 的会话目录、`~/.pi-carry` 下的配置、密钥、数据库和日志，并启动本机 `pi --mode rpc` 子进程。启用开机自启时，会在当前用户的注册表启动项中写入一条记录；关闭后删除。桌面端不访问摄像头、麦克风、屏幕内容或键盘输入。
+The desktop app runs as the current user and does not require administrator rights. It reads and writes pi session files, `~/.pi-carry` configuration, keys, database, and logs, and starts local `pi --mode rpc` child processes. Enabling autostart writes one entry under the current user’s registry Run key; disabling it removes the entry. The desktop app does not access the camera, microphone, screen contents, or keyboard input.
 
-### 删除数据
+### Deleting data
 
-卸载 Android 应用会删除应用私有数据；吊销设备后，受控端不再接受该设备连接。删除 `~/.pi-carry` 会重置配对、设备和本地 journal，但不会删除 pi 的会话历史。pi 的会话文件需要按 pi 自身的方式管理或备份。
+Uninstalling the Android app removes its private data. Revoking a device makes the bridge reject that device. Deleting `~/.pi-carry` resets pairing, devices, and the local journal but does not delete pi’s session history. Manage or back up pi sessions through pi itself.
 
-## 免责声明
+## Known limitations
 
-Pi Carry 是独立开源项目，不是 pi、iroh 或 Tauri 的官方项目，与这些项目的维护者没有隶属或背书关系。相关名称和商标归各自所有者。
+- **Platforms**: Windows is built and tray-tested; Android is built, signed, and JVM-tested but has not been validated on a physical device; Linux/macOS are unverified.
+- **Android background**: the boot receiver only starts the foreground service; it does not restore node connections. Some OEM battery policies may still kill long connections.
+- **Session conflicts**: only one writer per session is enforced inside one bridge. An external pi process writing the same session is not detected, and the app does not switch to read-only automatically.
+- **Discovery**: no mDNS. The pairing QR code carries LAN direct addresses.
+- **Offline sending**: there is no local outbox; sends fail while disconnected.
+- **Images**: the protocol allows 5 images, but the Android picker selects one at a time; images are inline base64, with no blob transport.
+- **Approvals**: read-only bash still asks by default; “remember this command” does not currently exclude critical commands, so approve dangerous commands one by one.
+- **Missing UI entry points**: approval extension, session fork/rename/entries, generic extension UI, device capability changes, desktop device rename, diagnostics bundle.
+- **Delivery**: no Tauri installer, auto-update, code signing/notarization, or Android instrumented tests.
 
-本项目调用的是能够执行真实命令、修改文件和访问网络的 AI 编程智能体。**AI 输出并非绝对正确，可能包含错误、过时信息、偏见或不安全的建议**；请在使用前自行甄别，**不要盲目执行模型生成的命令或代码**。
+See [`docs/implementation-status.md`](docs/implementation-status.md) for the full list and reasons.
 
-审批机制是提示和拦截层，**不是安全沙箱**。即使经过审批，命令仍可能删除文件、覆盖未提交的修改、执行 `git push --force`、安装依赖、读取敏感文件或产生费用。**使用本工具可能造成数据丢失、代码损坏、凭据泄露、服务中断等不可逆后果**。**请务必保留备份**，在可信的代码库和网络环境中使用，并仔细核对命令、工作目录和影响范围。
+## Disclaimer
 
-通过公共 relay 连接时，relay 运营方可能看到连接时间、IP 地址和流量大小等元数据；消息内容由 iroh 端到端加密。需要更严格的隐私边界时，请使用局域网直连或自托管 relay。手机丢失或设备被他人控制时，请立即在受控端吊销该设备。
+Pi Carry is an independent open-source project. It is not affiliated with, endorsed by, or maintained by pi, iroh, or Tauri. Their names and trademarks belong to their respective owners.
 
-本软件按 **GNU Affero General Public License v3.0**“原样”提供，不附带任何明示或暗示的担保。**作者和贡献者不对使用本软件造成的任何直接或间接损失、数据丢失、法律或合规问题负责**。请在遵守当地法律、组织安全策略和第三方服务条款的前提下使用。
+This project drives an AI coding agent that can execute real commands, modify files, and access the network. **AI output is not guaranteed to be correct and may contain errors, outdated information, bias, or unsafe suggestions.** **Do not blindly execute model-generated commands or code.** Review what the agent proposes before approving it.
 
-## 构建
+The approval system is a prompt and interception layer, **not a security sandbox**. Even after approval, a command may delete files, overwrite uncommitted changes, run `git push --force`, install dependencies, read sensitive files, or incur costs. **Using this tool may cause data loss, code corruption, credential exposure, service interruption, or other irreversible consequences.** **Keep backups**, use it in trusted repositories and networks, and verify the command, working directory, and impact before approving.
 
-### 通用要求
+When using a public relay, the relay operator may see metadata such as connection time, IP address, and traffic volume. Message contents are end-to-end encrypted by iroh. For a stricter privacy boundary, use LAN direct connections or a self-hosted relay. If a phone is lost or controlled by someone else, revoke the device on the controlled computer immediately.
 
-Rust 1.91 或更高版本、Cargo、Git。Windows 推荐安装 Visual Studio Build Tools 或使用仓库配置的 GNU 工具链；项目在 `x86_64-pc-windows-gnu` 下验证。Linux 需要 WebKitGTK 4.1、libayatana-appindicator3、librsvg2 及常规编译工具；macOS 需要 Xcode Command Line Tools。
+This software is provided “as is” under the **GNU Affero General Public License v3.0**, without any express or implied warranty. **The authors and contributors are not liable for any direct or indirect loss, data loss, or legal or compliance issues caused by using this software.** Use it in compliance with local law, organizational security policy, and third-party terms of service.
+
+## Build
+
+### General requirements
+
+Rust 1.91 or newer, Cargo, and Git. On Windows, Visual Studio Build Tools are recommended, or use the GNU toolchain configured by the repository; the project is verified under `x86_64-pc-windows-gnu`. Linux needs WebKitGTK 4.1, libayatana-appindicator3, librsvg2, and normal build tools; macOS needs Xcode Command Line Tools.
 
 ```bash
 cargo build --release -p pi-carry-cli -p pi-carry-desktop
 ```
 
-Windows 构建后，`WebView2Loader.dll` 会出现在 `target/release`，分发时必须与 `pi-carry-desktop.exe` 放在同一目录。只使用 CLI 时构建 `-p pi-carry-cli` 即可。
+After a Windows build, `WebView2Loader.dll` appears in `target/release`; it must be distributed in the same folder as `pi-carry-desktop.exe`. If you only need the CLI, build `-p pi-carry-cli`.
 
-Linux 的 Tauri 依赖可以参考：
+Linux Tauri dependencies:
 
 ```bash
 sudo apt install build-essential curl wget file libssl-dev \
@@ -148,27 +172,27 @@ sudo apt install build-essential curl wget file libssl-dev \
 
 ### Android
 
-需要 JDK 21、Android SDK Platform 36、Build Tools 36.0.0 和 Gradle 8.11.1。设置 `ANDROID_HOME`，或在 `android/local.properties` 中写入 SDK 路径。仓库包含 Gradle Wrapper：
+JDK 21, Android SDK Platform 36, Build Tools 36.0.0, and Gradle 8.11.1 are required. Set `ANDROID_HOME` or write the SDK path to `android/local.properties`. The repository includes the Gradle Wrapper:
 
 ```bash
 cd android
 ./gradlew testDebugUnitTest assembleDebug
 ```
 
-调试构建的产物位于 `android/app/build/outputs/apk/debug/`。发布包必须使用正式签名构建，不能把 debug APK 当作正式包分发；签名配置和密钥由发布者在本机管理，不进入仓库。
+Debug APKs are written to `android/app/build/outputs/apk/debug/`. Release packages must be signed; never distribute a debug APK as a production build. Signing configuration and keys are managed locally by the release owner and are not committed.
 
-正式签名构建需要一个 Android keystore，并在 `android/keystore.properties` 中提供以下字段（该文件已被 `.gitignore` 排除）：
+A release build needs an Android keystore and `android/keystore.properties` (ignored by Git):
 
 ```properties
-storeFile=keystore/release.p12
+storeFile=keystore/release.jks
 storePassword=***
 keyAlias=pi-carry
 keyPassword=***
 ```
 
-然后执行 `./gradlew assembleRelease`，产物位于 `android/app/build/outputs/apk/release/`。缺少 keystore 时只会得到 unsigned APK，`scripts/package.ps1` 会拒绝打包。
+Then run `./gradlew assembleRelease`; outputs go to `android/app/build/outputs/apk/release/`. Without a keystore you only get an unsigned APK, and `scripts/package.ps1` refuses to package it.
 
-### 测试
+### Tests
 
 ```bash
 cargo fmt --all -- --check
@@ -180,70 +204,70 @@ cd android
 ./gradlew testDebugUnitTest lintDebug
 ```
 
-`pi-carry smoke` 使用内置 fake-pi 验证协议、会话、审批和流式事件；`--smoke` 会启动真实桥接并输出节点信息后退出。完整的人工验收还应覆盖真实 pi、真实手机和系统托盘。
+`pi-carry smoke` uses the built-in fake-pi to verify protocol, sessions, approvals, and streaming events. `--smoke` starts the real bridge, prints node information, and exits. Full manual acceptance should also cover real pi, a real phone, and the system tray.
 
-### 打包
+### Packaging
 
-Windows 便携包可以重新生成：
+Regenerate the Windows portable package:
 
 ```powershell
 pwsh scripts/package.ps1
 ```
 
-脚本会收集桌面 exe、`WebView2Loader.dll`、简短说明和正式签名 Android APK，并生成 SHA256 校验和。缺少正式签名 APK 时脚本会直接失败，不会用 debug APK 代替。需要 PowerShell 7，Windows PowerShell 5.1 不保证提供 `Get-FileHash`。
+The script collects the desktop exe, `WebView2Loader.dll`, a short README, and the signed Android APKs, then writes SHA256 checksums. It fails if a signed APK is missing and never substitutes a debug APK. PowerShell 7 is required; Windows PowerShell 5.1 is not guaranteed to provide `Get-FileHash`.
 
-### 关于 vendor 目录
+### About the vendor directory
 
-`vendor/iroh` 和 `vendor/iroh-relay` 是为 Windows GNU 链接环境准备的补丁副本：上游库的 `cdylib` 目标会触发导出符号过多的问题，因此将 `crate-type` 收窄为 `lib`。根 `Cargo.toml` 通过 `[patch.crates-io]` 指向这两个目录。升级 iroh 时需要同步更新补丁，或验证上游是否已经修复该问题。
+`vendor/iroh` and `vendor/iroh-relay` are patched copies for the Windows GNU link environment. The upstream `cdylib` target triggers “too many exported symbols”, so their `crate-type` is narrowed to `lib`. The root `Cargo.toml` points to these directories with `[patch.crates-io]`. When upgrading iroh, update the patches or verify that upstream has fixed the issue.
 
-## 目录结构
+## Project layout
 
 ```text
 Pi-Carry/
-├── android/                     Android 控制端
+├── android/                     Android controller
 │   ├── app/src/main/java/dev/picarry/app/
-│   │   ├── data/                模型、节点存储、仓库、图片压缩
-│   │   ├── net/                 iroh 连接、帧协议、前台服务、开机广播
-│   │   └── ui/                  主题、通用组件、各功能页面
+│   │   ├── data/                Models, node storage, repository, image compression
+│   │   ├── net/                 iroh connection, framing, foreground service, boot receiver
+│   │   └── ui/                  Theme, shared components, screens
 │   ├── gradle/wrapper/          Gradle Wrapper
 │   ├── gradlew
 │   └── settings.gradle.kts
-├── assets/                      Logo 与 README 截图
+├── assets/                      Logo and README screenshots
 ├── crates/
-│   ├── protocol/                carry.v1 帧、JSONL、事件、payload、错误码
-│   ├── core/                    配置、SQLite、配对、审批、pi RPC、会话、iroh 服务端
+│   ├── protocol/                carry.v1 frames, JSONL, events, payloads, error codes
+│   ├── core/                    Config, SQLite, pairing, approval, pi RPC, sessions, iroh server
 │   ├── cli/                     serve/status/pair/devices/revoke/doctor/smoke
-│   ├── desktop/                 Tauri 2 托盘应用
-│   ├── fake-pi/                 测试用 pi RPC 模拟器
-│   └── e2e-client/              黑盒探针与端到端测试客户端
-├── desktop-ui/                  桌面端静态控制台
-├── extensions/guard.ts          pi 工具调用拦截扩展
-├── packaging/                   桌面发布说明
-├── scripts/                     环境、构建、打包、图标脚本
-├── vendor/                      iroh / iroh-relay 补丁副本
-├── .cargo/config.toml           Windows GNU 链接器配置
+│   ├── desktop/                 Tauri 2 tray app
+│   ├── fake-pi/                 Deterministic pi RPC simulator for tests
+│   └── e2e-client/              Black-box probe and end-to-end client
+├── desktop-ui/                  Static desktop console
+├── extensions/guard.ts          pi tool-call approval extension
+├── packaging/                   Desktop release notes
+├── scripts/                     Environment, build, package, icon scripts
+├── vendor/                      Patched iroh / iroh-relay copies
+├── .cargo/config.toml           Windows GNU linker configuration
 ├── Cargo.toml                   Rust workspace
 ├── LICENSE
 └── README.md
 ```
 
-## 项目依赖
+## Dependencies
 
-| 类别 | 主要依赖 |
+| Area | Main dependencies |
 | --- | --- |
-| 运行时 | pi 1.5.2+；Windows WebView2 Runtime；可选 n0 或自托管 iroh relay |
-| 桌面与核心 | Rust 1.91+、iroh 1.3、tokio、rusqlite（bundled SQLite）、serde、argon2、qrcode、if-addrs、ulid |
-| 桌面外壳 | Tauri 2、系统 WebView、静态 HTML/CSS/JS |
-| Android | Kotlin 2.4.10、Jetpack Compose（BOM 2025.02.00）、Material 3、iroh4k 0.2.0、kotlinx.serialization、ZXing、ExifInterface |
-| Android 测试 | JUnit 4、Robolectric、AndroidX Test |
-| 构建 | Cargo、JDK 21、Android SDK 36、Gradle 8.11.1、PowerShell 7（打包） |
+| Runtime | pi 1.5.2+; Windows WebView2 Runtime; optional n0 or self-hosted iroh relay |
+| Desktop and core | Rust 1.91+, iroh 1.3, tokio, rusqlite (bundled SQLite), serde, argon2, qrcode, if-addrs, ulid |
+| Desktop shell | Tauri 2, system WebView, static HTML/CSS/JS |
+| Android | Kotlin 2.4.10, Jetpack Compose (BOM 2025.02.00), Material 3, iroh4k 0.2.0, kotlinx.serialization, ZXing, ExifInterface |
+| Android tests | JUnit 4, Robolectric, AndroidX Test |
+| Build | Cargo, JDK 21, Android SDK 36, Gradle 8.11.1, PowerShell 7 (packaging) |
 
-第三方依赖分别遵循其自身许可证。发布二进制时请同时遵守 pi、iroh、Tauri、iroh4k 等项目的许可与署名要求。
+Third-party dependencies keep their own licenses. When distributing binaries, comply with the licenses and attribution requirements of pi, iroh, Tauri, iroh4k, and other dependencies.
 
-## 贡献
+## Contributing
 
-欢迎通过 Issue 反馈问题或提出建议。也可以发送邮件至 [cyfor@foxmail.com](mailto:cyfor@foxmail.com)，或访问[个人主页](https://www.cyfor.cn/%e5%85%b3%e4%ba%8ecyfor/)。
+Use GitHub Issues for bug reports and suggestions. You can also email [cyfor@foxmail.com](mailto:cyfor@foxmail.com) or visit the [author’s homepage](https://www.cyfor.cn/%e5%85%b3%e4%ba%8ecyfor/).
 
-## 许可证
+## License
 
-Pi Carry 以 [GNU Affero General Public License v3.0](LICENSE) 发布。若修改后通过网络向他人提供服务，请按 AGPL 的要求提供对应源码。
+Pi Carry is released under the [GNU Affero General Public License v3.0](LICENSE). If you modify it and provide it as a network service, you must offer the corresponding source under the AGPL.

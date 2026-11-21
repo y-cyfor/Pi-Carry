@@ -1,9 +1,15 @@
 # 项目内部资料，不进入开源仓库
 /mvp.md
 /plan/
-/docs/
 /design/
 /.pi/
+
+# docs 仅发布面向使用者的文档；缺陷清单等内部记录保留在本地
+/docs/*
+!/docs/implementation-status.md
+!/docs/operations.md
+!/docs/protocol.md
+!/docs/verification.md
 
 # Rust 构建产物
 /target/
