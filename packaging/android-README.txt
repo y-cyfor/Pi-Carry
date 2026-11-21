@@ -1,4 +1,4 @@
-pi carry 0.1.2（Android 正式版）
+pi carry 0.1.3（Android 正式版）
 
 运行要求
 - Android 8.0（API 26）或更高版本
@@ -6,7 +6,7 @@ pi carry 0.1.2（Android 正式版）
 - 手机与电脑在同一局域网，或电脑已连接可用的 iroh relay
 
 安装
-- arm64 手机安装 pi-carry-android-8.0-arm64-v8a-0.1.2.apk；x86_64 模拟器安装 pi-carry-android-8.0-x86_64-0.1.2.apk。
+- arm64 手机安装 pi-carry-android-8.0-arm64-v8a-0.1.3.apk；x86_64 模拟器安装 pi-carry-android-8.0-x86_64-0.1.3.apk。
 - 这是正式签名的发布包，首次安装需要在系统设置中允许安装未知来源应用。
 
 配对

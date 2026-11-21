@@ -2,6 +2,10 @@ package dev.picarry.app.ui.screens
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import android.graphics.BitmapFactory
+import android.text.method.LinkMovementMethod
+import android.util.Base64
+import android.widget.TextView
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -32,7 +36,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.ArrowUpward
 import androidx.compose.material.icons.outlined.Bolt
 import androidx.compose.material.icons.outlined.Check
@@ -75,6 +79,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
@@ -84,9 +91,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
 import dev.picarry.app.data.Approval
 import dev.picarry.app.data.CarryRepository
 import dev.picarry.app.data.ImageCompressor
+import dev.picarry.app.data.ImagePart
 import dev.picarry.app.data.ChatMessage
 import dev.picarry.app.data.CommandItem
 import dev.picarry.app.data.LinkState
@@ -110,6 +120,9 @@ import dev.picarry.app.ui.theme.TextMuted
 import dev.picarry.app.ui.theme.TextPrimary
 import dev.picarry.app.ui.theme.TextSecondary
 import dev.picarry.app.ui.theme.Violet
+import io.noties.markwon.AbstractMarkwonPlugin
+import io.noties.markwon.Markwon
+import io.noties.markwon.core.MarkwonTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -202,7 +215,7 @@ fun ChatScreen(repo: CarryRepository, nodeId: String, sessionId: String, onBack:
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Box(Modifier.size(38.dp).clip(CircleShape).clickable(onClick = onBack), contentAlignment = Alignment.Center) {
-                Icon(Icons.Outlined.ArrowBack, "返回", tint = TextSecondary)
+                Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回", tint = TextSecondary)
             }
             Column(Modifier.weight(1f).padding(horizontal = 6.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -341,8 +354,8 @@ fun ChatScreen(repo: CarryRepository, nodeId: String, sessionId: String, onBack:
         ApprovalDialog(
             approval = approval,
             onDismiss = { openApproval = null },
-            onDecide = { allow, remember ->
-                repo.resolveApproval(nodeId, approval.id, allow, remember)
+            onDecide = { decision, remember ->
+                repo.resolveApproval(nodeId, approval.id, decision, remember)
                 openApproval = null
             },
         )
@@ -351,15 +364,21 @@ fun ChatScreen(repo: CarryRepository, nodeId: String, sessionId: String, onBack:
 
 @Composable
 private fun UserBubble(msg: ChatMessage) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-        Box(
-            Modifier
-                .widthIn(max = 300.dp)
-                .clip(RoundedCornerShape(18.dp, 18.dp, 5.dp, 18.dp))
-                .background(Brush.linearGradient(listOf(Violet.copy(alpha = 0.88f), Color(0xFF5B4BE0))))
-                .padding(horizontal = 14.dp, vertical = 10.dp),
-        ) {
-            Text(msg.text, style = MaterialTheme.typography.bodyLarge, color = Color.White)
+    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End) {
+        if (msg.text.isNotBlank()) {
+            Box(
+                Modifier
+                    .widthIn(max = 300.dp)
+                    .clip(RoundedCornerShape(18.dp, 18.dp, 5.dp, 18.dp))
+                    .background(Brush.linearGradient(listOf(Violet.copy(alpha = 0.88f), Color(0xFF5B4BE0))))
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+            ) {
+                Text(msg.text, style = MaterialTheme.typography.bodyLarge, color = Color.White)
+            }
+        }
+        if (msg.images.isNotEmpty()) {
+            Spacer(Modifier.height(6.dp))
+            ImageStrip(msg.images, Modifier.widthIn(max = 320.dp))
         }
     }
 }
@@ -407,14 +426,11 @@ private fun AssistantBlock(msg: ChatMessage) {
         }
         if (msg.text.isNotBlank()) {
             Spacer(Modifier.height(7.dp))
-            SelectionContainer {
-                Text(
-                    msg.text,
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = TextPrimary,
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 2.dp),
-                )
-            }
+            MarkdownBody(msg.text)
+        }
+        if (msg.images.isNotEmpty()) {
+            Spacer(Modifier.height(8.dp))
+            ImageStrip(msg.images)
         }
         if (msg.error) {
             Spacer(Modifier.height(5.dp))
@@ -459,16 +475,147 @@ private fun ToolCard(tool: ToolCall) {
             }
             Icon(if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore, null, tint = TextMuted, modifier = Modifier.size(15.dp))
         }
-        val detail = if (expanded) tool.result.ifBlank { tool.args } else tool.args
-        if (detail.isNotBlank()) {
-            Spacer(Modifier.height(7.dp))
+        // 默认只显示一行命令摘要；参数与结果都要点开，避免长输出刷屏。
+        val summary = summarizeToolArgs(tool.args)
+        if (summary.isNotBlank()) {
+            Spacer(Modifier.height(6.dp))
             Text(
-                detail.take(if (expanded) 8000 else 140),
+                summary.take(if (expanded) 4000 else 160),
                 style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-                color = if (tool.isError) Rose else TextMuted,
-                maxLines = if (expanded) 200 else 2,
+                color = TextMuted,
+                maxLines = if (expanded) 80 else 1,
                 overflow = TextOverflow.Ellipsis,
             )
+        }
+        if (tool.images.isNotEmpty()) {
+            Spacer(Modifier.height(8.dp))
+            ImageStrip(tool.images, Modifier.clickable(enabled = false) {})
+        }
+        AnimatedVisibility(visible = expanded) {
+            Column {
+                if (tool.args.isNotBlank()) {
+                    Spacer(Modifier.height(9.dp))
+                    MonoLabel("参数", color = TextMuted)
+                    Text(
+                        tool.args.take(8000),
+                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                        color = TextSecondary,
+                    )
+                }
+                if (tool.result.isNotBlank()) {
+                    Spacer(Modifier.height(9.dp))
+                    MonoLabel(if (tool.isError) "错误输出" else "结果", color = if (tool.isError) Rose else TextMuted)
+                    Text(
+                        tool.result.take(20000),
+                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                        color = if (tool.isError) Rose else TextSecondary,
+                    )
+                }
+            }
+        }
+    }
+}
+
+private fun summarizeToolArgs(args: String): String {
+    val trimmed = args.trim()
+    if (trimmed.startsWith("{")) {
+        val obj = runCatching {
+            kotlinx.serialization.json.Json.parseToJsonElement(trimmed) as? kotlinx.serialization.json.JsonObject
+        }.getOrNull()
+        listOf("command", "cmd", "path", "file_path", "pattern", "query", "url").firstNotNullOfOrNull { key ->
+            (obj?.get(key) as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
+        }?.let { return it }
+    }
+    return args.lineSequence().firstOrNull { it.isNotBlank() }.orEmpty()
+}
+
+@Composable
+private fun MarkdownBody(text: String) {
+    val context = LocalContext.current
+    val textColor = TextPrimary.toArgb()
+    val codeBg = PanelHigh.toArgb()
+    val linkColor = Violet.toArgb()
+    val markwon = remember(context, textColor, codeBg, linkColor) {
+        Markwon.builder(context)
+            .usePlugin(object : AbstractMarkwonPlugin() {
+                override fun configureTheme(builder: MarkwonTheme.Builder) {
+                    builder
+                        .codeTextColor(textColor)
+                        .codeBlockTextColor(textColor)
+                        .codeBlockBackgroundColor(codeBg)
+                        .linkColor(linkColor)
+                        .headingBreakHeight(0)
+                }
+            })
+            .build()
+    }
+    AndroidView(
+        factory = { ctx ->
+            TextView(ctx).apply {
+                setTextIsSelectable(true)
+                movementMethod = LinkMovementMethod.getInstance()
+                setLineSpacing(0f, 1.16f)
+                textSize = 15f
+                setTextColor(textColor)
+                setLinkTextColor(linkColor)
+                setPadding(0, 0, 0, 0)
+                linksClickable = true
+            }
+        },
+        update = { view ->
+            view.setTextColor(textColor)
+            view.setLinkTextColor(linkColor)
+            markwon.setMarkdown(view, text)
+        },
+        modifier = Modifier.fillMaxWidth(),
+    )
+}
+
+private fun decodeImage(part: ImagePart): android.graphics.Bitmap? = runCatching {
+    val bytes = Base64.decode(part.data, Base64.DEFAULT)
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+}.getOrNull()
+
+@Composable
+private fun ImageStrip(images: List<ImagePart>, modifier: Modifier = Modifier) {
+    var preview by remember { mutableStateOf<ImagePart?>(null) }
+    Row(
+        modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        images.forEachIndexed { index, part ->
+            val bitmap = remember(part.data) { decodeImage(part) }
+            if (bitmap != null) {
+                androidx.compose.foundation.Image(
+                    bitmap = bitmap.asImageBitmap(),
+                    contentDescription = "图片 ${index + 1}",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .size(150.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .border(0.7.dp, Line, RoundedCornerShape(10.dp))
+                        .clickable { preview = part },
+                )
+            }
+        }
+    }
+    preview?.let { part ->
+        val bitmap = remember(part.data) { decodeImage(part) }
+        Dialog(onDismissRequest = { preview = null }) {
+            Column(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Color.Black).padding(8.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                bitmap?.let {
+                    androidx.compose.foundation.Image(
+                        bitmap = it.asImageBitmap(),
+                        contentDescription = "查看图片",
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxWidth().height(420.dp),
+                    )
+                }
+                TextButton(onClick = { preview = null }) { Text("关闭", color = Color.White) }
+            }
         }
     }
 }
@@ -506,7 +653,7 @@ private fun ApprovalCard(approval: Approval, onClick: () -> Unit) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ApprovalDialog(approval: Approval, onDismiss: () -> Unit, onDecide: (Boolean, Boolean) -> Unit) {
+private fun ApprovalDialog(approval: Approval, onDismiss: () -> Unit, onDecide: (String, Boolean) -> Unit) {
     var rememberRule by remember { mutableStateOf(false) }
     var remaining by remember(approval.id) { mutableStateOf(approval.remainingSeconds) }
     LaunchedEffect(approval.id) {
@@ -551,7 +698,7 @@ private fun ApprovalDialog(approval: Approval, onDismiss: () -> Unit, onDecide: 
                     Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(PanelHigh).padding(horizontal = 10.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text("记住此命令", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
+                    Text("记住此命令（仅此命令）", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
                     Spacer(Modifier.weight(1f))
                     Switch(
                         checked = rememberRule,
@@ -559,13 +706,24 @@ private fun ApprovalDialog(approval: Approval, onDismiss: () -> Unit, onDecide: 
                         colors = SwitchDefaults.colors(checkedTrackColor = Violet, uncheckedTrackColor = Line),
                     )
                 }
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "本对话都允许：后续普通工具不再询问；rm -rf 等危险命令仍会逐次确认，重启 App/桥后恢复逐次审批。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TextMuted,
+                )
             }
         },
         confirmButton = {
-            TextButton(onClick = { onDecide(true, rememberRule) }) { Text("批准并执行", color = Rose, fontWeight = FontWeight.SemiBold) }
+            TextButton(onClick = { onDecide("allow", rememberRule) }) { Text("批准并执行", color = Rose, fontWeight = FontWeight.SemiBold) }
         },
         dismissButton = {
-            TextButton(onClick = { onDecide(false, false) }) { Text("拒绝", color = TextSecondary) }
+            Row {
+                TextButton(onClick = { onDecide("deny", false) }) { Text("拒绝", color = TextSecondary) }
+                TextButton(onClick = { onDecide("allow_always", rememberRule) }) {
+                    Text("本对话都允许", color = Cyan, fontWeight = FontWeight.SemiBold)
+                }
+            }
         },
     )
 }

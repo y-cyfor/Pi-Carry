@@ -42,7 +42,7 @@ class CarryRepository(context: Context) {
     private val clientVersion: String by lazy {
         runCatching {
             appContext.packageManager.getPackageInfo(appContext.packageName, 0).versionName
-        }.getOrNull() ?: "0.1.2"
+        }.getOrNull() ?: "0.1.3"
     }
 
     /** 电脑端看到的是“用户设备名 + 型号”，不再统一显示 pi carry。 */
@@ -234,9 +234,9 @@ class CarryRepository(context: Context) {
                     val snap = conn.request("session.snapshot", buildJsonObject { put("sessionId", JsonPrimitive(sessionId)) })
                     // 请求期间节点可能已被删除：不要让在途快照把派生状态写回孤儿键。
                     if (node(nodeId) == null) return@runCatching
-                    val msgs = (snap["messages"] as? JsonArray)?.mapIndexedNotNull { i, el ->
-                        parseHistoryMessage(sessionId, i, el as? JsonObject ?: return@mapIndexedNotNull null)
-                    }.orEmpty()
+                    val msgs = (snap["messages"] as? JsonArray)?.flatMapIndexed { i, el ->
+                        parseHistoryMessages(sessionId, i, el as? JsonObject ?: return@flatMapIndexed emptyList())
+                    }.orEmpty().let(::mergeHistoryMessages)
                     // 快照是权威历史，但只含消息正文；保留本地已有、快照未覆盖的工具卡/流式消息/乐观消息。
                     val known = msgs.mapTo(HashSet()) { it.id }
                     val extras = (_messages.value[key] ?: emptyList()).filter { m ->
@@ -373,14 +373,14 @@ class CarryRepository(context: Context) {
         }
     }
 
-    fun resolveApproval(nodeId: String, approvalId: String, allow: Boolean, remember: Boolean = false) {
+    fun resolveApproval(nodeId: String, approvalId: String, decision: String, remember: Boolean = false) {
         scope.launch {
             runCatching {
                 connections[nodeId]?.request(
                     "approval.resolve",
                     buildJsonObject {
                         put("approvalId", JsonPrimitive(approvalId))
-                        put("decision", JsonPrimitive(if (allow) "allow" else "deny"))
+                        put("decision", JsonPrimitive(decision))
                         put("remember", JsonPrimitive(remember))
                     },
                 )
@@ -619,7 +619,13 @@ class CarryRepository(context: Context) {
             thinking = old?.thinking.orEmpty()
         }
         val base = list.getOrNull(idx) ?: ChatMessage(id = messageId, sessionId = sessionId, role = "assistant")
-        val done = base.copy(text = text.ifBlank { base.text }, thinking = thinking.ifBlank { base.thinking }, streaming = false)
+        val images = raw?.get("content")?.let(::contentImages).orEmpty()
+        val done = base.copy(
+            text = text.ifBlank { base.text },
+            thinking = thinking.ifBlank { base.thinking },
+            streaming = false,
+            images = if (images.isEmpty()) base.images else images,
+        )
         if (idx >= 0) list[idx] = done else list += done
         _messages.value = _messages.value + (key to list)
         _sessions.value = _sessions.value.map { if (it.id == sessionId) it.copy(status = "idle", preview = text.take(80)) else it }
@@ -655,9 +661,12 @@ class CarryRepository(context: Context) {
         val key = sessionKey(nodeId, sessionId)
         val id = event["toolCallId"]?.jsonPrimitive?.contentOrNull ?: return
         val result = event["result"]?.let(::contentText)?.ifBlank { event["result"]?.toString().orEmpty() }.orEmpty()
+        val images = event["result"]?.let(::contentImages).orEmpty()
         val isError = event["isError"]?.jsonPrimitive?.contentOrNull == "true"
         val duration = event["durationMs"]?.jsonPrimitive?.longOrNull ?: 0
-        updateTool(key, id) { it.copy(result = result, status = if (isError) "error" else "done", isError = isError, durationMs = duration) }
+        updateTool(key, id) {
+            it.copy(result = result, status = if (isError) "error" else "done", isError = isError, durationMs = duration, images = images)
+        }
     }
 
     private fun updateTool(key: String, id: String, f: (ToolCall) -> ToolCall) {
@@ -711,25 +720,85 @@ class CarryRepository(context: Context) {
         state = obj.str("state") ?: "pending",
     )
 
-    private fun parseHistoryMessage(sessionId: String, index: Int, obj: JsonObject): ChatMessage? {
-        val role = obj.str("role") ?: return null
-        if (role !in listOf("user", "assistant")) return null
+    internal fun parseHistoryMessages(sessionId: String, index: Int, obj: JsonObject): List<ChatMessage> {
+        val role = obj.str("role") ?: return emptyList()
         val content = obj["content"]
-        val text = content?.let(::contentText).orEmpty()
-        val thinking = content?.let(::contentThinking).orEmpty()
-        if (text.isBlank() && thinking.isBlank()) return null
-        return ChatMessage(
-            id = obj.str("id") ?: "h-$index-${UUID.randomUUID()}",
-            sessionId = sessionId,
-            role = role,
-            text = text,
-            thinking = thinking,
-        )
+        val images = content?.let(::contentImages).orEmpty()
+        val messageId = obj.str("id") ?: "h-$index-${UUID.randomUUID()}"
+        return when (role) {
+            "user" -> {
+                val text = content?.let(::contentText).orEmpty()
+                if (text.isBlank() && images.isEmpty()) emptyList()
+                else listOf(ChatMessage(id = messageId, sessionId = sessionId, role = "user", text = text, images = images))
+            }
+            "assistant" -> {
+                val text = content?.let(::contentText).orEmpty()
+                val thinking = content?.let(::contentThinking).orEmpty()
+                val out = mutableListOf<ChatMessage>()
+                if (text.isNotBlank() || thinking.isNotBlank() || images.isNotEmpty()) {
+                    out += ChatMessage(
+                        id = messageId,
+                        sessionId = sessionId,
+                        role = "assistant",
+                        text = text,
+                        thinking = thinking,
+                        images = images,
+                    )
+                }
+                (content as? JsonArray)?.forEachIndexed { i, el ->
+                    val o = el as? JsonObject ?: return@forEachIndexed
+                    if (o.str("type") != "toolCall") return@forEachIndexed
+                    val toolId = o.str("id") ?: "tc-$index-$i"
+                    out += ChatMessage(
+                        id = "tool-$toolId",
+                        sessionId = sessionId,
+                        role = "tool",
+                        tool = ToolCall(
+                            id = toolId,
+                            name = o.str("name") ?: "tool",
+                            args = o["arguments"]?.toString().orEmpty(),
+                            status = "done",
+                        ),
+                    )
+                }
+                out
+            }
+            "toolResult" -> {
+                val toolId = obj.str("toolCallId") ?: "tr-$index-${UUID.randomUUID()}"
+                val isError = obj["isError"]?.jsonPrimitive?.contentOrNull?.toBooleanStrictOrNull() ?: false
+                listOf(
+                    ChatMessage(
+                        id = "tool-$toolId",
+                        sessionId = sessionId,
+                        role = "tool",
+                        tool = ToolCall(
+                            id = toolId,
+                            name = obj.str("toolName") ?: "tool",
+                            result = contentText(content),
+                            status = if (isError) "error" else "done",
+                            isError = isError,
+                            durationMs = obj["durationMs"]?.jsonPrimitive?.longOrNull ?: 0,
+                            images = images,
+                        ),
+                    ),
+                )
+            }
+            else -> emptyList()
+        }
     }
 
-    private fun contentText(el: kotlinx.serialization.json.JsonElement?): String = when (el) {
-        is JsonPrimitive -> if (el.isString) el.content else ""
-        is JsonArray -> el.joinToString("\n") { item ->
+    private fun contentBody(el: kotlinx.serialization.json.JsonElement?): kotlinx.serialization.json.JsonElement? = when (el) {
+        is JsonObject -> when {
+            el["content"] != null -> el["content"]
+            el["result"] != null -> el["result"]
+            else -> el
+        }
+        else -> el
+    }
+
+    private fun contentText(el: kotlinx.serialization.json.JsonElement?): String = when (val body = contentBody(el)) {
+        is JsonPrimitive -> if (body.isString) body.content else ""
+        is JsonArray -> body.joinToString("\n") { item ->
             val o = item as? JsonObject
             when {
                 o == null -> item.toString()
@@ -741,13 +810,46 @@ class CarryRepository(context: Context) {
         else -> ""
     }
 
-    private fun contentThinking(el: kotlinx.serialization.json.JsonElement?): String = when (el) {
-        is JsonArray -> el.mapNotNull { item ->
+    private fun contentThinking(el: kotlinx.serialization.json.JsonElement?): String = when (val body = contentBody(el)) {
+        is JsonArray -> body.mapNotNull { item ->
             val o = item as? JsonObject ?: return@mapNotNull null
             if (o.str("type") == "thinking") o.str("thinking") ?: o.str("text") else null
         }.joinToString("\n")
         else -> ""
     }
+
+    private fun contentImages(el: kotlinx.serialization.json.JsonElement?): List<ImagePart> {
+        val body = contentBody(el) as? JsonArray ?: return emptyList()
+        return body.mapNotNull { item ->
+            val o = item as? JsonObject ?: return@mapNotNull null
+            if (o.str("type") != "image") return@mapNotNull null
+            val source = o["source"] as? JsonObject
+            val data = o.str("data") ?: source?.str("data") ?: return@mapNotNull null
+            val mime = o.str("mimeType") ?: source?.str("media_type") ?: "image/jpeg"
+            ImagePart(mime, data)
+        }
+    }
+}
+
+/** 合并同一工具的历史 toolCall 与 toolResult，保留命令参数与最终结果。 */
+internal fun mergeHistoryMessages(history: List<ChatMessage>): List<ChatMessage> {
+    val byId = LinkedHashMap<String, ChatMessage>()
+    history.forEach { message ->
+        val previous = byId[message.id]
+        val oldTool = previous?.tool
+        val newTool = message.tool
+        byId[message.id] = if (oldTool != null && newTool != null) {
+            message.copy(
+                tool = newTool.copy(
+                    name = newTool.name.ifBlank { oldTool.name },
+                    args = newTool.args.ifBlank { oldTool.args },
+                ),
+            )
+        } else {
+            message
+        }
+    }
+    return byId.values.toList()
 }
 
 private fun JsonObject.str(key: String): String? = (this[key] as? JsonPrimitive)?.contentOrNull

@@ -32,8 +32,8 @@ android {
         applicationId = "dev.picarry.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 3
-        versionName = "0.1.2"
+        versionCode = 4
+        versionName = "0.1.3"
     }
     splits {
         abi {
@@ -82,6 +82,10 @@ dependencies {
     implementation("tech.annexflow.iroh4k:iroh4k-android:0.2.0")
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
     implementation("androidx.exifinterface:exifinterface:1.3.7")
+    implementation("io.noties.markwon:core:4.6.2")
+    implementation("io.noties.markwon:linkify:4.6.2")
+    implementation("io.noties.markwon:ext-strikethrough:4.6.2")
+    implementation("io.noties.markwon:ext-tables:4.6.2")
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.14.1")

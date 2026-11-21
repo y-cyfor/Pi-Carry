@@ -48,6 +48,9 @@ data class MessagePart(
 )
 
 @Serializable
+data class ImagePart(val mimeType: String = "image/jpeg", val data: String)
+
+@Serializable
 data class ToolCall(
     val id: String,
     val name: String,
@@ -56,6 +59,7 @@ data class ToolCall(
     val status: String = "running",
     val durationMs: Long = 0,
     val isError: Boolean = false,
+    val images: List<ImagePart> = emptyList(),
 )
 
 @Serializable
@@ -87,6 +91,7 @@ data class ChatMessage(
     var streaming: Boolean = false,
     var tool: ToolCall? = null,
     var approval: Approval? = null,
+    var images: List<ImagePart> = emptyList(),
     var error: Boolean = false,
 )
 

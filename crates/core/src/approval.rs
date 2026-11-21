@@ -6,7 +6,7 @@ use crate::store::{PendingApproval, Store};
 use chrono::{DateTime, Duration, Utc};
 use pi_carry_protocol::{events, ApprovalView};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{broadcast, oneshot};
@@ -301,6 +301,8 @@ struct Inner {
     clock: Arc<dyn crate::Clock>,
     ids: Arc<dyn crate::IdGen>,
     waiters: Mutex<HashMap<String, Waiter>>,
+    /// 用户在审批卡选择“本对话都允许”后，本进程内该会话的普通工具直接放行。
+    session_allow: Mutex<HashSet<String>>,
     events: broadcast::Sender<ApprovalEvent>,
     seq: AtomicU64,
 }
@@ -325,6 +327,7 @@ impl ApprovalManager {
                 clock,
                 ids,
                 waiters: Mutex::new(HashMap::new()),
+                session_allow: Mutex::new(HashSet::new()),
                 events,
                 seq: AtomicU64::new(1),
             }),
@@ -344,6 +347,24 @@ impl ApprovalManager {
         input: &Value,
     ) -> Result<Decision> {
         let c = classify(tool_name, input);
+        // “本对话都允许”只放行普通工具；critical 风险仍然逐次询问，避免一次授权放大成任意破坏。
+        if c.risk != Risk::Critical
+            && self
+                .inner
+                .session_allow
+                .lock()
+                .expect("session_allow poisoned")
+                .contains(session_id)
+        {
+            let now = crate::rfc3339(self.inner.clock.now());
+            self.inner.store.audit(
+                &now,
+                "system",
+                "approval.auto_allow_session",
+                &json!({"toolName": tool_name, "risk": c.risk.as_str()}),
+            )?;
+            return Ok(Decision::Allow { remember: true });
+        }
         if self.inner.config.auto_allow_low_risk && c.risk == Risk::Low {
             let view = self.build_view(session_id, tool_name, &c, "allowed", 0);
             self.inner.store.audit(
@@ -521,6 +542,13 @@ impl ApprovalManager {
         }
         // 只有 CAS 成功后才落“记住”规则：并发 deny 抢先时不能留下放行规则。
         // 规则是附加优化，写入失败不应回滚已生效的审批。
+        if state == "allowed" && matches!(decision, "allow_always" | "allowAlways") {
+            self.inner
+                .session_allow
+                .lock()
+                .expect("session_allow poisoned")
+                .insert(pending.view.session_id.clone());
+        }
         if state == "allowed"
             && remember
             && self.inner.config.allow_remember
@@ -546,7 +574,9 @@ impl ApprovalManager {
             .remove(id)
         {
             let d = if state == "allowed" {
-                Decision::Allow { remember }
+                Decision::Allow {
+                    remember: remember || matches!(decision, "allow_always" | "allowAlways"),
+                }
             } else {
                 Decision::Deny
             };
@@ -765,6 +795,55 @@ mod tests {
             .unwrap();
         assert_eq!(d, Decision::Allow { remember: true });
         assert_eq!(mgr.pending(Some("s1")).unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn allow_always_unblocks_and_allows_future_tools() {
+        let (mgr, _store, _clock) = setup();
+        let mgr2 = mgr.clone();
+        let h = tokio::spawn(async move {
+            mgr2.request("s1", "tc1", "bash", &json!({"command": "cargo test"}))
+                .await
+                .unwrap()
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        let id = mgr.pending(Some("s1")).unwrap()[0].id.clone();
+        mgr.resolve(&id, "allow_always", "phone", false).unwrap();
+        assert_eq!(h.await.unwrap(), Decision::Allow { remember: true });
+        // 本对话普通命令放行，critical 仍需逐次确认。
+        let d = mgr
+            .request("s1", "tc2", "bash", &json!({"command": "cargo test"}))
+            .await
+            .unwrap();
+        assert_eq!(d, Decision::Allow { remember: true });
+    }
+
+    #[tokio::test]
+    async fn allow_always_does_not_auto_allow_critical() {
+        let (mgr, _store, _clock) = setup();
+        let mgr2 = mgr.clone();
+        let h = tokio::spawn(async move {
+            mgr2.request("s1", "tc1", "bash", &json!({"command": "cargo test"}))
+                .await
+                .unwrap()
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        let id = mgr.pending(Some("s1")).unwrap()[0].id.clone();
+        mgr.resolve(&id, "allow_always", "phone", false).unwrap();
+        assert_eq!(h.await.unwrap(), Decision::Allow { remember: true });
+
+        let mgr2 = mgr.clone();
+        let dangerous = tokio::spawn(async move {
+            mgr2.request("s1", "tc2", "bash", &json!({"command": "rm -rf build"}))
+                .await
+                .unwrap()
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        let pending = mgr.pending(Some("s1")).unwrap();
+        assert_eq!(pending.len(), 1, "critical 命令必须继续询问");
+        assert_eq!(pending[0].risk, "critical");
+        mgr.resolve(&pending[0].id, "deny", "phone", false).unwrap();
+        assert_eq!(dangerous.await.unwrap(), Decision::Deny);
     }
 
     #[tokio::test]

@@ -129,6 +129,64 @@ async fn create_prompt_and_stream() {
 }
 
 #[tokio::test]
+async fn approval_allow_always_skips_following_approval() {
+    let (bridge, _tmp) = bridge_with("approval-allow").await;
+    let summary = bridge.sessions.create("").await.unwrap();
+    let mut events = bridge.sessions.subscribe();
+    bridge
+        .sessions
+        .prompt(
+            PromptPayload {
+                session_id: summary.id.clone(),
+                message: "第一条".into(),
+                mode: "auto".into(),
+                client_id: "c-aa1".into(),
+                images: vec![],
+            },
+            "device-aa",
+        )
+        .await
+        .unwrap();
+    let req = wait_event(&mut events, "approval.requested", 5).await;
+    let approval_id = req["approval"]["id"].as_str().unwrap().to_string();
+    bridge
+        .approvals
+        .resolve(&approval_id, "allow_always", "device-aa", false)
+        .unwrap();
+    wait_event(&mut events, "message.final", 5).await;
+    wait_event(&mut events, "run.state", 5).await;
+
+    // 第二条 prompt：同会话普通工具直接放行，不再产生审批请求。
+    bridge
+        .sessions
+        .prompt(
+            PromptPayload {
+                session_id: summary.id.clone(),
+                message: "第二条".into(),
+                mode: "auto".into(),
+                client_id: "c-aa2".into(),
+                images: vec![],
+            },
+            "device-aa",
+        )
+        .await
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let ev = tokio::time::timeout_at(deadline, events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match ev.event["type"].as_str().unwrap_or("") {
+            "approval.requested" => panic!("本对话都允许后不应再次询问"),
+            "message.final" => break,
+            _ => {}
+        }
+    }
+    bridge.shutdown().await;
+}
+
+#[tokio::test]
 async fn approval_allow_completes_run() {
     let (bridge, _tmp) = bridge_with("approval-allow").await;
     let summary = bridge.sessions.create("").await.unwrap();
