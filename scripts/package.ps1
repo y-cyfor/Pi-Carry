@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-Location (Join-Path $PSScriptRoot '..')
 
-$version = '0.1.4'
+$version = '0.2.0'
 $desktopDir = 'dist/pi-carry-windows-10-x64'
 $desktopZip = "dist/pi-carry-windows-10-x64-$version.zip"
 $androidArm64 = "dist/pi-carry-android-8.0-arm64-v8a-$version.apk"

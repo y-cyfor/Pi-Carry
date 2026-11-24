@@ -4,7 +4,7 @@
 //! 也不把 stderr 混进协议流。请求按 id 关联，事件通过 broadcast 分发。
 
 use crate::error::{CoreError, Result};
-use pi_carry_protocol::MAX_JSONL_LINE;
+use pi_carry_protocol::{ErrorCode, ProtocolError, MAX_JSONL_LINE};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -334,7 +334,7 @@ impl PiClient {
     }
 }
 
-/// 按行读取，但单行最多缓存 `limit` 字节；更长的行整行丢弃并标记 truncated。
+/// 按行读取，但单行最多缓存 `limit` 字节；更长的行保留前缀并标记 truncated。
 /// `read_until` 会把整行读进内存，遇到恶意/异常超长行会 OOM，因此手工分块扫描。
 async fn read_line_bounded<R: AsyncBufRead + Unpin>(
     reader: &mut R,
@@ -356,8 +356,11 @@ async fn read_line_bounded<R: AsyncBufRead + Unpin>(
             Some(end) => {
                 if !truncated {
                     if out.len() + end > limit {
+                        // 保留前缀：调用方要从里面提取 response id，才能立刻
+                        // 让对应请求失败，而不是干等 120 秒超时。多留不超过 limit。
+                        let keep = limit.saturating_sub(out.len());
+                        out.extend_from_slice(&available[..end.min(keep)]);
                         truncated = true;
-                        out.clear();
                     } else {
                         out.extend_from_slice(&available[..end]);
                     }
@@ -369,8 +372,9 @@ async fn read_line_bounded<R: AsyncBufRead + Unpin>(
                 let len = available.len();
                 if !truncated {
                     if out.len() + len > limit {
+                        let keep = limit.saturating_sub(out.len());
+                        out.extend_from_slice(&available[..keep]);
                         truncated = true;
-                        out.clear();
                     } else {
                         out.extend_from_slice(available);
                     }
@@ -388,7 +392,27 @@ async fn read_stdout(stdout: tokio::process::ChildStdout, inner: Arc<Inner>) {
         match read_line_bounded(&mut reader, MAX_JSONL_LINE).await {
             Ok(Some((bytes, truncated))) => {
                 if truncated {
-                    tracing::warn!(limit = MAX_JSONL_LINE, "pi stdout 单行超过协议上限，已丢弃");
+                    tracing::warn!(
+                        limit = MAX_JSONL_LINE,
+                        "pi stdout 单行超过协议上限，已保留前缀并断开该请求"
+                    );
+                    // 响应行超限时不能只丢弃：调用方会一直等到超时。
+                    // 从保留的前缀里认出 response id，立即回一条可操作的错误（B-01）。
+                    if json_field(&bytes, "type").as_deref() == Some("response") {
+                        if let Some(id) = json_field(&bytes, "id") {
+                            let pending =
+                                inner.pending.lock().expect("pending poisoned").remove(&id);
+                            if let Some(p) = pending {
+                                let _ = p.tx.send(Err(CoreError::Protocol(ProtocolError::new(
+                                    ErrorCode::PayloadTooLarge,
+                                    format!(
+                                        "pi 响应超过 {} MiB 单行上限（常见于历史图片内联），请求 {id} 已中止",
+                                        MAX_JSONL_LINE / (1024 * 1024)
+                                    ),
+                                ))));
+                            }
+                        }
+                    }
                     continue;
                 }
                 let line = String::from_utf8_lossy(&bytes);
@@ -493,6 +517,30 @@ fn response_error(value: &Value) -> CoreError {
             .and_then(Value::as_str)
             .unwrap_or("命令")
     ))
+}
+
+/// 从（可能被截断的）JSON 前缀里抓一个顶层字符串字段。
+/// 只用于超长 response 的 id/type 识别，不替代完整反序列化。
+fn json_field(bytes: &[u8], key: &str) -> Option<String> {
+    let text = String::from_utf8_lossy(bytes);
+    let pat = format!("\"{key}\"");
+    let mut from = 0;
+    while let Some(pos) = text[from..].find(&pat) {
+        let start = from + pos + pat.len();
+        let rest = text[start..].trim_start();
+        let Some(rest) = rest.strip_prefix(':') else {
+            from = start;
+            continue;
+        };
+        let rest = rest.trim_start();
+        let Some(rest) = rest.strip_prefix('"') else {
+            from = start;
+            continue;
+        };
+        let end = rest.find('"')?;
+        return Some(rest[..end].to_string());
+    }
+    None
 }
 
 fn truncate(s: &str, n: usize) -> String {
@@ -682,7 +730,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_line_bounded_drops_overlong_line_and_keeps_next() {
+    async fn read_line_bounded_keeps_prefix_of_overlong_line_and_next() {
         let data = b"short\n0123456789abcdefghij\nafter\n".to_vec();
         let mut reader = BufReader::new(data.as_slice());
         let (first, t1) = read_line_bounded(&mut reader, 16).await.unwrap().unwrap();
@@ -690,7 +738,11 @@ mod tests {
         assert!(!t1);
         let (second, t2) = read_line_bounded(&mut reader, 16).await.unwrap().unwrap();
         assert!(t2, "超过上限的行必须标记 truncated");
-        assert!(second.is_empty(), "超长行内容必须丢弃，不能缓存前缀");
+        assert_eq!(
+            String::from_utf8_lossy(&second),
+            "0123456789abcdef",
+            "需要保留前缀供调用方提取 response id（B-01）"
+        );
         let (third, t3) = read_line_bounded(&mut reader, 16).await.unwrap().unwrap();
         assert_eq!(String::from_utf8_lossy(&third), "after");
         assert!(!t3, "被丢弃的行不能影响后续分帧");

@@ -11,8 +11,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::sync::{mpsc, oneshot};
 
 struct State {
-    session_path: PathBuf,
-    session_id: String,
+    /// fork 会把进程切到新会话文件/新 id，因此两者都必须可变。
+    session_path: Mutex<PathBuf>,
+    session_id: Mutex<String>,
     scenario: String,
     streaming: AtomicBool,
     abort: AtomicBool,
@@ -52,7 +53,8 @@ impl State {
         if let (Some(obj), Value::Object(extra)) = (entry.as_object_mut(), body) {
             obj.extend(extra);
         }
-        append(&self.session_path, entry);
+        let path = self.session_path.lock().unwrap().clone();
+        append(&path, entry);
         *self.last_entry.lock().unwrap() = Some(id.to_string());
     }
 }
@@ -104,8 +106,8 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or(1)
         ^ (std::process::id() as u64) << 32;
     let state = Arc::new(State {
-        session_path: path,
-        session_id,
+        session_path: Mutex::new(path),
+        session_id: Mutex::new(session_id),
         scenario,
         streaming: AtomicBool::new(false),
         abort: AtomicBool::new(false),
@@ -284,8 +286,8 @@ async fn handle(state: &Arc<State>, out: &Out, ty: &str, v: &Value) -> Result<Va
             "isCompacting": false,
             "steeringMode": "all",
             "followUpMode": "one-at-a-time",
-            "sessionFile": state.session_path,
-            "sessionId": state.session_id,
+            "sessionFile": state.session_path.lock().unwrap().display().to_string(),
+            "sessionId": state.session_id.lock().unwrap().clone(),
             "sessionName": "假 pi 会话",
             "autoCompactionEnabled": true,
             "messageCount": state.message_count.load(Ordering::SeqCst),
@@ -293,7 +295,9 @@ async fn handle(state: &Arc<State>, out: &Out, ty: &str, v: &Value) -> Result<Va
             // 暴露信任开关：让 e2e 测试能验证「默认不信任项目资源」真的传到了 pi。
             "projectTrusted": state.trust_flag
         })),
-        "get_messages" => Ok(json!({"messages": read_messages(&state.session_path)})),
+        "get_messages" => {
+            Ok(json!({"messages": read_messages(&state.session_path.lock().unwrap())}))
+        }
         "set_model" => {
             *state.model.lock().unwrap() = json!({
                 "provider": v.get("provider"), "id": v.get("modelId")
@@ -342,7 +346,8 @@ async fn handle(state: &Arc<State>, out: &Out, ty: &str, v: &Value) -> Result<Va
             // 真 pi 的 entries 是会话文件的行级记录（带 id/parentId），message 体内没有 id。
             // fake-pi 必须与真 pi 保持同形，否则冷热快照的 id 漂移会被测试天然掩盖（T2）。
             let mut entries = Vec::new();
-            if let Ok(text) = std::fs::read_to_string(&state.session_path) {
+            let path = state.session_path.lock().unwrap().clone();
+            if let Ok(text) = std::fs::read_to_string(&path) {
                 for line in text.lines() {
                     if let Ok(v) = serde_json::from_str::<Value>(line) {
                         entries.push(v);
@@ -357,7 +362,9 @@ async fn handle(state: &Arc<State>, out: &Out, ty: &str, v: &Value) -> Result<Va
             Ok(json!({"entries": entries, "leafId": leaf}))
         }
         "get_tree" => Ok(json!({"tree": []})),
-        "get_last_assistant_text" => Ok(json!({"text": last_assistant(&state.session_path)})),
+        "get_last_assistant_text" => {
+            Ok(json!({"text": last_assistant(&state.session_path.lock().unwrap())}))
+        }
         "get_session_stats" => Ok(json!({"messages": state.message_count.load(Ordering::SeqCst)})),
         "set_session_name" => Ok(json!({"name": v.get("name")})),
         "set_steering_mode" | "set_follow_up_mode" | "set_auto_compaction" | "set_auto_retry" => {
@@ -396,7 +403,67 @@ async fn handle(state: &Arc<State>, out: &Out, ty: &str, v: &Value) -> Result<Va
             // 因此这里保留即时响应，并把差异记在 docs/buglist-close.md。
             Ok(json!({}))
         }
-        "fork" => Ok(json!({"text": "forked", "cancelled": false})),
+        "fork" => {
+            // 与真 pi 同语义：复制到所选 entry，生成新会话文件并切换进程状态；
+            // 原文件保留不动，旧会话之后仍可打开查看。
+            let entry_id = v
+                .get("entryId")
+                .and_then(Value::as_str)
+                .ok_or("fork 缺少 entryId")?;
+            let src_path = state.session_path.lock().unwrap().clone();
+            let text =
+                std::fs::read_to_string(&src_path).map_err(|e| format!("读取会话失败: {e}"))?;
+            let mut header = None;
+            let mut copied = Vec::new();
+            let mut found = false;
+            for line in text.lines() {
+                let Ok(entry) = serde_json::from_str::<Value>(line) else {
+                    continue;
+                };
+                if entry.get("type").and_then(Value::as_str) == Some("session") {
+                    header = Some(entry);
+                    continue;
+                }
+                copied.push(entry.clone());
+                if entry.get("id").and_then(Value::as_str) == Some(entry_id) {
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                return Err(format!("fork: 未知 entry {entry_id}"));
+            }
+            let old_id = state.session_id.lock().unwrap().clone();
+            let new_id = format!("fork-{}", state.entry_id());
+            let new_path = src_path.with_file_name(format!("{new_id}.jsonl"));
+            let mut h = header.unwrap_or_else(|| json!({"type": "session", "version": 3}));
+            h["id"] = json!(new_id);
+            h["parentSession"] = json!(old_id);
+            h["timestamp"] = json!(now());
+            let mut body = format!(
+                "{}\n",
+                serde_json::to_string(&h).map_err(|e| e.to_string())?
+            );
+            for entry in &copied {
+                body.push_str(&serde_json::to_string(entry).map_err(|e| e.to_string())?);
+                body.push('\n');
+            }
+            std::fs::write(&new_path, body).map_err(|e| format!("写入 fork 会话失败: {e}"))?;
+            *state.session_path.lock().unwrap() = new_path;
+            *state.session_id.lock().unwrap() = new_id;
+            *state.last_entry.lock().unwrap() = copied
+                .last()
+                .and_then(|e| e.get("id").and_then(Value::as_str))
+                .map(str::to_string);
+            state.message_count.store(
+                copied
+                    .iter()
+                    .filter(|e| e.get("type").and_then(Value::as_str) == Some("message"))
+                    .count() as u64,
+                Ordering::SeqCst,
+            );
+            Ok(json!({"text": "forked", "cancelled": false}))
+        }
         "switch_session" | "clone" | "new_session" => Ok(json!({})),
         "bash" => Ok(json!({"exitCode": 0, "output": ""})),
         other => Err(format!("fake-pi 不支持 {other}")),

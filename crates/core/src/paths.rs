@@ -44,10 +44,15 @@ impl Paths {
     pub fn extensions(&self) -> PathBuf {
         self.home.join("extensions")
     }
+    /// 0.2.0 图片 blob 库根目录（内容寻址，文件名即 sha256）。
+    pub fn blobs(&self) -> PathBuf {
+        self.home.join("blobs")
+    }
     pub fn ensure(&self) -> std::io::Result<()> {
         std::fs::create_dir_all(&self.home)?;
         std::fs::create_dir_all(self.logs())?;
         std::fs::create_dir_all(self.run())?;
+        std::fs::create_dir_all(self.blobs())?;
         Ok(())
     }
 }

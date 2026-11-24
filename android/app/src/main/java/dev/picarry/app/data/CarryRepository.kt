@@ -3,6 +3,7 @@ package dev.picarry.app.data
 import android.Manifest
 import android.app.PendingIntent
 import android.content.Context
+import android.util.Base64
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
@@ -19,9 +20,13 @@ import dev.picarry.app.net.classifyAddress
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -35,20 +40,34 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
+import java.io.File
+import java.security.MessageDigest
 import java.util.UUID
+
+/** 一次发送失败：保留原文与图片引用，供聊天页一键重试。 */
+data class SendFailure(
+    val nodeId: String,
+    val sessionId: String,
+    val text: String,
+    val mode: String,
+    val images: List<ImagePart>,
+    val error: String,
+)
 
 /** 应用级状态与网络编排。 */
 class CarryRepository(context: Context) {
     companion object {
         /** 服务端在事件流滞后时发出的错误码：客户端必须重拉快照。 */
         const val SNAPSHOT_REQUIRED = "SNAPSHOT_REQUIRED"
+        /** blob.put 单帧分片大小，必须与服务端 BLOB_CHUNK_BYTES 一致。 */
+        const val BLOB_CHUNK_BYTES = 512 * 1024
     }
     private val appContext = context.applicationContext
     private val store = NodeStore(appContext)
     private val clientVersion: String by lazy {
         runCatching {
             appContext.packageManager.getPackageInfo(appContext.packageName, 0).versionName
-        }.getOrNull() ?: "0.1.4"
+        }.getOrNull() ?: "0.2.0"
     }
 
     /** 电脑端看到的是“用户设备名 + 型号”，不再统一显示 pi carry。 */
@@ -96,6 +115,34 @@ class CarryRepository(context: Context) {
 
     private val _approvals = MutableStateFlow<List<Approval>>(emptyList())
     val approvals: StateFlow<List<Approval>> = _approvals.asStateFlow()
+
+    /** 已被 fork 迁移走的旧会话（复合键 nodeId::sessionId），列表上标「已迁移」。 */
+    private val _migratedSessions = MutableStateFlow<Set<String>>(emptySet())
+    val migratedSessions: StateFlow<Set<String>> = _migratedSessions.asStateFlow()
+
+    // 目标会话键 -> 来源会话键：关闭任一端时都能同时清掉对应标记。
+    private val _migrationTargets = MutableStateFlow<Map<String, String>>(emptyMap())
+
+    /** 已经拿到权威快照、可以安全上传/发送的会话（复合键）。 */
+    private val _ready = MutableStateFlow<Set<String>>(emptySet())
+    val ready: StateFlow<Set<String>> = _ready.asStateFlow()
+
+    /** 打开会话失败的原因（复合键）：UI 不能只留一块永久空白。 */
+    private val _openErrors = MutableStateFlow<Map<String, String>>(emptyMap())
+    val openErrors: StateFlow<Map<String, String>> = _openErrors.asStateFlow()
+    private val _opening = MutableStateFlow<Set<String>>(emptySet())
+    val opening: StateFlow<Set<String>> = _opening.asStateFlow()
+
+    /** 会话迁移事件：ChatScreen 据此把路由替换到新会话并保留草稿。 */
+    private val _migrations = MutableSharedFlow<SessionMigration>(extraBufferCapacity = 16)
+    private val _sendFailures = MutableSharedFlow<SendFailure>(extraBufferCapacity = 16)
+
+    /** 发送失败事件：聊天页据此显示「重试」入口。 */
+    val sendFailures = _sendFailures.asSharedFlow()
+    val migrations = _migrations
+
+    /** 会话草稿：migration 换路由时按旧→新复制，避免用户刚打的字丢失。 */
+    private val drafts = java.util.concurrent.ConcurrentHashMap<String, String>()
 
     private val _models = MutableStateFlow<Map<String, List<ModelOption>>>(emptyMap())
     val models: StateFlow<Map<String, List<ModelOption>>> = _models.asStateFlow()
@@ -230,6 +277,13 @@ class CarryRepository(context: Context) {
         _sessions.mutate { it.filterNot { s -> s.nodeId == id } }
         _approvals.mutate { it.filterNot { a -> a.nodeId == id } }
         _messages.mutate { it.filterKeys { k -> !k.startsWith(prefix) } }
+        // 迁移标记/草稿也是按节点键存的；不清会让重配对后的同名会话直接只读（B-36）。
+        _migratedSessions.mutate { s -> s.filterNot { k -> k.startsWith(prefix) }.toSet() }
+        _migrationTargets.mutate { m ->
+            m.filterKeys { !it.startsWith(prefix) }.filterValues { !it.startsWith(prefix) }
+        }
+        _ready.mutate { s -> s.filterNot { k -> k.startsWith(prefix) }.toSet() }
+        drafts.keys.removeIf { it.startsWith(prefix) }
         _models.mutate { it.filterKeys { k -> !k.startsWith(prefix) } }
         _thinkingLevels.mutate { it.filterKeys { k -> !k.startsWith(prefix) } }
         _runInfo.mutate { it.filterKeys { k -> !k.startsWith(prefix) } }
@@ -404,7 +458,16 @@ class CarryRepository(context: Context) {
                 val arr = resp["sessions"] as? JsonArray ?: return@runCatching
                 val list = arr.mapNotNull { parseSession(nodeId, it as? JsonObject ?: return@mapNotNull null) }
                 // 复合键：同名 sessionId 在两台节点上必须各自路由（N-05）。
-                list.forEach { sessionNode[sessionKey(nodeId, it.id)] = nodeId }
+                list.forEach { session ->
+                    val sessionKey = sessionKey(nodeId, session.id)
+                    sessionNode[sessionKey] = nodeId
+                    // session.list 自带 migratedTo：冷启动时没打开过旧会话也能显示
+                    // 「已迁移」角标，不能只依赖一次性事件或 session.open（B-36）。
+                    session.migratedTo?.let { to ->
+                        _migratedSessions.mutate { it + sessionKey }
+                        _migrationTargets.mutate { it + (sessionKey(nodeId, to) to sessionKey) }
+                    }
+                }
                 // 同上：只替换本节点的会话，用 CAS 避免抹掉另一节点同时刷进来的列表（C-2）。
                 _sessions.mutate { current ->
                     (current.filterNot { it.nodeId == nodeId } + list).sortedByDescending { it.updatedAt }
@@ -423,12 +486,18 @@ class CarryRepository(context: Context) {
         // 此时把快照与缓冲事件写回去会把已关闭会话“复活”成幽灵消息。
         val epoch = sessionEpochs[key] ?: 0L
         val stillCurrent = { (sessionEpochs[key] ?: 0L) == epoch }
+        _ready.mutate { it - key }
+        _opening.mutate { it + key }
         scope.launch {
             try {
                 runCatching {
                     val conn = connections[nodeId] ?: error("节点未连接")
                     conn.request("session.open", buildJsonObject { put("sessionId", JsonPrimitive(sessionId)) })
-                    val snap = conn.request("session.snapshot", buildJsonObject { put("sessionId", JsonPrimitive(sessionId)) })
+                    val snap = conn.request("session.snapshot", buildJsonObject {
+                        put("sessionId", JsonPrimitive(sessionId))
+                        // 声明支持 blob：服务端才会把历史图投影成 blobId，老客户端不受影响。
+                        put("blobs", JsonPrimitive(true))
+                    })
                     // 请求期间节点可能已被删除、会话可能已被关闭：不要让在途快照把派生状态写回孤儿键。
                     if (node(nodeId) == null || !stillCurrent()) return@runCatching
                     val msgs = (snap["messages"] as? JsonArray)?.flatMapIndexed { i, el ->
@@ -460,7 +529,22 @@ class CarryRepository(context: Context) {
                         list.filterNot { a -> a.nodeId == nodeId && a.sessionId == sessionId } + pending
                     }
                     loadModelCatalog(conn, nodeId, sessionId)
-                }.onFailure { Log.w("CarryRepo", "打开会话失败: ${it.message}") }
+                    // 旧会话在服务端已标记迁移：重启 App 后也能立刻显示只读，
+                    // 不能只靠一次性的 session.migrated 事件（B-14/B-36）。
+                    snap.str("migratedTo")?.let { to ->
+                        _migratedSessions.mutate { it + key }
+                        _migrationTargets.mutate { it + (sessionKey(nodeId, to) to key) }
+                    }
+                    // 载入模型目录可能较慢；期间会话若被关闭，不能再把它标成 ready。
+                    if (!stillCurrent()) return@runCatching
+                    _openErrors.mutate { it - key }
+                    // 快照与历史都已落地，之后才允许上传待发图/发送。
+                    _ready.mutate { it + key }
+                }.onFailure {
+                    val message = (it as? CarryException)?.message ?: it.message ?: "打开会话失败"
+                    Log.w("CarryRepo", "打开会话失败: $message")
+                    _openErrors.mutate { it + (key to message) }
+                }
             } finally {
                 // 在锁内取走一批缓冲并决定是否解除 syncing；重放期间新到事件会继续入下一批，
                 // 直到缓冲为空才切到直通，保证顺序且不遗留事件。
@@ -489,6 +573,7 @@ class CarryRepository(context: Context) {
                 } finally {
                     // 兜底：任何异常都不能让会话永久停在 syncing。
                     syncing.remove(key)
+                    _opening.mutate { it - key }
                 }
             }
         }
@@ -587,15 +672,15 @@ class CarryRepository(context: Context) {
         sessionId: String,
         text: String,
         mode: String = "auto",
-        images: List<Triple<String, String, String>> = emptyList(),
+        images: List<ImagePart> = emptyList(),
     ) {
         if (text.isBlank() && images.isEmpty()) return
         val key = sessionKey(nodeId, sessionId)
-        // 图片以 base64 内联在 prompt.send 单帧里，超限时服务端直接断连接；先按帧预算拦下并给可读提示。
-        // 估算必须包含信封开销（sessionId/mode/clientId + 每张图的 mimeType 与 JSON 引号），
-        // 否则“刚好差几 KB”的帧会通过预检然后在 Wire.frame / 服务端 read_frame 处失败。
+        // 内联 base64 仍受单帧预算约束；blob 图片只传 sha/尺寸，正文不再受图片大小影响。
         val envelope = 256L + text.encodeToByteArray().size
-        val imagesBytes = images.sumOf { 64L + it.second.length.toLong() }
+        val imagesBytes = images.sumOf { img ->
+            if (img.isBlob) 160L else 64L + img.data.length.toLong()
+        }
         val estimate = envelope + imagesBytes
         if (estimate > Wire.PROMPT_FRAME_BUDGET) {
             val budgetKib = Wire.PROMPT_FRAME_BUDGET / 1024
@@ -615,6 +700,7 @@ class CarryRepository(context: Context) {
             sessionId = sessionId,
             role = "user",
             text = if (images.isEmpty()) text else "$text\n\n📎 ${images.size} 张图片".trim(),
+            images = images,
         )
         inFlightLocalMessages.add("$nodeId::${local.id}")
         _messages.mutate { it + (key to ((it[key] ?: emptyList()) + local)) }
@@ -629,10 +715,15 @@ class CarryRepository(context: Context) {
                         put("mode", JsonPrimitive(mode))
                         put("clientId", JsonPrimitive(UUID.randomUUID().toString()))
                         put("images", buildJsonArray {
-                            images.forEach { (mime, data, _) ->
+                            images.forEach { img ->
                                 add(buildJsonObject {
-                                    put("mimeType", JsonPrimitive(mime))
-                                    put("data", JsonPrimitive(data))
+                                    put("mimeType", JsonPrimitive(img.mimeType))
+                                    if (img.isBlob) {
+                                        put("blobId", JsonPrimitive(img.blobId))
+                                        put("size", JsonPrimitive(img.size))
+                                    } else {
+                                        put("data", JsonPrimitive(img.data))
+                                    }
                                 })
                             }
                         })
@@ -647,6 +738,7 @@ class CarryRepository(context: Context) {
                 // 失败不能在聊天流里留下“已发出”的假用户消息：撤掉乐观插入，只留错误气泡。
                 val reason = it as? CarryException
                 val message = reason?.message ?: (it.message ?: "发送失败")
+                _sendFailures.tryEmit(SendFailure(nodeId, sessionId, text, mode, images, message))
                 _messages.mutate { current ->
                     current + (key to (current[key].orEmpty().filterNot { m -> m.id == local.id } + ChatMessage(
                         id = "err-${UUID.randomUUID()}",
@@ -816,6 +908,15 @@ class CarryRepository(context: Context) {
                 .toSet()
             _approvals.mutate { list -> list.filterNot { it.nodeId == nodeId && it.sessionId == sessionId } }
             notifiedApprovals.removeAll(closedApprovals)
+            // 迁移角标/草稿也属于这条会话；关掉后还留着会在同 id 复用时误显示。
+            _migratedSessions.mutate { it - key }
+            // 当前会话可能是旧会话（按 value 清目标标记），也可能是目标会话
+            // （按 key 清）；两个方向都清，重开同 id 才不会误显示（B-36）。
+            _migrationTargets.mutate { m ->
+                m.filterKeys { it != key }.filterValues { it != key }
+            }
+            _ready.mutate { it - key }
+            drafts.remove(key)
             lastSeq.forget(key)
             onClosed()
         }
@@ -838,6 +939,216 @@ class CarryRepository(context: Context) {
             }
         }
     }
+
+    /** 重命名会话：只改显示名，不动 jsonl。 */
+    fun renameSession(nodeId: String, sessionId: String, name: String, onDone: (String?) -> Unit = {}) {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) { onDone("名称不能为空"); return }
+        if (trimmed.length > 200) { onDone("名称不能超过 200 个字符"); return }
+        scope.launch {
+            val failure = runCatching {
+                val conn = connections[nodeId] ?: error("节点未连接")
+                conn.request("session.rename", buildJsonObject {
+                    put("sessionId", JsonPrimitive(sessionId))
+                    put("name", JsonPrimitive(trimmed))
+                })
+            }.exceptionOrNull()
+            if (failure != null) {
+                onDone((failure as? CarryException)?.message ?: failure.message ?: "重命名失败")
+                return@launch
+            }
+            _sessions.mutate { list -> list.map { if (it.nodeId == nodeId && it.id == sessionId) it.copy(name = trimmed) else it } }
+            onDone(null)
+        }
+    }
+
+    /** 读取会话 entry 树；返回当前 leaf，供 UI 默认选中分叉点。 */
+    suspend fun loadEntries(nodeId: String, sessionId: String): EntriesPage = withContext(Dispatchers.IO) {
+        val conn = connections[nodeId] ?: error("节点未连接")
+        val resp = conn.request("session.entries", buildJsonObject { put("sessionId", JsonPrimitive(sessionId)) })
+        parseEntriesPage(resp)
+    }
+
+    /** 从指定 entry 分叉；成功返回新会话 id（服务端随后广播 session.migrated）。 */
+    suspend fun forkSession(nodeId: String, sessionId: String, entryId: String): String = withContext(Dispatchers.IO) {
+        val conn = connections[nodeId] ?: error("节点未连接")
+        val resp = conn.request(
+            "session.fork",
+            buildJsonObject {
+                put("sessionId", JsonPrimitive(sessionId))
+                put("entryId", JsonPrimitive(entryId))
+            },
+            120_000,
+        )
+        val sess = resp["session"] as? JsonObject ?: error("服务端没有返回新会话")
+        sess.str("id") ?: error("服务端返回的新会话缺少 id")
+    }
+
+    /** 审批即将超时：请求服务端把剩余时间延长 [seconds]（默认 120，封顶 300）。 */
+    fun extendApproval(nodeId: String, approvalId: String, seconds: Long = 120, onError: (String) -> Unit = {}) {
+        scope.launch {
+            val failure = runCatching {
+                val conn = connections[nodeId] ?: error("节点未连接")
+                conn.request("approval.extend", buildJsonObject {
+                    put("approvalId", JsonPrimitive(approvalId))
+                    put("seconds", JsonPrimitive(seconds))
+                })
+            }.exceptionOrNull()
+            if (failure != null) onError((failure as? CarryException)?.message ?: failure.message ?: "延长失败")
+        }
+    }
+
+    // ---------- 图片 blob ----------
+
+    private fun blobCacheFile(sha: String): File {
+        val dir = File(appContext.cacheDir, "blobs").apply { mkdirs() }
+        return File(dir, sha)
+    }
+
+    /** 缓存上限 256MB，超出按 mtime 淘汰；正在读写的文件不参与淘汰。 */
+    private fun pruneBlobCache(keep: File) {
+        pruneBlobCacheDir(keep.parentFile, keep, 256L * 1024 * 1024)
+    }
+
+    /** 释放一条尚未发送的 blob 引用，返回释放后的会话用量。 */
+    suspend fun releaseBlob(nodeId: String, sessionId: String, sha: String): Long = withContext(Dispatchers.IO) {
+        val conn = connections[nodeId] ?: error("节点未连接")
+        val resp = conn.request("blob.release", buildJsonObject {
+            put("sessionId", JsonPrimitive(sessionId))
+            put("sha256", JsonPrimitive(sha))
+        })
+        resp["usedBytes"]?.jsonPrimitive?.longOrNull ?: blobUsage(nodeId, sessionId).first
+    }
+
+    /**
+     * 分片上传图片，返回内容 SHA-256。
+     *
+     * 每片 512KiB（base64 后约 683KiB，仍在 1MiB 控制帧内）；任一片失败最多重试 2 次，
+     * 重试前用 blob.stat 重新对齐已收字节，因此断网/切后台后可以从断点继续。
+     */
+    suspend fun uploadBlob(
+        nodeId: String,
+        sessionId: String,
+        bytes: ByteArray,
+        mimeType: String,
+        onProgress: (sent: Long, total: Long) -> Unit = { _, _ -> },
+    ): String = withContext(Dispatchers.IO) {
+        val conn = connections[nodeId] ?: error("节点未连接")
+        val total = bytes.size.toLong()
+        val sha = sha256Hex(bytes)
+        var offset = 0L
+        runCatching {
+            val stat = conn.request("blob.stat", buildJsonObject {
+                put("sessionId", JsonPrimitive(sessionId))
+                put("sha256", JsonPrimitive(sha))
+            })
+            if (stat["complete"]?.jsonPrimitive?.contentOrNull == "true") {
+                val f = blobCacheFile(sha)
+                f.writeBytes(bytes)
+                pruneBlobCache(f)
+                onProgress(total, total)
+                return@withContext sha
+            }
+            offset = stat["received"]?.jsonPrimitive?.longOrNull ?: 0L
+        }
+        if (offset < 0 || offset > total) offset = 0
+        onProgress(offset, total)
+        var attempt = 0
+        while (offset < total) {
+            val end = minOf(offset + BLOB_CHUNK_BYTES, total).toInt()
+            val chunk = bytes.copyOfRange(offset.toInt(), end)
+            attempt += 1
+            try {
+                val resp = conn.request(
+                    "blob.put",
+                    buildJsonObject {
+                        put("sessionId", JsonPrimitive(sessionId))
+                        put("sha256", JsonPrimitive(sha))
+                        put("mimeType", JsonPrimitive(mimeType))
+                        put("totalSize", JsonPrimitive(total))
+                        put("offset", JsonPrimitive(offset))
+                        put("data", JsonPrimitive(Base64.encodeToString(chunk, Base64.NO_WRAP)))
+                    },
+                    60_000,
+                )
+                val received = resp["received"]?.jsonPrimitive?.longOrNull ?: end.toLong()
+                offset = received.coerceAtMost(total)
+                onProgress(offset, total)
+                if (resp["complete"]?.jsonPrimitive?.contentOrNull == "true") break
+                attempt = 0
+            } catch (e: Exception) {
+                if (attempt >= 3) throw e
+                delay(400L * attempt)
+                // 对齐服务端真实进度：前一次可能已写入但响应丢失。
+                val stat = runCatching {
+                    conn.request("blob.stat", buildJsonObject {
+                        put("sessionId", JsonPrimitive(sessionId))
+                        put("sha256", JsonPrimitive(sha))
+                    })
+                }.getOrNull()
+                stat?.get("received")?.jsonPrimitive?.longOrNull?.let { offset = it.coerceIn(0, total) }
+            }
+        }
+        if (offset < total) error("图片上传未完成（" + offset + "/" + total + " 字节）")
+        val f = blobCacheFile(sha)
+        f.writeBytes(bytes)
+        pruneBlobCache(f)
+        sha
+    }
+
+    /** 读取 blob 并落盘缓存；已缓存直接命中，不再走网络。 */
+    suspend fun blobBytes(nodeId: String, sessionId: String, sha: String): ByteArray = withContext(Dispatchers.IO) {
+        val cached = blobCacheFile(sha)
+        if (cached.isFile && cached.length() > 0) return@withContext cached.readBytes()
+        val conn = connections[nodeId] ?: error("节点未连接")
+        val out = java.io.ByteArrayOutputStream()
+        var offset = 0L
+        while (true) {
+            val resp = conn.request("blob.get", buildJsonObject {
+                put("sessionId", JsonPrimitive(sessionId))
+                put("sha256", JsonPrimitive(sha))
+                put("offset", JsonPrimitive(offset))
+                put("length", JsonPrimitive(0))
+            }, 60_000)
+            val data = Base64.decode(resp.str("data").orEmpty(), Base64.DEFAULT)
+            out.write(data)
+            offset += data.size
+            val total = resp["totalSize"]?.jsonPrimitive?.longOrNull ?: offset
+            if (resp["eof"]?.jsonPrimitive?.contentOrNull == "true" || offset >= total) break
+            if (data.isEmpty()) error("blob 下载提前结束")
+        }
+        val bytes = out.toByteArray()
+        if (sha256Hex(bytes) != sha) error("图片校验失败，请重试")
+        val tmp = File(cached.parentFile, sha + ".tmp-" + UUID.randomUUID())
+        tmp.writeBytes(bytes)
+        if (!tmp.renameTo(cached)) { cached.writeBytes(bytes); tmp.delete() }
+        pruneBlobCache(cached)
+        bytes
+    }
+
+    /** 用量必须来自服务端；离线时抛错，不能让 UI 误以为额度是 0。 */
+    suspend fun blobUsage(nodeId: String, sessionId: String): Pair<Long, Long> = withContext(Dispatchers.IO) {
+        val conn = connections[nodeId] ?: error("节点未连接")
+        val resp = conn.request("blob.usage", buildJsonObject {
+            put("sessionId", JsonPrimitive(sessionId))
+        })
+        (resp["usedBytes"]?.jsonPrimitive?.longOrNull ?: error("服务端未返回图片用量")) to
+            (resp["limitBytes"]?.jsonPrimitive?.longOrNull ?: error("服务端未返回图片额度"))
+    }
+
+    fun saveDraft(nodeId: String, sessionId: String, text: String) {
+        val key = sessionKey(nodeId, sessionId)
+        if (text.isBlank()) drafts.remove(key) else drafts[key] = text
+    }
+
+    fun draftFor(nodeId: String, sessionId: String): String = drafts[sessionKey(nodeId, sessionId)].orEmpty()
+
+    fun copyDraft(nodeId: String, fromSessionId: String, toSessionId: String) {
+        drafts[sessionKey(nodeId, fromSessionId)]?.let { drafts[sessionKey(nodeId, toSessionId)] = it }
+    }
+
+    fun isMigrationTarget(nodeId: String, sessionId: String): Boolean =
+        _migrationTargets.value.containsKey(sessionKey(nodeId, sessionId))
 
     fun renameNode(id: String, name: String) {
         // 同上：只改一条字段，不应该用整表写回冲掉并发写入（C-2）。
@@ -867,6 +1178,11 @@ class CarryRepository(context: Context) {
     /** 当前正在看的会话；聊天页在职时设置，以免用户盯着会话还被通知轰炸。 */
     fun setVisibleSession(sessionId: String?) {
         visibleSessionId = sessionId
+    }
+
+    /** 只清自己：页面切换时新页面可能已经把自己设为可见（B-39）。 */
+    fun clearVisibleSession(sessionId: String) {
+        if (visibleSessionId == sessionId) visibleSessionId = null
     }
 
     private fun notifyApproval(a: Approval) {
@@ -992,6 +1308,12 @@ class CarryRepository(context: Context) {
                 Log.w("CarryRepo", "本设备已被节点吊销 node=$nodeId device=$revokedId")
                 disconnect(nodeId)
                 _errors.mutate { it + (nodeId to "此设备已被节点吊销，请重新配对") }
+            }
+            "session.migrated" -> parseMigrationEvent(nodeId, event)?.let { m ->
+                val fromKey = sessionKey(nodeId, m.fromSessionId)
+                _migratedSessions.mutate { it + fromKey }
+                _migrationTargets.mutate { it + (sessionKey(nodeId, m.toSessionId) to fromKey) }
+                _migrations.tryEmit(m)
             }
             "session.conflict" -> sid?.let {
                 val writable = event["writable"]?.jsonPrimitive?.contentOrNull != "false"
@@ -1252,6 +1574,7 @@ class CarryRepository(context: Context) {
         // 缺字段时不能假设“可写”，否则版本不匹配的节点会让手机在只读会话上继续发消息。
         lastSource = obj.str("lastSource").orEmpty(),
         writable = obj.bool("writable", false),
+        migratedTo = obj.str("migratedTo"),
     )
 
     private fun parseApproval(nodeId: String, obj: JsonObject): Approval = Approval(
@@ -1273,7 +1596,11 @@ class CarryRepository(context: Context) {
     internal fun parseHistoryMessages(sessionId: String, index: Int, obj: JsonObject): List<ChatMessage> {
         val role = obj.str("role") ?: return emptyList()
         val content = obj["content"]
-        val images = content?.let(::contentImages).orEmpty()
+        // 历史图片可能在 content 数组（pi 常规）或 message.images（部分版本/假 pi），两处都认。
+        val images = (content?.let(::contentImages).orEmpty() +
+            obj["images"]?.let(::contentImages).orEmpty())
+            // 不能只取 base64 前 24 字符：同前缀的大图会被误删；按完整内容哈希去重。
+            .distinctBy { it.blobId ?: sha256Hex(it.data.encodeToByteArray()) }
         val messageId = obj.str("id") ?: historyMessageId(role, content, index)
         // 历史条目里的 timestamp/usage 是「本轮总结」的唯一冷数据来源（没有 run.summary 可听）。
         val ts = messageTsMs(obj) ?: 0L
@@ -1382,9 +1709,13 @@ class CarryRepository(context: Context) {
             val o = item as? JsonObject ?: return@mapNotNull null
             if (o.str("type") != "image") return@mapNotNull null
             val source = o["source"] as? JsonObject
-            val data = o.str("data") ?: source?.str("data") ?: return@mapNotNull null
+            val blobId = o.str("blobId") ?: source?.str("blobId")
+            val data = o.str("data") ?: source?.str("data").orEmpty()
+            val unavailable = o["unavailable"]?.jsonPrimitive?.contentOrNull == "true"
+            if (data.isEmpty() && blobId.isNullOrBlank() && !unavailable) return@mapNotNull null
             val mime = o.str("mimeType") ?: source?.str("media_type") ?: "image/jpeg"
-            ImagePart(mime, data)
+            val size = o["size"]?.jsonPrimitive?.longOrNull ?: source?.get("size")?.jsonPrimitive?.longOrNull ?: 0L
+            ImagePart(mime, data, blobId, size, unavailable)
         }
     }
 }
@@ -1478,6 +1809,71 @@ internal fun mergeHistoryMessages(history: List<ChatMessage>): List<ChatMessage>
         }
     }
     return byId.values.toList()
+}
+
+/** entry 树响应解析：一次预算深度，UI 不再对每个 item 重新上溯（B-45）。 */
+internal fun parseEntriesPage(resp: JsonObject): EntriesPage {
+    val entries = (resp["entries"] as? JsonArray).orEmpty().mapNotNull { el ->
+        val o = el as? JsonObject ?: return@mapNotNull null
+        val id = o.str("id") ?: return@mapNotNull null
+        val message = o["message"] as? JsonObject
+        SessionEntry(
+            id = id,
+            parentId = o.str("parentId"),
+            type = o.str("type") ?: "message",
+            timestamp = o.str("timestamp").orEmpty(),
+            role = message?.str("role").orEmpty(),
+            preview = message?.get("content")?.let(::previewText).orEmpty(),
+        )
+    }
+    val byId = entries.associateBy { it.id }
+    fun depthOf(e: SessionEntry): Int {
+        var depth = 0
+        var parent = e.parentId
+        val seen = HashSet<String>()
+        while (parent != null && seen.add(parent) && depth < 100) {
+            depth += 1
+            parent = byId[parent]?.parentId
+        }
+        return depth
+    }
+    return EntriesPage(entries.map { it.copy(depth = depthOf(it)) }, resp.str("leafId"))
+}
+
+private fun previewText(el: kotlinx.serialization.json.JsonElement?): String = when (el) {
+    is JsonPrimitive -> el.contentOrNull.orEmpty()
+    is JsonArray -> el.mapNotNull { (it as? JsonObject)?.get("text")?.jsonPrimitive?.contentOrNull }.joinToString(" ")
+    else -> ""
+}.replace('\n', ' ').trim().take(80)
+
+internal fun parseMigrationEvent(nodeId: String, event: JsonObject): SessionMigration? {
+    val from = event["fromSessionId"]?.jsonPrimitive?.contentOrNull ?: return null
+    val to = event["toSessionId"]?.jsonPrimitive?.contentOrNull ?: return null
+    return SessionMigration(nodeId, from, to, event["reason"]?.jsonPrimitive?.contentOrNull ?: "fork")
+}
+
+/** 纯文件系统淘汰逻辑：抽出来让 JVM 单测能覆盖 LRU，不必启动 Android（B-48）。 */
+internal fun pruneBlobCacheDir(dir: File?, keep: File, limit: Long) {
+    val files = dir?.listFiles()?.filter { it.isFile && it != keep } ?: return
+    var total = files.sumOf { it.length() } + keep.length()
+    if (total <= limit) return
+    files.sortedBy { it.lastModified() }.forEach { f ->
+        if (total <= limit) return@forEach
+        total -= f.length()
+        f.delete()
+    }
+}
+
+internal fun sha256Hex(bytes: ByteArray): String {
+    val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
+    val digits = "0123456789abcdef"
+    val out = CharArray(digest.size * 2)
+    digest.forEachIndexed { i, b ->
+        val v = b.toInt() and 0xff
+        out[i * 2] = digits[v ushr 4]
+        out[i * 2 + 1] = digits[v and 0x0f]
+    }
+    return String(out)
 }
 
 private fun JsonObject.str(key: String): String? = (this[key] as? JsonPrimitive)?.contentOrNull

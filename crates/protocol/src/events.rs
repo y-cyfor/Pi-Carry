@@ -20,6 +20,8 @@ pub const QUEUE_UPDATED: &str = "queue.updated";
 pub const SESSION_UPDATED: &str = "session.updated";
 pub const SESSION_CONFLICT: &str = "session.conflict";
 pub const SESSION_COMPACTED: &str = "session.compacted";
+/// 会话被 fork 迁移：旧 id 停止写入，客户端应把路由切到新 id。
+pub const SESSION_MIGRATED: &str = "session.migrated";
 pub const UI_REQUESTED: &str = "ui.requested";
 pub const UI_RESOLVED: &str = "ui.resolved";
 pub const NOTIFICATION: &str = "notification";
@@ -207,6 +209,20 @@ fn extend_event(
             obj.insert(k, v);
         }
     }
+}
+
+/// 会话迁移事件。`fromSessionId` 是旧会话，`toSessionId` 是 fork 出来的新会话；
+/// `reason` 固定为 `"fork"`，后续新增迁移原因时沿用该字段。
+pub fn session_migrated(from_session_id: &str, to_session_id: &str, reason: &str) -> Value {
+    json!({
+        "type": SESSION_MIGRATED,
+        // 事件自描述会话归属：客户端不能只依赖帧外层字段，
+        // 否则离线补放/日志回放时无法判断它属于哪个会话。
+        "sessionId": from_session_id,
+        "fromSessionId": from_session_id,
+        "toSessionId": to_session_id,
+        "reason": reason,
+    })
 }
 
 #[cfg(test)]

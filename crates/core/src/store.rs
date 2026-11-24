@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 3;
 
 /// device_acks 设备被吊销后的保留天数（表内无时间列，只能按设备吊销时间推算）。
 const DEVICE_ACK_RETENTION_DAYS: i64 = 30;
@@ -169,6 +169,43 @@ impl Store {
                 "#,
             )?;
         }
+        if version < 2 {
+            // 0.2.0：图片走内容寻址的 blob 库。blobs 只存元数据，字节放在
+            // Paths::blobs() 下；blob_refs 记录「哪个会话上传/引用了它」，
+            // 会话关闭时按引用计数清理。
+            conn.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS blobs (
+                    sha256 TEXT PRIMARY KEY,
+                    size INTEGER NOT NULL,
+                    mime_type TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS blob_refs (
+                    sha256 TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    PRIMARY KEY (sha256, session_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_blob_refs_session ON blob_refs(session_id);
+                PRAGMA user_version = 2;
+                "#,
+            )?;
+        }
+        if version < 3 {
+            // 迁移后的旧会话必须持久化只读目标：仅靠广播，客户端重启后
+            // 仍会把它当成可写会话，提示与实际行为不一致。
+            // ALTER 与 user_version 是两次提交：如果进程在中间崩溃，重开会再次
+            // 执行 ALTER 并因 duplicate column 永久起不来。先探测列，幂等补齐（R-08）。
+            let has_column: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='migrated_to'",
+                [],
+                |r| r.get(0),
+            )?;
+            if has_column == 0 {
+                conn.execute("ALTER TABLE sessions ADD COLUMN migrated_to TEXT", [])?;
+            }
+            conn.execute_batch("PRAGMA user_version = 3;")?;
+        }
         Ok(())
     }
 
@@ -285,7 +322,7 @@ impl Store {
     pub fn list_sessions(&self, limit: usize) -> Result<Vec<(SessionSummary, String)>> {
         let conn = self.conn.lock().expect("db poisoned");
         let mut stmt = conn.prepare(
-            "SELECT id,cwd,name,preview,updated_at,message_count,parent_id,source,file_path FROM sessions ORDER BY updated_at DESC LIMIT ?1",
+            "SELECT id,cwd,name,preview,updated_at,message_count,parent_id,source,file_path,migrated_to FROM sessions ORDER BY updated_at DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map(params![limit as i64], |r| {
             let id: String = r.get(0)?;
@@ -303,10 +340,54 @@ impl Store {
                 last_source: source,
                 writable: true,
                 parent_id: r.get(6)?,
+                migrated_to: r.get(9)?,
             };
             Ok((summary, r.get::<_, String>(8)?))
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// 标记旧会话已迁移到 fork 会话；之后对它发送 prompt 必须被拒绝。
+    pub fn mark_session_migrated(&self, from_id: &str, to_id: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("db poisoned");
+        conn.execute(
+            "UPDATE sessions SET migrated_to=?2 WHERE id=?1",
+            params![from_id, to_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn migrated_to(&self, session_id: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().expect("db poisoned");
+        conn.query_row(
+            "SELECT migrated_to FROM sessions WHERE id=?1",
+            params![session_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map(|row| row.flatten())
+        .map_err(Into::into)
+    }
+
+    /// fork 失败回滚时清掉迁移标记，旧会话重新可写。
+    pub fn clear_session_migrated(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("db poisoned");
+        conn.execute(
+            "UPDATE sessions SET migrated_to=NULL WHERE id=?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    /// fork 失败回滚时删除新会话及其派生数据。
+    pub fn delete_session(&self, id: &str) -> Result<()> {
+        let mut conn = self.conn.lock().expect("db poisoned");
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute("DELETE FROM journal WHERE session_id=?1", params![id])?;
+        tx.execute("DELETE FROM approvals WHERE session_id=?1", params![id])?;
+        tx.execute("DELETE FROM sessions WHERE id=?1", params![id])?;
+        tx.commit()?;
+        Ok(())
     }
 
     // ---------- journal ----------
@@ -325,6 +406,12 @@ impl Store {
         tx.execute(
             "INSERT INTO journal(session_id,seq,ts,event_json) VALUES(?1,?2,?3,?4)",
             params![session_id, next, ts, serde_json::to_string(event)?],
+        )?;
+        // 长会话的事件永久累积会把 state.db 撑爆；保留最近 5000 条，
+        // 更早的重连由快照兜底（oldest>1 已会让 replay 返回 snapshot_required）。
+        tx.execute(
+            "DELETE FROM journal WHERE session_id=?1 AND seq <= ?2",
+            params![session_id, next.saturating_sub(5000)],
         )?;
         tx.commit()?;
         Ok(next as u64)
@@ -506,6 +593,8 @@ impl Store {
                         })?,
                         requested_at: r.get(10)?,
                         expires_at: r.get(11)?,
+                        // 由 row 闭包外按当前时间统一重算：这里保持 0 会让
+                        // approval.extend 的返回值/广播永远显示已过期。
                         remaining_seconds: 0,
                         state: r.get(12)?,
                     },
@@ -515,6 +604,15 @@ impl Store {
             },
         )
         .optional()
+        .map(|row| {
+            row.map(|mut pending| {
+                if let Ok(expires) = pending.view.expires_at.parse::<DateTime<Utc>>() {
+                    pending.view.remaining_seconds =
+                        (expires - Utc::now()).num_seconds().max(0) as u64;
+                }
+                pending
+            })
+        })
         .map_err(Into::into)
     }
 
@@ -740,6 +838,148 @@ impl Store {
             device_acks,
         })
     }
+
+    // ---------- blob 元数据与引用 ----------
+
+    /// 记录一个已校验完成的 blob 并给会话加引用。
+    ///
+    /// 元数据与引用必须同一事务提交：分开写时中途失败会留下“有 ref 没 blob”
+    /// 或反之，usage 查询把引用计入但 JOIN 不到大小。mime 是内容属性，
+    /// 重复上传不允许改写成另一个类型。
+    pub fn finalize_blob(
+        &self,
+        sha256: &str,
+        size: u64,
+        mime_type: &str,
+        at: &str,
+        session_id: &str,
+    ) -> Result<()> {
+        let size = i64::try_from(size).map_err(|_| {
+            crate::error::CoreError::InvalidArgument(format!("blob 大小 {size} 超出可存储范围"))
+        })?;
+        let mut conn = self.conn.lock().expect("db poisoned");
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            r#"INSERT INTO blobs(sha256,size,mime_type,created_at) VALUES(?1,?2,?3,?4)
+               ON CONFLICT(sha256) DO NOTHING"#,
+            params![sha256, size, mime_type, at],
+        )?;
+        let stored: String = tx.query_row(
+            "SELECT mime_type FROM blobs WHERE sha256=?1",
+            params![sha256],
+            |r| r.get(0),
+        )?;
+        if stored != mime_type {
+            return Err(crate::error::CoreError::InvalidArgument(format!(
+                "图片 {sha256} 的类型 {mime_type} 与已存类型 {stored} 不一致"
+            )));
+        }
+        tx.execute(
+            "INSERT OR IGNORE INTO blob_refs(sha256,session_id) VALUES(?1,?2)",
+            params![sha256, session_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// 释放会话对某个 blob 的引用；返回删除后是否已无任何引用。
+    pub fn release_blob_ref(&self, sha256: &str, session_id: &str) -> Result<bool> {
+        let mut conn = self.conn.lock().expect("db poisoned");
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "DELETE FROM blob_refs WHERE sha256=?1 AND session_id=?2",
+            params![sha256, session_id],
+        )?;
+        let refs: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM blob_refs WHERE sha256=?1",
+            params![sha256],
+            |r| r.get(0),
+        )?;
+        let orphan = refs == 0;
+        if orphan {
+            tx.execute("DELETE FROM blobs WHERE sha256=?1", params![sha256])?;
+        }
+        tx.commit()?;
+        Ok(orphan)
+    }
+
+    pub fn blob_meta(&self, sha256: &str) -> Result<Option<(u64, String)>> {
+        let conn = self.conn.lock().expect("db poisoned");
+        let row: Option<(i64, String)> = conn
+            .query_row(
+                "SELECT size,mime_type FROM blobs WHERE sha256=?1",
+                params![sha256],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        Ok(row.map(|(size, mime)| (size as u64, mime)))
+    }
+
+    /// 会话当前引用的去重字节数与该会话引用的 blob 个数。
+    pub fn session_blob_usage(&self, session_id: &str) -> Result<(u64, u64)> {
+        let conn = self.conn.lock().expect("db poisoned");
+        let (bytes, count): (i64, i64) = conn.query_row(
+            r#"SELECT COALESCE(SUM(b.size),0), COUNT(*)
+               FROM blob_refs r JOIN blobs b ON b.sha256 = r.sha256
+               WHERE r.session_id=?1"#,
+            params![session_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Ok((bytes as u64, count as u64))
+    }
+
+    /// 该会话是否已引用某个已完成的 blob。
+    pub fn has_blob_ref(&self, sha256: &str, session_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().expect("db poisoned");
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM blob_refs WHERE sha256=?1 AND session_id=?2",
+            params![sha256, session_id],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
+    /// fork 后把旧会话的 blob 引用复制给新会话：历史图无需重新下载/上传。
+    /// 新会话的预算从继承量起算，超出时只会阻止继续上传。
+    pub fn copy_blob_refs(&self, from_session: &str, to_session: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("db poisoned");
+        conn.execute(
+            "INSERT OR IGNORE INTO blob_refs(sha256,session_id)
+             SELECT sha256, ?2 FROM blob_refs WHERE session_id=?1",
+            params![from_session, to_session],
+        )?;
+        Ok(())
+    }
+
+    /// 清空会话的 blob 引用，返回「已无任何会话引用」的 sha 列表。
+    /// 调用方负责删除这些 sha 对应的文件；返回后 blobs 行也已删除。
+    pub fn clear_blob_refs(&self, session_id: &str) -> Result<Vec<String>> {
+        let mut conn = self.conn.lock().expect("db poisoned");
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let shas: Vec<String> = {
+            let mut stmt = tx.prepare("SELECT sha256 FROM blob_refs WHERE session_id=?1")?;
+            let rows = stmt.query_map(params![session_id], |r| r.get(0))?;
+            rows.collect::<rusqlite::Result<Vec<String>>>()?
+        };
+        tx.execute(
+            "DELETE FROM blob_refs WHERE session_id=?1",
+            params![session_id],
+        )?;
+        let mut orphaned = Vec::new();
+        for sha in shas {
+            let refs: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM blob_refs WHERE sha256=?1",
+                params![sha],
+                |r| r.get(0),
+            )?;
+            if refs == 0 {
+                tx.execute("DELETE FROM blobs WHERE sha256=?1", params![sha])?;
+                orphaned.push(sha);
+            }
+        }
+        tx.commit()?;
+        Ok(orphaned)
+    }
 }
 
 fn row_to_device(r: &rusqlite::Row<'_>) -> rusqlite::Result<DeviceRecord> {
@@ -779,6 +1019,7 @@ mod tests {
             last_source: "local".into(),
             writable: true,
             parent_id: None,
+            migrated_to: None,
         }
     }
 

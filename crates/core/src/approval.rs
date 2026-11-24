@@ -180,6 +180,34 @@ const WRITE_COMMANDS: &[&str] = &[
 ];
 
 /// pi 工具名 + 入参 → 分类。未知工具默认 high/other，宁可多问。
+/// 记忆规则比较键：百分号解码 + 去首尾空白。
+/// pi 在不同路径上可能把同一命令编码成 `%20` 或空格，直接按原串比较会永远不命中（B-15）。
+fn rule_key(cmd: &str) -> String {
+    let bytes = cmd.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = |b: u8| -> Option<u8> {
+                match b {
+                    b'0'..=b'9' => Some(b - b'0'),
+                    b'a'..=b'f' => Some(b - b'a' + 10),
+                    b'A'..=b'F' => Some(b - b'A' + 10),
+                    _ => None,
+                }
+            };
+            if let (Some(h), Some(l)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                out.push(h * 16 + l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).trim().to_string()
+}
+
 pub fn classify(tool_name: &str, input: &Value) -> Classification {
     let name = tool_name.to_ascii_lowercase();
     let command = input
@@ -409,12 +437,17 @@ impl ApprovalManager {
         }
 
         // 用户之前选择“记住此命令”时，同一会话的完全相同命令直接放行。
-        if self.inner.config.allow_remember && c.category == Category::Exec {
+        // 但 critical 风险永远不走记忆：规则表可能来自一次误点，
+        // 而 `rm -rf /` 这类命令的代价不可逆，必须每次重新确认。
+        if self.inner.config.allow_remember
+            && c.category == Category::Exec
+            && c.risk != Risk::Critical
+        {
             if let Some(cmd) = c.command.as_deref() {
                 if self
                     .inner
                     .store
-                    .has_remembered_rule(session_id, tool_name, cmd)?
+                    .has_remembered_rule(session_id, tool_name, &rule_key(cmd))?
                 {
                     self.inner.store.audit(
                         &crate::rfc3339(self.inner.clock.now()),
@@ -627,7 +660,7 @@ impl ApprovalManager {
                     &format!("rule-{}-{}", self.inner.ids.next_id(), UlidGen.next_id()),
                     &pending.view.session_id,
                     &pending.view.tool_name,
-                    cmd,
+                    &rule_key(cmd),
                     &crate::rfc3339(now),
                 ) {
                     tracing::warn!(error = %e, approval = id, "记住审批规则失败");
@@ -704,6 +737,9 @@ impl ApprovalManager {
             + Duration::seconds(seconds.min(pi_carry_protocol::APPROVAL_MAX_EXTENSION_SEC) as i64))
         .min(max);
         pending.view.expires_at = crate::rfc3339(next);
+        // 返回值与广播都要用延长后的到期时间重算：store 读出来的是旧时间，
+        // 直接广播会让手机端把刚延长的审批当成已过期（B-02）。
+        pending.view.remaining_seconds = (next - now).num_seconds().max(0) as u64;
         let conn_view = pending.view.clone();
         // CAS 式的更新：只有仍然 pending 的记录才能延长。返回 false 说明审批
         // 在读→算→写 的窗口里已被解决（超时/其它设备/abort），此时绝不能
@@ -1004,6 +1040,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn remembered_critical_command_still_requires_approval() {
+        let (mgr, _store, _clock) = setup();
+        let mgr2 = mgr.clone();
+        let h = tokio::spawn(async move {
+            mgr2.request(
+                "s1",
+                "tc1",
+                "bash",
+                &json!({"command": "rm -rf / --no-preserve-root"}),
+            )
+            .await
+            .unwrap()
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        let id = mgr.pending(Some("s1")).unwrap()[0].id.clone();
+        // 即使上一次明确勾选“记住”，critical 规则也不能自动放行。
+        mgr.resolve(&id, "allow", "phone", true).unwrap();
+        assert_eq!(h.await.unwrap(), Decision::Allow { remember: true });
+
+        let mgr2 = mgr.clone();
+        let again = tokio::spawn(async move {
+            mgr2.request(
+                "s1",
+                "tc2",
+                "bash",
+                &json!({"command": "rm -rf / --no-preserve-root"}),
+            )
+            .await
+            .unwrap()
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        let pending = mgr.pending(Some("s1")).unwrap();
+        assert_eq!(pending.len(), 1, "记住的 critical 命令必须再次询问");
+        assert_eq!(pending[0].risk, "critical");
+        mgr.resolve(&pending[0].id, "deny", "phone", false).unwrap();
+        assert_eq!(again.await.unwrap(), Decision::Deny);
+    }
+
+    #[tokio::test]
     async fn allow_always_unblocks_and_allows_future_tools() {
         let (mgr, _store, _clock) = setup();
         let mgr2 = mgr.clone();
@@ -1127,6 +1202,8 @@ mod tests {
             .unwrap();
         let v = mgr.extend("a1", 300).unwrap();
         assert!(v.expires_at.as_str() <= "2026-11-19T08:07:00.000Z");
+        // extend 的响应必须带可用的剩余时间；以前固定为 0，客户端误显示已过期（B-02）。
+        assert!(v.remaining_seconds > 0);
     }
 
     fn insert_pending(store: &Store, id: &str, expires_at: &str) {

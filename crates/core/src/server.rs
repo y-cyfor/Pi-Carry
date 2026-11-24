@@ -8,6 +8,7 @@ use crate::pairing::PairingManager;
 use crate::paths::Paths;
 use crate::sessions::SessionManager;
 use crate::store::{DeviceRecord, Store};
+use base64::Engine;
 use chrono::Utc;
 use iroh::endpoint::presets;
 use iroh::{Endpoint, RelayMode, SecretKey};
@@ -241,6 +242,9 @@ impl Server {
                 "fs-browse".into(),
                 "run-summary".into(),
                 "connection-info".into(),
+                // 0.2.0：图片走内容寻址 blob（blob.put/get/stat/usage），
+                // 历史图快照以 blobId 投影；老客户端缺这个能力时继续内联 base64。
+                "blob".into(),
             ],
         }
     }
@@ -937,7 +941,14 @@ impl Server {
             "session.snapshot" => {
                 require(cap, "read")?;
                 let id = sid(&payload)?;
-                let snap = self.sessions.snapshot_async(&id).await?;
+                let project_blobs = payload
+                    .get("blobs")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let snap = self
+                    .sessions
+                    .snapshot_async_with_blobs(&id, project_blobs)
+                    .await?;
                 let mut v = serde_json::to_value(snap)?;
                 // 快照的 `pendingApprovals` 与 approval.list 是同一个载荷，
                 // read 档下必须同口径裁剪，否则快照成了一条旁路。
@@ -949,6 +960,10 @@ impl Server {
                         }
                     }
                 }
+                // 客户端重启后没有内存里的迁移事件可听，快照必须带上只读标记。
+                if let Some(to) = self.store.migrated_to(&id)? {
+                    v["migratedTo"] = json!(to);
+                }
                 Ok(v)
             }
             "session.close" => {
@@ -956,7 +971,158 @@ impl Server {
                 let id = sid(&payload)?;
                 self.sessions.approvals().cancel_session(&id)?;
                 self.sessions.close(&id).await?;
+                // 关闭会话即放弃它的图片引用；仍被 fork 会话引用的文件会保留。
+                // 清理会删文件，移出异步控制循环；失败不回滚关闭结果，但要留下日志（R-09）。
+                let blobs = self.sessions.blobs().clone();
+                let cleanup_id = id.to_string();
+                match blob_blocking(move || blobs.cleanup_session(&cleanup_id)).await {
+                    Ok(n) => tracing::info!(session_id = %id, removed = n, "已清理会话 blob"),
+                    Err(e) => tracing::warn!(session_id = %id, error = %e, "清理会话 blob 失败"),
+                }
                 Ok(json!({"closed": true}))
+            }
+            "blob.put" => {
+                require(cap, "control")?;
+                let id = sid(&payload)?;
+                // 会话必须存在：否则引用永远没人清理，空间会被匿名上传吃掉。
+                self.sessions.summary(&id)?;
+                if self.store.migrated_to(&id)?.is_some() {
+                    return Err(CoreError::SessionConflict(format!(
+                        "会话 {id} 已迁移到 fork 会话，不能继续上传图片"
+                    )));
+                }
+                if !self.sessions.is_live(&id) {
+                    return Err(CoreError::SessionConflict(format!(
+                        "会话 {id} 尚未打开，请先打开会话再上传图片"
+                    )));
+                }
+                let sha = payload
+                    .get("sha256")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| CoreError::InvalidArgument("缺少 sha256".into()))?;
+                let mime = payload
+                    .get("mimeType")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| CoreError::InvalidArgument("缺少 mimeType".into()))?;
+                let total = payload
+                    .get("totalSize")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| CoreError::InvalidArgument("缺少 totalSize".into()))?;
+                let offset = payload.get("offset").and_then(Value::as_u64).unwrap_or(0);
+                let data = payload
+                    .get("data")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| CoreError::InvalidArgument("缺少 data".into()))?;
+                let sessions = self.sessions.clone();
+                let (id_owned, sha_owned, mime_owned, data_owned) = (
+                    id.to_string(),
+                    sha.to_string(),
+                    mime.to_string(),
+                    data.to_string(),
+                );
+                // 哈希/写盘放到 blocking 池：20 MiB 图片不能卡住所有连接的控制循环（B-26）。
+                let r = blob_blocking(move || {
+                    sessions.blobs().put(
+                        &id_owned,
+                        &sha_owned,
+                        &mime_owned,
+                        total,
+                        offset,
+                        &data_owned,
+                    )
+                })
+                .await?;
+                Ok(json!({
+                    "received": r.received,
+                    "complete": r.complete,
+                    "size": r.size,
+                    "usedBytes": r.used_bytes,
+                    "limitBytes": r.limit_bytes,
+                }))
+            }
+            "blob.stat" => {
+                require(cap, "read")?;
+                let id = sid(&payload)?;
+                self.sessions.summary(&id)?;
+                let sha = payload
+                    .get("sha256")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| CoreError::InvalidArgument("缺少 sha256".into()))?;
+                let sessions = self.sessions.clone();
+                let (id_owned, sha_owned) = (id.to_string(), sha.to_string());
+                let r = blob_blocking(move || sessions.blobs().stat(&id_owned, &sha_owned)).await?;
+                Ok(json!({
+                    "received": r.received,
+                    "complete": r.complete,
+                    "size": r.size,
+                    "usedBytes": r.used_bytes,
+                    "limitBytes": r.limit_bytes,
+                }))
+            }
+            "blob.get" => {
+                require(cap, "read")?;
+                let id = sid(&payload)?;
+                self.sessions.summary(&id)?;
+                let sha = payload
+                    .get("sha256")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| CoreError::InvalidArgument("缺少 sha256".into()))?;
+                let offset = payload.get("offset").and_then(Value::as_u64).unwrap_or(0);
+                let length: usize = payload
+                    .get("length")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0)
+                    .try_into()
+                    .map_err(|_| CoreError::InvalidArgument("length 超出可寻址范围".into()))?;
+                let sessions = self.sessions.clone();
+                let (id_owned, sha_owned) = (id.to_string(), sha.to_string());
+                let (bytes, total) = blob_blocking(move || {
+                    sessions.blobs().get(&id_owned, &sha_owned, offset, length)
+                })
+                .await?;
+                Ok(json!({
+                    "data": base64::engine::general_purpose::STANDARD.encode(&bytes),
+                    "offset": offset,
+                    "totalSize": total,
+                    "eof": offset + bytes.len() as u64 >= total,
+                }))
+            }
+            "blob.release" => {
+                require(cap, "control")?;
+                let id = sid(&payload)?;
+                self.sessions.summary(&id)?;
+                let sha = payload
+                    .get("sha256")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| CoreError::InvalidArgument("缺少 sha256".into()))?;
+                let sessions = self.sessions.clone();
+                let (id_owned, sha_owned) = (id.to_string(), sha.to_string());
+                let (released, u) = blob_blocking(move || {
+                    let released = sessions.blobs().release(&id_owned, &sha_owned)?;
+                    Ok((released, sessions.blobs().usage(&id_owned)?))
+                })
+                .await?;
+                Ok(json!({
+                    // released 保留旧字段；orphaned 表示“无任何引用且文件已删”的真实语义。
+                    "released": released,
+                    "orphaned": released,
+                    "usedBytes": u.used_bytes,
+                    "count": u.count,
+                    "limitBytes": u.limit_bytes,
+                }))
+            }
+            "blob.usage" => {
+                require(cap, "read")?;
+                let id = sid(&payload)?;
+                self.sessions.summary(&id)?;
+                let sessions = self.sessions.clone();
+                let id_owned = id.to_string();
+                let u = blob_blocking(move || sessions.blobs().usage(&id_owned)).await?;
+                Ok(json!({
+                    "usedBytes": u.used_bytes,
+                    "count": u.count,
+                    "limitBytes": u.limit_bytes,
+                }))
             }
             "prompt.send" => {
                 require(cap, "control")?;
@@ -1326,6 +1492,17 @@ pub type ServerPaths = PathBuf;
 fn _assert_send<T: Send>() {}
 #[allow(dead_code)]
 fn _assert_approval(_: &ApprovalManager) {}
+
+/// 把可能耗时（哈希、整文件读写、磁盘删除）的 blob 操作移出异步控制循环。
+async fn blob_blocking<T, F>(f: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| CoreError::Internal(format!("图片任务执行失败: {e}")))?
+}
 
 #[cfg(test)]
 mod tests {

@@ -132,6 +132,9 @@ pub struct SessionSummary {
     pub writable: bool,
     #[serde(default)]
     pub parent_id: Option<String>,
+    /// 旧会话迁移后的目标 id；非空表示该会话只读。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub migrated_to: Option<String>,
 }
 
 fn idle() -> String {
@@ -161,13 +164,22 @@ fn auto() -> String {
 pub struct ImagePayload {
     #[serde(default = "image_type")]
     pub r#type: String,
-    /// base64（不带 data: 前缀）
-    pub data: String,
+    /// 内容寻址的 blob id（sha256 小写十六进制）。
+    /// 必须排在 `data` 前：pi 写 JSONL 时若单行超限，前缀里还能抢救出 blobId（B-01）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blob_id: Option<String>,
+    /// 解码后的字节数；用于展示与预算，服务端以 blob 元数据为准。
+    #[serde(default)]
+    pub size: u64,
     pub mime_type: String,
     #[serde(default)]
     pub width: u32,
     #[serde(default)]
     pub height: u32,
+    /// base64（不带 data: 前缀）。0.2.0 起客户端优先用 `blobId`，
+    /// 服务端解析后填入；历史消息投影时仍有未入 blob 的图走这里。
+    #[serde(default)]
+    pub data: String,
 }
 
 fn image_type() -> String {

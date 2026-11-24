@@ -105,6 +105,7 @@ fun SessionsScreen(
     onPair: () -> Unit,
 ) {
     val sessions by repo.sessions.collectAsState()
+    val migrations by repo.migratedSessions.collectAsState()
     val nodes by repo.nodes.collectAsState()
     val link by repo.link.collectAsState()
     var query by rememberSaveable { mutableStateOf("") }
@@ -302,7 +303,12 @@ fun SessionsScreen(
                 // 折叠时完全不渲染会话行，不靠高度动画隐藏。
                 if (!groupCollapsed) {
                     items(group.sessions, key = { it.nodeId + it.id }) { session ->
-                        SessionRow(session) { onOpenChat(session.nodeId, session.id) }
+                        SessionRow(
+                            session,
+                            migrated = "${session.nodeId}::${session.id}" in migrations,
+                        ) {
+                            onOpenChat(session.nodeId, session.id)
+                        }
                         Spacer(Modifier.height(8.dp))
                     }
                 }
@@ -710,7 +716,7 @@ private fun DefaultCwdRow(isCreating: Boolean, onClick: () -> Unit) {
 }
 
 @Composable
-private fun SessionRow(session: Session, onClick: () -> Unit) {
+private fun SessionRow(session: Session, migrated: Boolean, onClick: () -> Unit) {
     CarryCard(Modifier.fillMaxWidth(), onClick = onClick) {
         Column {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -757,6 +763,7 @@ private fun SessionRow(session: Session, onClick: () -> Unit) {
                     Text(statusText(session.status), style = MaterialTheme.typography.labelSmall, color = statusColor(session.status))
                 }
                 Spacer(Modifier.weight(1f))
+                if (migrated) Text("已迁移", style = MaterialTheme.typography.labelSmall, color = Amber)
                 if (!session.writable) Text("只读", style = MaterialTheme.typography.labelSmall, color = Cyan)
                 MonoLabel("${session.messageCount} 条", color = TextMuted)
             }

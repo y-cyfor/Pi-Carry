@@ -51,6 +51,8 @@ data class Session(
     // 构造默认值只用于本地乐观构造（服务端快照路径统一由 `parseSession` 覆写）：
     // 本地新建的会话先当作可写，等 `session.writable` 到达后再收敛为真实值。
     val writable: Boolean = true,
+    // 仅 session.list 返回：旧会话迁移后的目标 id；普通会话为 null。
+    val migratedTo: String? = null,
 ) {
     val title: String get() = name.ifBlank {
         cwd.trimEnd('/', '\\').substringAfterLast('/').substringAfterLast('\\').ifBlank { "新会话" }
@@ -64,8 +66,45 @@ data class MessagePart(
     val text: String = "",
 )
 
+/**
+ * 会话里的一张图片。
+ *
+ * 0.2.0 起图片正文默认走内容寻址 blob：消息只携带 [blobId] 与 [size]，
+ * 由客户端按需 blob.get 分片下载并缓存；历史冷数据或旧节点仍可能只有 base64 [data]。
+ */
 @Serializable
-data class ImagePart(val mimeType: String = "image/jpeg", val data: String)
+data class ImagePart(
+    val mimeType: String = "image/jpeg",
+    val data: String = "",
+    val blobId: String? = null,
+    val size: Long = 0,
+    val unavailable: Boolean = false,
+) {
+    val isBlob: Boolean get() = !blobId.isNullOrBlank()
+}
+
+/** `session.entries` 的一个 entry（message 或 compaction 等）。 */
+@Serializable
+data class SessionEntry(
+    val id: String,
+    val parentId: String? = null,
+    val type: String = "message",
+    val timestamp: String = "",
+    val role: String = "",
+    val preview: String = "",
+    // 载入时算一次，避免每个 item 组合时沿 parentId 上溯（B-45）。
+    val depth: Int = 0,
+)
+
+data class EntriesPage(val entries: List<SessionEntry> = emptyList(), val leafId: String? = null)
+
+/** 服务端广播的 `session.migrated`。 */
+data class SessionMigration(
+    val nodeId: String,
+    val fromSessionId: String,
+    val toSessionId: String,
+    val reason: String,
+)
 
 @Serializable
 data class ToolCall(

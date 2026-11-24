@@ -1,6 +1,7 @@
 //! 受控端核心：配置、会话、审批、配对与 iroh 传输。
 
 pub mod approval;
+pub mod blob;
 pub mod bridge;
 pub mod clock;
 pub mod config;

@@ -51,7 +51,7 @@ Pi Carry is a remote control layer for the pi coding agent. pi keeps running on 
 
 It does not copy sessions and does not require a cloud account. The bridge runs as a tray app or CLI and talks to pi over its RPC mode. The phone can store multiple nodes, connect directly on the LAN, and fall back to the n0 relay or a self-hosted relay when NAT traversal is required. Tool calls are intercepted by a pi extension and arbitrated by the bridge; approvals time out to deny. It is built for following long-running work while away from the desk — not for handing code, sessions, or credentials to a third-party service.
 
-Current release: `0.1.3`. The verified production targets are **Windows 10/11 x64 and Android 8.0+**. Linux and macOS keep a source-build path but have not been validated for tray, autostart, single-instance, or packaging. The main documented-but-unimplemented features are listed under [Known limitations](#known-limitations).
+Current release: `0.2.0`. The verified production targets are **Windows 10/11 x64 and Android 8.0+**. Linux and macOS keep a source-build path but have not been validated for tray, autostart, single-instance, or packaging. The main documented-but-unimplemented features are listed under [Known limitations](#known-limitations).
 
 ## Installation
 
@@ -62,7 +62,7 @@ Current release: `0.1.3`. The verified production targets are **Windows 10/11 x6
 | Windows | Windows 10/11 x64; Microsoft Edge WebView2 Runtime; 4 GB RAM recommended; verified |
 | Linux | glibc 2.31+; WebKitGTK 4.1; libayatana-appindicator3; librsvg2; source build only, not verified |
 | macOS | macOS 12+; Intel or Apple Silicon; source build only, not verified, no notarized build |
-| Android | Android 8.0 (API 26)+; arm64-v8a or x86_64; about 100 MB free space |
+| Android | Android 8.0 (API 26)+; arm64-v8a or x86_64; about 100 MiB free space |
 | Runtime | pi 1.5.2 or newer, already configured; installing pi requires Node.js 20+ |
 | Network | LAN direct connection works offline; cross-network or 4G needs the n0 relay or a self-hosted relay |
 
@@ -132,9 +132,9 @@ Uninstalling the Android app removes its private data. Revoking a device makes t
 - **Session conflicts**: only one writer per session is enforced inside one bridge. An external pi process writing the same session is not detected, and the app does not switch to read-only automatically.
 - **Discovery**: no mDNS. The pairing QR code carries LAN direct addresses.
 - **Offline sending**: there is no local outbox; sends fail while disconnected.
-- **Images**: the protocol allows 5 images, but the Android picker selects one at a time; images are inline base64, with no blob transport.
-- **Approvals**: read-only bash still asks by default; “remember this command” does not currently exclude critical commands, so approve dangerous commands one by one.
-- **Missing UI entry points**: approval extension, session fork/rename/entries, generic extension UI, device capability changes, desktop device rename, diagnostics bundle.
+- **Images**: up to 10 images per message (20 MiB each, 100 MiB per session). Android uploads originals through the chunked, content-addressed `blob.put` channel (resume/retry supported); history images are rendered from the local blob cache. Legacy clients can still inline base64.
+- **Approvals**: read-only bash still asks by default; “remember this command” never auto-approves critical commands, so dangerous commands still need one-by-one approval.
+- **Missing UI entry points**: generic extension UI, device capability changes, desktop device rename, diagnostics bundle.
 - **Delivery**: no Tauri installer, auto-update, code signing/notarization, or Android instrumented tests.
 
 See [Known limitations](#known-limitations) for the main gaps and reasons.
@@ -240,7 +240,7 @@ Pi-Carry/
 │   ├── desktop/                 Tauri 2 tray app
 │   ├── fake-pi/                 Deterministic pi RPC simulator for tests
 │   └── e2e-client/              Black-box probe and end-to-end client
-├── desktop-ui/                  Static desktop console
+├── design/desktop-ui/                  Static desktop console
 ├── extensions/guard.ts          pi tool-call approval extension
 ├── packaging/                   Desktop release notes
 ├── scripts/                     Environment, build, package, icon scripts

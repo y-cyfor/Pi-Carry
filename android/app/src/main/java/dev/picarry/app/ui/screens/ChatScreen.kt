@@ -5,7 +5,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import android.graphics.BitmapFactory
 import android.text.method.LinkMovementMethod
 import android.util.Base64
+import java.util.UUID
 import android.widget.TextView
+import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -47,6 +49,7 @@ import androidx.compose.material.icons.outlined.Bolt
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.ExpandLess
 import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Image
@@ -62,6 +65,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Switch
@@ -70,6 +74,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -80,7 +86,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -104,15 +110,18 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
+import java.io.File
 import dev.picarry.app.data.Approval
 import dev.picarry.app.data.CarryRepository
-import dev.picarry.app.data.ImageCompressor
+import dev.picarry.app.data.ImagePreparer
+import dev.picarry.app.data.computeSampleSize
 import dev.picarry.app.data.ImagePart
 import dev.picarry.app.data.ChatMessage
 import dev.picarry.app.data.CommandItem
 import dev.picarry.app.data.LinkState
 import dev.picarry.app.data.ModelOption
 import dev.picarry.app.data.ModelPrefs
+import dev.picarry.app.data.SendFailure
 import dev.picarry.app.data.ModelPrefsCodec
 import dev.picarry.app.data.ProviderGroup
 import dev.picarry.app.data.Session
@@ -139,9 +148,9 @@ import dev.picarry.app.ui.components.riskColor
 import dev.picarry.app.ui.components.statusColor
 import dev.picarry.app.ui.theme.Amber
 import dev.picarry.app.ui.theme.Cyan
+import dev.picarry.app.ui.theme.Mint
 import dev.picarry.app.ui.theme.Ink
 import dev.picarry.app.ui.theme.Line
-import dev.picarry.app.ui.theme.Mint
 import dev.picarry.app.ui.theme.Panel
 import dev.picarry.app.ui.theme.PanelHigh
 import dev.picarry.app.ui.theme.Rose
@@ -161,20 +170,6 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 
 /**
- * 待发图片的 base64 上限（字符数）。
- *
- * 来历：ImageCompressor 把长边压到 1568px、JPEG 质量 85，典型手机照片编码后约 300–700K 字符，
- * 细节丰富的夜景/文字图可到 1.5M。旧上限 200_000 低于绝大多数照片，切屏/旋转后图片被静默丢掉。
- * 这里取 4_000_000 字符（对应约 3MB 原始图片），既能装下所有常规照片，又不会把 state 撑得离谱；
- * 但 rememberSaveable 的 state 最终随 savedInstanceState 过 Binder，超过上限时仍不能硬塞，
- * 所以超限不再是静默丢弃，而是记一个标记并在界面上提示用户重新选择（见 [DROPPED_IMAGE_MARKER]）。
- */
-internal const val MAX_SAVED_IMAGE_CHARS = 4_000_000
-
-/** 超过 [MAX_SAVED_IMAGE_CHARS] 时不能写进 Bundle，只能丢弃：重建后靠这个标记给出可见提示。 */
-internal const val DROPPED_IMAGE_MARKER = "dropped-for-size"
-
-/**
  * 流式文本的 Markdown 渲染间隔。
  *
  * 每个 delta 都全量 `markwon.setMarkdown` 是 O(n²)；长回复（代码块/表格）会明显掉帧。
@@ -182,33 +177,83 @@ internal const val DROPPED_IMAGE_MARKER = "dropped-for-size"
  */
 private const val STREAM_RENDER_INTERVAL_MS = 80L
 
-/**
- * 待发图片的可保存状态。
- *
- * 图片本身放 triple；[droppedForSize] 记录「上次保存时因超限被丢弃」，
- * 这样旋转后能弹一句可见提示，而不是让图片悄无声息地消失。
- */
-internal class PendingImageState(
-    val image: Triple<String, String, String>? = null,
-    val droppedForSize: Boolean = false,
+/** 待发图片的上传项：选完即上传，发送时只带 blobId。 */
+internal data class OutgoingImage(
+    val id: String,
+    val mimeType: String,
+    val bytes: ByteArray,
+    val size: Long,
+    val blobId: String? = null,
+    val uploading: Boolean = false,
+    val progress: Float = 0f,
+    val error: String? = null,
 )
 
-internal val PendingImageSaver: Saver<PendingImageState?, List<String>> = Saver(
-    save = { state ->
-        val image = state?.image ?: return@Saver null
-        if (image.second.length > MAX_SAVED_IMAGE_CHARS) listOf(DROPPED_IMAGE_MARKER)
-        else listOf("kept", image.first, image.second, image.third)
-    },
-    restore = { saved ->
-        when {
-            saved.size == 4 && saved[0] == "kept" ->
-                PendingImageState(Triple(saved[1], saved[2], saved[3]))
-            saved.size == 1 && saved[0] == DROPPED_IMAGE_MARKER ->
-                PendingImageState(droppedForSize = true)
-            else -> null
+private val LocalImageBytes = compositionLocalOf<suspend (ImagePart) -> ByteArray?> { { null } }
+
+// 与协议上限保持一致，避免 UI 里散落魔法数字（B-46）。
+private const val MAX_IMAGES_PER_MESSAGE = 10
+private const val MAX_IMAGE_MB = 20
+
+/** 图片占位文案统一用 KB/MB，避免不足 1 MB 显示成 "0 MB"（R-06/R-15）。 */
+private fun formatImageSize(size: Long): String =
+    if (size >= 1024L * 1024L) "${size / (1024L * 1024L)} MB"
+    else "${(size + 1023L) / 1024L} KB"
+
+private fun pendingDir(context: android.content.Context, nodeId: String, sessionId: String): File {
+    fun safe(v: String) = v.replace(Regex("[^A-Za-z0-9_.-]"), "_")
+    return File(context.cacheDir, "pending/${safe(nodeId)}_${safe(sessionId)}")
+}
+
+/** 旋转/进程重建后恢复待发图片；已上传成功的只恢复 blobId，不再占内存（B-09/B-15）。 */
+private fun loadPendingImages(context: android.content.Context, nodeId: String, sessionId: String): List<OutgoingImage> =
+    loadPendingImagesFrom(pendingDir(context, nodeId, sessionId))
+
+/** 从目录恢复待发图；抽出来便于单测 4 列格式与旧格式兼容（B-48/N-12）。 */
+internal fun loadPendingImagesFrom(dir: File): List<OutgoingImage> {
+    val index = File(dir, "index.txt")
+    if (!index.isFile) return emptyList()
+    return index.readLines().mapNotNull { line ->
+        val p = line.split('\t')
+        // 只持久化 4 列：error 可能含 tab/换行，写进 index 会破坏下一行解析（N-12）。
+        if (p.size < 4) return@mapNotNull null
+        val id = p[0]
+        val mime = p[1]
+        val blobId = p[2].ifBlank { null }
+        val size = p[3].toLongOrNull() ?: return@mapNotNull null
+        val bytes = if (blobId == null) File(dir, "$id.bin").takeIf { it.isFile }?.readBytes() else null
+        if (blobId == null && bytes == null) return@mapNotNull null
+        OutgoingImage(
+            id = id, mimeType = mime, bytes = bytes ?: ByteArray(0), size = size,
+            blobId = blobId, uploading = false, progress = if (blobId != null) 1f else 0f,
+        )
+    }
+}
+
+private fun savePendingImages(context: android.content.Context, nodeId: String, sessionId: String, items: List<OutgoingImage>) =
+    savePendingImagesTo(pendingDir(context, nodeId, sessionId), items)
+
+internal fun savePendingImagesTo(dir: File, items: List<OutgoingImage>) {
+    if (items.isEmpty()) {
+        dir.deleteRecursively()
+        return
+    }
+    dir.mkdirs()
+    val index = StringBuilder()
+    items.forEach { item ->
+        if (item.blobId == null && item.bytes.isNotEmpty()) {
+            val f = File(dir, item.id + ".bin")
+            if (!f.isFile || f.length() != item.bytes.size.toLong()) f.writeBytes(item.bytes)
+        } else {
+            File(dir, item.id + ".bin").delete()
         }
-    },
-)
+        index.append(item.id).append('\t').append(item.mimeType).append('\t')
+            .append(item.blobId.orEmpty()).append('\t').append(item.size).append('\n')
+    }
+    File(dir, "index.txt").writeText(index.toString())
+    val keep = items.mapTo(HashSet()) { it.id + ".bin" }
+    dir.listFiles()?.forEach { f -> if (f.name.endsWith(".bin") && f.name !in keep) f.delete() }
+}
 
 private val commands = listOf(
     CommandItem("compact", "压缩上下文，释放 token 空间"),
@@ -221,11 +266,20 @@ private val commands = listOf(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ChatScreen(repo: CarryRepository, nodeId: String, sessionId: String, onBack: () -> Unit) {
+fun ChatScreen(
+    repo: CarryRepository,
+    nodeId: String,
+    sessionId: String,
+    onBack: () -> Unit,
+    onMigrated: (String) -> Unit = { onBack() },
+) {
     val nodes by repo.nodes.collectAsState()
     val sessions by repo.sessions.collectAsState()
     val allMessages by repo.messages.collectAsState()
     val approvals by repo.approvals.collectAsState()
+    val migrated by repo.migratedSessions.collectAsState()
+    val readySessions by repo.ready.collectAsState()
+    val openErrors by repo.openErrors.collectAsState()
     val link by repo.link.collectAsState()
     val catalogs by repo.models.collectAsState()
     val levelCatalogs by repo.thinkingLevels.collectAsState()
@@ -258,27 +312,44 @@ fun ChatScreen(repo: CarryRepository, nodeId: String, sessionId: String, onBack:
     var openTurnAnchor by rememberSaveable(stateSaver = NullableStringSaver) { mutableStateOf<String?>(null) }
     val openTurn = remember(openTurnAnchor, turns) { turns.firstOrNull { it.anchorMessageId == openTurnAnchor } }
 
-    // 草稿/模式/待发图片都要跨旋转与进程重建：长 prompt 和已压缩图片丢了就是直接回归。
-    var text by rememberSaveable { mutableStateOf("") }
+    // 草稿跨旋转保留；fork 迁移换路由时由仓库按旧→新会话复制。
+    var text by rememberSaveable(sessionId) { mutableStateOf(repo.draftFor(nodeId, sessionId)) }
     var mode by rememberSaveable { mutableStateOf("auto") }
     // 两个 sheet 是用户正在看的弹层，旋转后重建等于把刚打开的列表吞掉；
     // 下拉菜单（showMenu）属于瞬时交互，重建后关掉更符合预期，故仍用 remember。
     var showModels by rememberSaveable { mutableStateOf(false) }
     var showCommands by rememberSaveable { mutableStateOf(false) }
     var showMenu by remember { mutableStateOf(false) }
+    var showRename by remember { mutableStateOf(false) }
+    // 旋转后 sheet 保持打开并自动重新加载，不能直接消失（B-40）。
+    var showEntries by rememberSaveable { mutableStateOf(false) }
+    var renameText by remember(session?.name) { mutableStateOf(session?.name.orEmpty()) }
+    var renameError by remember { mutableStateOf<String?>(null) }
+    var entriesPage by remember { mutableStateOf<dev.picarry.app.data.EntriesPage?>(null) }
+    var entriesLoading by remember { mutableStateOf(false) }
+    var entriesError by remember { mutableStateOf<String?>(null) }
+    var selectedEntryId by rememberSaveable { mutableStateOf<String?>(null) }
+    var forking by remember { mutableStateOf(false) }
+    var migrationNotice by remember { mutableStateOf(repo.isMigrationTarget(nodeId, sessionId)) }
     // 弹窗只记录审批 id：旋转后按 id 从仓库状态恢复，审批被超时/其它设备解决时对话框自然消失。
     var openApprovalId by rememberSaveable(stateSaver = NullableStringSaver) { mutableStateOf<String?>(null) }
-    var pendingImageState by rememberSaveable(stateSaver = PendingImageSaver) { mutableStateOf<PendingImageState?>(null) }
-    // 编辑器与外发都只看图片本身；超限丢图的信息单独提成可见错误。
-    val pendingImage = pendingImageState?.image
+    // 待发图片：选完立即分片上传，发送只带 sha/大小；上传/重试都在本页完成。
+    // 旋转/进程重建后从缓存目录恢复，不能只靠 remember（B-09）。
+    var outgoing by remember(sessionId) { mutableStateOf<List<OutgoingImage>>(emptyList()) }
+    var pendingRestored by remember(sessionId) { mutableStateOf(false) }
+    // blob.put 要求会话已打开；ready 只有真实快照落地后才为真，
+    // 不能用“openSession 已调用”冒充（R-12）。
+    val sessionOpened = key in readySessions
+    // 上传过程中被移除的图片：完成回调到达时已经不在 outgoing 里，
+    // 必须记住并在这里补一次 release（R-13）。
+    val removedImageIds = remember(sessionId) { mutableSetOf<String>() }
+    var picking by remember { mutableStateOf(false) }
+    var usageBytes by remember { mutableStateOf(0L) }
+    var usageLimit by remember { mutableStateOf(100L * 1024 * 1024) }
     var imageError by remember { mutableStateOf<String?>(null) }
-    // 旋转/重建后图片因超限被丢：立刻给出中文提示，不能让用户以为图片还在。
-    LaunchedEffect(pendingImageState?.droppedForSize) {
-        if (pendingImageState?.droppedForSize == true) {
-            imageError = "图片过大，未能保留在待发区，请重新选择（建议先裁剪）"
-            pendingImageState = null
-        }
-    }
+    var failedSend by remember { mutableStateOf<SendFailure?>(null) }
+    val sending = messages.any { it.id.startsWith("local-") }
+    val latestText by rememberUpdatedState(text)
     var sentTick by remember { mutableStateOf(0) }
     // 进入会话时先强跟一次底部（历史快照到达后列表本就该停在最新），之后才看是否接近底部。
     // 必须跨旋转保留：复位成 null 会让「首次进入」的强制滚动条件重新成立，把用户上滑阅读的位置拽回底部。
@@ -288,6 +359,20 @@ fun ChatScreen(repo: CarryRepository, nodeId: String, sessionId: String, onBack:
     var stickBottom by rememberSaveable { mutableStateOf(true) }
     val openApproval = openApprovalId?.let { id -> approvals.firstOrNull { it.id == id && it.state == "pending" } }
     val context = LocalContext.current
+    // 服务端持久化了迁移标记；重启/换设备后打开旧会话也必须只读（B-14）。
+    val readOnly = migrated.contains(key) || session?.writable == false
+    // 打开失败不能只剩空白：显示原因并提供重试（B-07）。
+    val openError = openErrors[key]
+    // 待发图片落盘恢复/保存：只存尚未上传成功的原图与 blobId 元数据。
+    LaunchedEffect(sessionId) {
+        outgoing = withContext(Dispatchers.IO) { loadPendingImages(context, nodeId, sessionId) }
+        pendingRestored = true
+    }
+    LaunchedEffect(pendingRestored, outgoing.map { it.id + ":" + (it.blobId ?: "") + ":" + (it.error ?: "") }) {
+        if (pendingRestored) {
+            withContext(Dispatchers.IO) { savePendingImages(context, nodeId, sessionId, outgoing) }
+        }
+    }
     val clipboard = LocalClipboardManager.current
     val listState = rememberLazyListState()
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -309,25 +394,183 @@ fun ChatScreen(repo: CarryRepository, nodeId: String, sessionId: String, onBack:
             .collect { (count, bottom) -> if (count > 0) stickBottom = bottom }
     }
 
-    val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        if (uri == null) return@rememberLauncherForActivityResult
-        // 解码 + 缩放 + JPEG + Base64 是重计算，放默认调度器，回来再更新 Compose 状态。
+    fun updateImage(id: String, transform: (OutgoingImage) -> OutgoingImage) {
+        outgoing = outgoing.map { if (it.id == id) transform(it) else it }
+    }
+
+    fun uploadOne(item: OutgoingImage) {
+        if (outgoing.none { it.id == item.id }) return
+        updateImage(item.id) { it.copy(uploading = true, error = null, progress = 0f) }
         scope.launch {
-            val result = withContext(Dispatchers.Default) { runCatching { ImageCompressor.compress(context, uri) } }
-            result.onSuccess { (mime, data) ->
-                pendingImageState = PendingImageState(Triple(mime, data, "image"))
-                imageError = null
-            }.onFailure { imageError = it.message ?: "图片处理失败" }
+            runCatching {
+                repo.uploadBlob(nodeId, sessionId, item.bytes, item.mimeType) { sent, total ->
+                    // 回调来自 IO 线程：mutableState 必须在主线程写，否则会丢图（B-17）。
+                    scope.launch(Dispatchers.Main) {
+                        updateImage(item.id) {
+                            it.copy(progress = maxOf(it.progress, if (total <= 0) 0f else sent.toFloat() / total))
+                        }
+                    }
+                }
+            }.onSuccess { sha ->
+                if (removedImageIds.remove(item.id)) {
+                    // 上传期间用户已移除：服务端引用刚登记，立即释放，避免永久占用额度。
+                    runCatching { repo.releaseBlob(nodeId, sessionId, sha) }.onSuccess { usageBytes = it }
+                    return@onSuccess
+                }
+                // 上传完立即丢掉字节，10 张大图不能一直常驻（B-15）。
+                updateImage(item.id) { it.copy(blobId = sha, uploading = false, progress = 1f, error = null, bytes = ByteArray(0)) }
+                // 上传完成时服务端就登记了会话引用，用量以服务端为准，避免本地重复累加。
+                runCatching { repo.blobUsage(nodeId, sessionId) }.onSuccess {
+                    usageBytes = it.first
+                    usageLimit = it.second
+                }
+            }.onFailure { e ->
+                removedImageIds.remove(item.id)
+                updateImage(item.id) {
+                    it.copy(uploading = false, error = e.message ?: "上传失败")
+                }
+                imageError = "图片上传失败：" + (e.message ?: "网络错误") + "，可重试或移除"
+            }
+        }
+    }
+
+    val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
+        if (uris.isEmpty() || picking) return@rememberLauncherForActivityResult
+        // 上传要求会话已打开；冷启动恢复待发图时不能抢在 openSession 前面（N-08）。
+        if (!sessionOpened) {
+            imageError = "会话尚未打开，请稍后再选图片"
+            return@rememberLauncherForActivityResult
+        }
+        // 连点两次会在异步 prepare 之前各自通过上限检查（B-41）。
+        picking = true
+        imageError = null
+        scope.launch {
+            try {
+                if (uris.size + outgoing.size > ImagePreparer.MAX_IMAGES) {
+                    imageError = "单条消息最多 " + ImagePreparer.MAX_IMAGES + " 张图片，当前已选 " + outgoing.size + " 张"
+                    return@launch
+                }
+                val (used, limit) = try {
+                    repo.blobUsage(nodeId, sessionId)
+                } catch (e: Exception) {
+                    imageError = "无法获取图片额度：" + (e.message ?: "网络错误")
+                    return@launch
+                }
+                usageBytes = used
+                usageLimit = limit
+                // 逐张处理、逐张释放：不要先把 10 张 20MB 的图全物化（B-15）。
+                for (uri in uris) {
+                    if (outgoing.size >= ImagePreparer.MAX_IMAGES) break
+                    val p = runCatching { withContext(Dispatchers.Default) { ImagePreparer.prepare(context, uri) } }
+                        .onFailure { imageError = "图片处理失败：" + (it.message ?: "未知错误") }
+                        .getOrNull() ?: continue
+                    // 批次内前面的图可能已上传成功并刷新 usageBytes；用两者较大值，
+                    // 避免拿批次开始时的旧用量做预算而漏计（N-11）。
+                    val currentUsed = maxOf(used, usageBytes)
+                    if (currentUsed + p.bytes.size + outgoing.filter { it.blobId == null }.sumOf { it.size } > limit) {
+                        imageError = "会话图片空间不足：已用 " + (currentUsed / 1024 / 1024) +
+                            " MB，上限 " + (limit / 1024 / 1024) + " MB"
+                        break
+                    }
+                    val item = OutgoingImage(
+                        id = UUID.randomUUID().toString(),
+                        mimeType = p.mimeType,
+                        bytes = p.bytes,
+                        size = p.bytes.size.toLong(),
+                    )
+                    outgoing = outgoing + item
+                    uploadOne(item)
+                }
+            } finally {
+                picking = false
+            }
         }
     }
 
     // 前台且正看着这条会话时不发审批通知（详见 CarryRepository.notifyApproval）。
     DisposableEffect(sessionId) {
         repo.setVisibleSession(sessionId)
-        onDispose { repo.setVisibleSession(null) }
+        onDispose {
+            // 只清自己：新页面可能已经把自己设为可见（B-39）。
+            repo.clearVisibleSession(sessionId)
+            repo.saveDraft(nodeId, sessionId, latestText)
+        }
     }
 
-    LaunchedEffect(nodeId, sessionId) { repo.openSession(nodeId, sessionId) }
+    LaunchedEffect(nodeId, sessionId) {
+        repo.sendFailures.collect { f ->
+            if (f.nodeId == nodeId && f.sessionId == sessionId) failedSend = f
+        }
+    }
+    LaunchedEffect(nodeId, sessionId) {
+        repo.openSession(nodeId, sessionId)
+    }
+    LaunchedEffect(nodeId, sessionId) {
+        runCatching { repo.blobUsage(nodeId, sessionId) }.onSuccess {
+            usageBytes = it.first
+            usageLimit = it.second
+        }
+    }
+    // 恢复出来的未上传图片自动续传（B-09）。
+    LaunchedEffect(pendingRestored, sessionOpened) {
+        if (pendingRestored && sessionOpened) outgoing.filter { it.blobId == null }.forEach(::uploadOne)
+    }
+    // 另一个设备发起 fork 时服务端会广播 session.migrated：把当前页替换到新会话，草稿跟着走。
+    LaunchedEffect(nodeId, sessionId) {
+        repo.migrations.collect { m ->
+            if (m.nodeId == nodeId && m.fromSessionId == sessionId) {
+                repo.saveDraft(nodeId, sessionId, latestText)
+                repo.copyDraft(nodeId, sessionId, m.toSessionId)
+                // 事件是唯一导航来源：doFork 不再自己跳，避免双路径竞态（R-16）。
+                Toast.makeText(context, "已迁移到 fork 会话，草稿已保留", Toast.LENGTH_LONG).show()
+                onMigrated(m.toSessionId)
+            }
+        }
+    }
+
+    fun openEntries() {
+        showMenu = false
+        showEntries = true
+        entriesLoading = true
+        entriesError = null
+        scope.launch {
+            runCatching { repo.loadEntries(nodeId, sessionId) }
+                .onSuccess {
+                    entriesPage = it
+                    // 旋转/重新加载时保留用户已选的分支点；只有选中项消失才回退 leaf（B-40）。
+                    selectedEntryId = selectedEntryId
+                        ?.takeIf { id -> it.entries.any { e -> e.id == id } }
+                        ?: it.leafId ?: it.entries.lastOrNull()?.id
+                }
+                .onFailure { entriesError = it.message ?: "加载失败" }
+            entriesLoading = false
+        }
+    }
+
+    LaunchedEffect(showEntries) {
+        if (showEntries && entriesPage == null && !entriesLoading) openEntries()
+    }
+
+    fun doFork() {
+        val entry = selectedEntryId ?: return
+        if (forking) return
+        forking = true
+        entriesError = null
+        scope.launch {
+            runCatching { repo.forkSession(nodeId, sessionId, entry) }
+                .onSuccess { newId ->
+                    repo.saveDraft(nodeId, sessionId, latestText)
+                    repo.copyDraft(nodeId, sessionId, newId)
+                    showEntries = false
+                    // 导航统一由 session.migrated 事件完成；这里只负责草稿与关闭面板。
+                }
+                .onFailure {
+                    entriesError = "分叉失败：" + (it.message ?: "未知错误")
+                    forking = false
+                }
+        }
+    }
+
     LaunchedEffect(
         messages.size,
         messages.lastOrNull()?.text?.length,
@@ -346,6 +589,12 @@ fun ChatScreen(repo: CarryRepository, nodeId: String, sessionId: String, onBack:
         runCatching { listState.animateScrollToItem(messages.size + pending.size) }
     }
 
+    CompositionLocalProvider(LocalImageBytes provides { part ->
+        runCatching {
+            if (part.isBlob) repo.blobBytes(nodeId, sessionId, part.blobId!!)
+            else Base64.decode(part.data, Base64.DEFAULT)
+        }.getOrNull()
+    }) {
     Column(Modifier.fillMaxSize().statusBarsPadding().imePadding()) {
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
@@ -376,6 +625,15 @@ fun ChatScreen(repo: CarryRepository, nodeId: String, sessionId: String, onBack:
                 DropdownMenuItem(text = { Text("复制会话 ID") }, onClick = {
                     clipboard.setText(AnnotatedString(sessionId)); showMenu = false
                 }, leadingIcon = { Icon(Icons.Outlined.ContentCopy, null, tint = TextMuted) })
+                DropdownMenuItem(text = { Text("重命名会话") }, onClick = {
+                    showMenu = false
+                    renameText = session?.name.orEmpty()
+                    renameError = null
+                    showRename = true
+                }, leadingIcon = { Icon(Icons.Outlined.Edit, null, tint = TextMuted) })
+                DropdownMenuItem(text = { Text("查看分支与 entries") }, onClick = {
+                    openEntries()
+                }, leadingIcon = { Icon(Icons.Outlined.Terminal, null, tint = TextMuted) })
                 DropdownMenuItem(text = { Text("压缩上下文") }, onClick = {
                     repo.compact(nodeId, sessionId); showMenu = false
                 }, leadingIcon = { Icon(Icons.Outlined.Tune, null, tint = TextMuted) })
@@ -413,13 +671,40 @@ fun ChatScreen(repo: CarryRepository, nodeId: String, sessionId: String, onBack:
             )
         }
 
+        if (migrationNotice) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
+                    .clip(RoundedCornerShape(10.dp)).background(Cyan.copy(alpha = 0.10f)).padding(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("已迁移到 fork 会话 · 旧会话已停止写入", style = MaterialTheme.typography.bodySmall, color = Cyan, modifier = Modifier.weight(1f))
+                Icon(Icons.Outlined.Close, "关闭提示", tint = TextMuted, modifier = Modifier.size(15.dp).clickable { migrationNotice = false })
+            }
+        }
+
         if (session?.writable == false) {
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
                     .clip(RoundedCornerShape(10.dp)).background(Amber.copy(alpha = 0.10f)).padding(10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("本机终端正在写这个会话，当前为只读", style = MaterialTheme.typography.bodySmall, color = Amber)
+                Text(
+                    if (readOnly) "该会话已迁移，当前为只读" else "本机终端正在写这个会话，当前为只读",
+                    style = MaterialTheme.typography.bodySmall, color = Amber,
+                )
+            }
+        }
+        if (openError != null) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
+                    .clip(RoundedCornerShape(10.dp)).background(Rose.copy(alpha = 0.10f)).padding(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("打开会话失败：$openError", style = MaterialTheme.typography.bodySmall, color = Rose, modifier = Modifier.weight(1f))
+                Text("重试", style = MaterialTheme.typography.bodySmall, color = Cyan,
+                    modifier = Modifier.clickable {
+                        scope.launch { repo.openSession(nodeId, sessionId) }
+                    })
             }
         }
 
@@ -456,26 +741,91 @@ fun ChatScreen(repo: CarryRepository, nodeId: String, sessionId: String, onBack:
             }
         }
 
+        if (sending) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                CircularProgressIndicator(color = Cyan, strokeWidth = 1.5.dp, modifier = Modifier.size(12.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("发送中…", style = MaterialTheme.typography.labelSmall, color = TextMuted)
+            }
+        }
+        failedSend?.let { failure ->
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
+                    .clip(RoundedCornerShape(10.dp)).background(Rose.copy(alpha = 0.10f)).padding(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("发送失败", style = MaterialTheme.typography.labelMedium, color = Rose)
+                    Text(
+                        failure.error,
+                        style = MaterialTheme.typography.labelSmall, color = TextSecondary,
+                        maxLines = 2, overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                TextButton(onClick = {
+                    repo.sendPrompt(failure.nodeId, failure.sessionId, failure.text, failure.mode, failure.images)
+                    failedSend = null
+                }) { Text("重试", color = Cyan) }
+                Icon(
+                    Icons.Outlined.Close, "忽略", tint = TextMuted,
+                    modifier = Modifier.size(15.dp).clickable { failedSend = null },
+                )
+            }
+        }
         Composer(
             text = text,
             onText = { text = it },
             mode = mode,
             onMode = { mode = it },
             running = session?.isRunning == true,
-            pendingImage = pendingImage,
+            readOnly = readOnly,
+            pendingImages = outgoing,
+            usageBytes = usageBytes,
+            usageLimit = usageLimit,
             imageError = imageError,
             onPickImage = { imagePicker.launch("image/*") },
-            onClearImage = { pendingImageState = null },
+            onRemoveImage = { id ->
+                val removed = outgoing.firstOrNull { it.id == id }
+                if (removed?.blobId == null) removedImageIds.add(id)
+                outgoing = outgoing.filterNot { it.id == id }
+                // 已上传的图移除后立即释放服务端额度（B-16）。
+                val sha = removed?.blobId
+                if (sha != null) {
+                    scope.launch {
+                        runCatching { repo.releaseBlob(nodeId, sessionId, sha) }
+                            .onSuccess { usageBytes = it }
+                            .onFailure { imageError = "释放图片空间失败：" + (it.message ?: "网络错误") }
+                    }
+                }
+            },
+            onRetryImage = { id -> outgoing.firstOrNull { it.id == id }?.let(::uploadOne) },
             onCommands = { showCommands = true },
             onModels = { showModels = true },
             onSend = {
-                repo.sendPrompt(nodeId, sessionId, text.trim(), mode, listOfNotNull(pendingImage))
-                text = ""
-                pendingImageState = null
-                sentTick += 1
+                val ready = outgoing.all { it.blobId != null && !it.uploading && it.error == null }
+                if (outgoing.isNotEmpty() && !ready) {
+                    imageError = "请等待图片上传完成，或移除上传失败的图片"
+                } else {
+                    repo.sendPrompt(
+                        nodeId,
+                        sessionId,
+                        text.trim(),
+                        mode,
+                        outgoing.map { ImagePart(it.mimeType, blobId = it.blobId, size = it.size) },
+                    )
+                    text = ""
+                    failedSend = null
+                    repo.saveDraft(nodeId, sessionId, "")
+                    outgoing = emptyList()
+                    sentTick += 1
+                }
             },
             onStop = { repo.abort(nodeId, sessionId) },
         )
+    }
     }
 
     if (showModels) {
@@ -504,6 +854,126 @@ fun ChatScreen(repo: CarryRepository, nodeId: String, sessionId: String, onBack:
             }
         }
     }
+    if (showRename) {
+        AlertDialog(
+            onDismissRequest = { showRename = false },
+            containerColor = Panel,
+            shape = RoundedCornerShape(24.dp),
+            title = { Text("重命名会话", style = MaterialTheme.typography.titleLarge, color = TextPrimary) },
+            text = {
+                Column {
+                    Box(
+                        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(PanelHigh)
+                            .border(0.7.dp, Line, RoundedCornerShape(12.dp)).padding(12.dp),
+                    ) {
+                        BasicTextField(
+                            value = renameText,
+                            onValueChange = { renameText = it.take(200); renameError = null },
+                            textStyle = TextStyle(color = TextPrimary, fontSize = 15.sp),
+                            cursorBrush = SolidColor(Violet),
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        renameError ?: "只改显示名，不会改写会话记录。",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (renameError != null) Rose else TextMuted,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    repo.renameSession(nodeId, sessionId, renameText) { error ->
+                        if (error == null) showRename = false else renameError = error
+                    }
+                }) { Text("保存", color = Violet, fontWeight = FontWeight.SemiBold) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRename = false }) { Text("取消", color = TextSecondary) }
+            },
+        )
+    }
+
+    if (showEntries) {
+        ModalBottomSheet(onDismissRequest = { if (!forking) showEntries = false }, sheetState = sheetState, containerColor = Panel) {
+            Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp).padding(bottom = 20.dp)) {
+                Text("分支与 entries", style = MaterialTheme.typography.headlineMedium, color = TextPrimary)
+                Spacer(Modifier.height(4.dp))
+                val page = entriesPage
+                Text(
+                    if (page == null) "从任意 entry 分叉会复制到该点，原会话保持不变。"
+                    else "当前 leaf · " + (page.leafId?.take(8) ?: "—") + " · 共 " + page.entries.size + " 条",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TextMuted,
+                )
+                Spacer(Modifier.height(10.dp))
+                when {
+                    entriesLoading -> Box(Modifier.fillMaxWidth().height(120.dp), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(color = Violet, strokeWidth = 2.dp)
+                    }
+                    entriesError != null -> {
+                        Text(entriesError.orEmpty(), style = MaterialTheme.typography.bodySmall, color = Rose)
+                        Spacer(Modifier.height(8.dp))
+                        TextButton(onClick = { openEntries() }) { Text("重试", color = Cyan) }
+                    }
+                    page != null -> {
+                        val children = remember(page) { page.entries.groupingBy { it.parentId }.eachCount() }
+                        LazyColumn(Modifier.fillMaxWidth().height(300.dp)) {
+                            items(page.entries.asReversed(), key = { it.id }) { entry ->
+                                val selected = entry.id == selectedEntryId
+                                Row(
+                                    Modifier.fillMaxWidth()
+                                        .padding(start = (entry.depth * 12).dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(if (selected) Violet.copy(alpha = 0.16f) else Color.Transparent)
+                                        .clickable { selectedEntryId = entry.id }
+                                        .padding(horizontal = 8.dp, vertical = 7.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(
+                                        entry.id.take(8),
+                                        style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                                        color = if (selected) Violet else TextMuted,
+                                    )
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(
+                                        (if (entry.role.isBlank()) entry.type else entry.role) + " · " + entry.preview,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = if (selected) TextPrimary else TextSecondary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                    if ((children[entry.id] ?: 0) > 1) {
+                                        Text("分支", style = MaterialTheme.typography.labelSmall, color = Amber)
+                                    }
+                                }
+                            }
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                "分叉会复制到所选 entry，不移动原会话。",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = TextMuted,
+                                modifier = Modifier.weight(1f),
+                            )
+                            TextButton(onClick = { doFork() }, enabled = selectedEntryId != null && !forking) {
+                                Text(
+                                    if (forking) "正在分叉…" else "从 " + (selectedEntryId?.take(8) ?: "…") + " 分叉",
+                                    color = if (forking) TextMuted else Violet,
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     openTurn?.let { turn ->
         ModalBottomSheet(onDismissRequest = { openTurnAnchor = null }, sheetState = sheetState, containerColor = Panel) {
             TurnDetailSheet(turn)
@@ -517,6 +987,7 @@ fun ChatScreen(repo: CarryRepository, nodeId: String, sessionId: String, onBack:
                 repo.resolveApproval(nodeId, approval.id, decision, remember)
                 openApprovalId = null
             },
+            onExtend = { repo.extendApproval(nodeId, approval.id) },
         )
     }
 }
@@ -751,38 +1222,74 @@ private fun MarkdownBody(text: String, streaming: Boolean = false) {
     )
 }
 
-private fun decodeImage(part: ImagePart): android.graphics.Bitmap? = runCatching {
-    val bytes = Base64.decode(part.data, Base64.DEFAULT)
-    BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-}.getOrNull()
+private suspend fun decodeImage(part: ImagePart, loader: suspend (ImagePart) -> ByteArray?): android.graphics.Bitmap? =
+    runCatching {
+        val bytes = loader(part) ?: return null
+        // 原图可能 20MB：先算采样率再解码，避免全分辨率位图把低内存机型打崩（B-03）。
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        val opts = BitmapFactory.Options().apply {
+            inSampleSize = computeSampleSize(bounds.outWidth, bounds.outHeight, 1600)
+        }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+    }.getOrNull()
 
 @Composable
 private fun ImageStrip(images: List<ImagePart>, modifier: Modifier = Modifier) {
     var preview by remember { mutableStateOf<ImagePart?>(null) }
+    val loader = LocalImageBytes.current
     Row(
         modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         images.forEachIndexed { index, part ->
-            val bitmap by produceState<android.graphics.Bitmap?>(null, part.data) {
-                value = withContext(Dispatchers.IO) { decodeImage(part) }
+            var retry by remember(part) { mutableStateOf(0) }
+            // loaded 区分“还在加载”和“已失败”：两者 bitmap 都是 null，但失败要能重试（N-10）。
+            var loaded by remember(part, retry) { mutableStateOf(false) }
+            val bitmap by produceState<android.graphics.Bitmap?>(null, part.blobId ?: part.data, retry) {
+                value = withContext(Dispatchers.IO) { decodeImage(part, loader) }
+                loaded = true
             }
-            val image = bitmap ?: return@forEachIndexed
-            androidx.compose.foundation.Image(
-                bitmap = image.asImageBitmap(),
-                contentDescription = "图片 ${index + 1}",
-                contentScale = ContentScale.Crop,
-                modifier = Modifier
-                    .size(150.dp)
-                    .clip(RoundedCornerShape(10.dp))
-                    .border(0.7.dp, Line, RoundedCornerShape(10.dp))
-                    .clickable { preview = part },
-            )
+            val image = bitmap
+            if (image == null) {
+                // 加载中/不可用不能直接消失，否则用户以为图片丢了（B-42）。
+                Box(
+                    Modifier.size(150.dp).clip(RoundedCornerShape(10.dp)).background(Panel)
+                        .border(0.7.dp, Line, RoundedCornerShape(10.dp))
+                        .clickable(enabled = loaded && !part.unavailable) { retry += 1 },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        when {
+                            part.unavailable && part.size > 0 ->
+                                "图片不可用（${formatImageSize(part.size)}）"
+                            part.unavailable -> "图片不可用"
+                            loaded -> "加载失败，点击重试"
+                            else -> "加载中…"
+                        },
+                        style = MaterialTheme.typography.labelSmall, color = TextMuted,
+                    )
+                }
+            } else {
+                androidx.compose.foundation.Image(
+                    bitmap = image.asImageBitmap(),
+                    contentDescription = "图片 ${index + 1}",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .size(150.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .border(0.7.dp, Line, RoundedCornerShape(10.dp))
+                        .clickable { preview = part },
+                )
+            }
         }
     }
     preview?.let { part ->
-        val bitmap by produceState<android.graphics.Bitmap?>(null, part.data) {
-            value = withContext(Dispatchers.IO) { decodeImage(part) }
+        var retry by remember(part) { mutableStateOf(0) }
+        var loaded by remember(part, retry) { mutableStateOf(false) }
+        val bitmap by produceState<android.graphics.Bitmap?>(null, part.blobId ?: part.data, retry) {
+            value = withContext(Dispatchers.IO) { decodeImage(part, loader) }
+            loaded = true
         }
         Dialog(onDismissRequest = { preview = null }) {
             Column(
@@ -796,7 +1303,18 @@ private fun ImageStrip(images: List<ImagePart>, modifier: Modifier = Modifier) {
                         contentScale = ContentScale.Fit,
                         modifier = Modifier.fillMaxWidth().height(420.dp),
                     )
-                }
+                } ?: Text(
+                    when {
+                        part.unavailable && part.size > 0 -> "图片不可用（${formatImageSize(part.size)}）"
+                        part.unavailable -> "图片不可用"
+                        loaded -> "加载失败，点击重试"
+                        else -> "加载中…"
+                    },
+                    color = Color.White,
+                    modifier = Modifier
+                        .padding(24.dp)
+                        .clickable(enabled = loaded && !part.unavailable) { retry += 1 },
+                )
                 TextButton(onClick = { preview = null }) { Text("关闭", color = Color.White) }
             }
         }
@@ -836,7 +1354,12 @@ private fun ApprovalCard(approval: Approval, onClick: () -> Unit) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ApprovalDialog(approval: Approval, onDismiss: () -> Unit, onDecide: (String, Boolean) -> Unit) {
+private fun ApprovalDialog(
+    approval: Approval,
+    onDismiss: () -> Unit,
+    onDecide: (String, Boolean) -> Unit,
+    onExtend: () -> Unit,
+) {
     var rememberRule by remember { mutableStateOf(false) }
     var remaining by remember(approval.id) { mutableStateOf(approval.remainingSeconds) }
     LaunchedEffect(approval.id, approval.remainingSeconds) {
@@ -915,6 +1438,10 @@ private fun ApprovalDialog(approval: Approval, onDismiss: () -> Unit, onDecide: 
         },
         dismissButton = {
             Row {
+                TextButton(
+                    onClick = { onExtend(); remaining = (remaining + 120).coerceAtMost(300) },
+                    enabled = !expired && remaining < 300,
+                ) { Text("延长 120 秒", color = if (expired) TextMuted else Amber) }
                 TextButton(onClick = { onDecide("deny", false) }, enabled = !expired) {
                     Text("拒绝", color = if (expired) TextMuted else TextSecondary)
                 }
@@ -942,15 +1469,20 @@ private fun Composer(
     mode: String,
     onMode: (String) -> Unit,
     running: Boolean,
-    pendingImage: Triple<String, String, String>?,
+    readOnly: Boolean = false,
+    pendingImages: List<OutgoingImage>,
+    usageBytes: Long,
+    usageLimit: Long,
     imageError: String?,
     onPickImage: () -> Unit,
-    onClearImage: () -> Unit,
+    onRemoveImage: (String) -> Unit,
+    onRetryImage: (String) -> Unit,
     onCommands: () -> Unit,
     onModels: () -> Unit,
     onSend: () -> Unit,
     onStop: () -> Unit,
 ) {
+    fun mb(v: Long): String = String.format(java.util.Locale.US, "%.1f", v / 1048576.0)
     Column(
         Modifier
             .fillMaxWidth()
@@ -961,6 +1493,7 @@ private fun Composer(
             ModeChip("自动", mode == "auto") { onMode("auto") }
             ModeChip("插话", mode == "steer") { onMode("steer") }
             ModeChip("排队", mode == "queue") { onMode("queue") }
+            if (readOnly) MonoLabel("只读", color = Amber)
             Spacer(Modifier.weight(1f))
             Box(Modifier.size(30.dp).clip(CircleShape).clickable(onClick = onCommands), contentAlignment = Alignment.Center) {
                 Text("/", style = MaterialTheme.typography.titleMedium, color = TextMuted)
@@ -969,22 +1502,87 @@ private fun Composer(
                 Icon(Icons.Outlined.Tune, "选择模型", tint = TextMuted, modifier = Modifier.size(16.dp))
             }
         }
-        if (pendingImage != null || imageError != null) {
+        if (pendingImages.isNotEmpty()) {
             Spacer(Modifier.height(6.dp))
-            Row(
-                Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(Panel).padding(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(Icons.Outlined.Image, null, tint = Cyan, modifier = Modifier.size(15.dp))
-                Spacer(Modifier.size(6.dp))
-                Text(if (pendingImage != null) "已附加 1 张图片" else imageError.orEmpty(), style = MaterialTheme.typography.bodySmall, color = if (pendingImage != null) Cyan else Rose)
-                Spacer(Modifier.weight(1f))
-                if (pendingImage != null) Icon(Icons.Outlined.Close, "移除图片", tint = TextMuted, modifier = Modifier.size(15.dp).clickable(onClick = onClearImage))
+            // 队列总进度：不能只显示单张，用户看不到 10 张里还剩几张（B-43）。
+            val done = pendingImages.count { it.blobId != null || it.error != null }
+            if (pendingImages.any { it.uploading }) {
+                Text(
+                    "正在上传 ${done.coerceAtMost(pendingImages.size)}/${pendingImages.size} 张",
+                    style = MaterialTheme.typography.labelSmall, color = Cyan,
+                )
+                LinearProgressIndicator(
+                    progress = { pendingImages.sumOf { (if (it.blobId != null) 1f else it.progress).toDouble() }.toFloat() / pendingImages.size },
+                    modifier = Modifier.fillMaxWidth().padding(top = 3.dp).height(2.dp),
+                    color = Cyan, trackColor = Line,
+                )
+                Spacer(Modifier.height(4.dp))
             }
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                items(pendingImages, key = { it.id }) { item ->
+                    Column(
+                        Modifier.width(152.dp).clip(RoundedCornerShape(10.dp)).background(Panel).padding(8.dp),
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Outlined.Image, null, tint = Cyan, modifier = Modifier.size(14.dp))
+                            Spacer(Modifier.width(5.dp))
+                            Text(
+                                mb(item.size) + " MB",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = TextSecondary,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Icon(
+                                Icons.Outlined.Close, "移除图片", tint = TextMuted,
+                                modifier = Modifier.size(14.dp).clickable { onRemoveImage(item.id) },
+                            )
+                        }
+                        Spacer(Modifier.height(3.dp))
+                        if (item.uploading) {
+                            Text(
+                                "上传中 " + (item.progress * 100).toInt() + "%",
+                                style = MaterialTheme.typography.labelSmall, color = Cyan,
+                            )
+                            LinearProgressIndicator(
+                                progress = { item.progress },
+                                modifier = Modifier.fillMaxWidth().padding(top = 3.dp).height(2.dp),
+                                color = Cyan,
+                                trackColor = Line,
+                            )
+                        } else if (item.error != null) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    item.error,
+                                    style = MaterialTheme.typography.labelSmall, color = Rose,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                Text(
+                                    "重试", style = MaterialTheme.typography.labelSmall, color = Cyan,
+                                    modifier = Modifier.clickable { onRetryImage(item.id) },
+                                )
+                            }
+                        } else {
+                            Text("已上传", style = MaterialTheme.typography.labelSmall, color = Mint)
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(4.dp))
+            Text(
+                pendingImages.size.toString() + "/" + MAX_IMAGES_PER_MESSAGE + " 张 · 单张 ≤" +
+                    MAX_IMAGE_MB + "MB · 会话 " + mb(usageBytes) + "/" + mb(usageLimit) + " MB",
+                style = MaterialTheme.typography.labelSmall,
+                color = if (usageBytes > usageLimit) Rose else TextMuted,
+            )
+        }
+        if (imageError != null) {
+            Spacer(Modifier.height(4.dp))
+            Text(imageError, style = MaterialTheme.typography.labelSmall, color = Rose)
         }
         Spacer(Modifier.height(7.dp))
         Row(verticalAlignment = Alignment.Bottom) {
-            Box(Modifier.size(38.dp).clip(CircleShape).background(Panel).clickable(onClick = onPickImage), contentAlignment = Alignment.Center) {
+            Box(Modifier.size(38.dp).clip(CircleShape).background(Panel).clickable(enabled = !readOnly, onClick = onPickImage), contentAlignment = Alignment.Center) {
                 Icon(Icons.Outlined.Image, "添加图片", tint = TextMuted, modifier = Modifier.size(18.dp))
             }
             Spacer(Modifier.width(8.dp))
@@ -997,11 +1595,16 @@ private fun Composer(
                     .padding(horizontal = 13.dp, vertical = 11.dp),
             ) {
                 if (text.isBlank()) {
-                    Text(if (running) "插入一条消息 / 输入指令…" else "发消息给 pi，/ 唤起命令…", style = MaterialTheme.typography.bodyMedium, color = TextMuted)
+                    Text(
+                        if (readOnly) "该会话已迁移，只读"
+                        else if (running) "插入一条消息 / 输入指令…" else "发消息给 pi，/ 唤起命令…",
+                        style = MaterialTheme.typography.bodyMedium, color = TextMuted,
+                    )
                 }
                 BasicTextField(
                     value = text,
                     onValueChange = onText,
+                    enabled = !readOnly,
                     textStyle = TextStyle(color = TextPrimary, fontSize = 14.sp, lineHeight = 20.sp, fontFamily = FontFamily.SansSerif),
                     cursorBrush = SolidColor(Violet),
                     maxLines = 5,
@@ -1011,7 +1614,7 @@ private fun Composer(
             Spacer(Modifier.width(8.dp))
             // 空输入且不在运行时发送按钮应为置灰禁用态：可点但什么都不发生，
             // 用户会以为“点了没反应/消息丢了”。
-            val idleEmpty = !running && text.isBlank()
+            val idleEmpty = readOnly || (!running && text.isBlank() && pendingImages.isEmpty())
             Box(
                 Modifier
                     .size(40.dp)

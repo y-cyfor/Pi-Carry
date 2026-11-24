@@ -85,7 +85,7 @@ fun SettingsScreen(repo: CarryRepository, onPair: () -> Unit) {
     val context = LocalContext.current
     val appVersion = runCatching {
         context.packageManager.getPackageInfo(context.packageName, 0).versionName
-    }.getOrNull() ?: "0.1.4"
+    }.getOrNull() ?: "0.2.0"
     val nodes by repo.nodes.collectAsState()
     val link by repo.link.collectAsState()
     val themeMode by repo.themeMode.collectAsState()

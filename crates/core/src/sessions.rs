@@ -1,19 +1,21 @@
 //! 会话索引、pi 子进程生命周期、事件归一化与 journal。
 
 use crate::approval::{ApprovalManager, Decision};
+use crate::blob::BlobStore;
 use crate::clock::{rfc3339, Clock, IdGen};
 use crate::config::Config;
 use crate::error::{CoreError, Result};
 use crate::paths::Paths;
 use crate::pi::{PiClient, PiEvent, PiExit};
 use crate::store::Store;
+use base64::Engine;
 use pi_carry_protocol::events as ev;
 use pi_carry_protocol::{
     ErrorCode, ImagePayload, PromptPayload, ProtocolError, SessionSnapshot, SessionSummary,
-    UiResponsePayload,
+    UiResponsePayload, MAX_IMAGE_BYTES, MAX_JSONL_LINE,
 };
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -25,8 +27,15 @@ const JSONL_TAIL_BYTES: u64 = 1024 * 1024;
 /// 读取 header 时的字节上限（header 永远是单行短 JSON）。
 const JSONL_HEADER_BYTES: u64 = 64 * 1024;
 /// 单次快照最多回放的消息条数：超长会话保留最新的一段，
-/// 免得整份历史塞进一个 4 MiB 事件帧。
+/// 免得整份历史塞进一个控制响应帧。
 const MAX_SNAPSHOT_MESSAGES: usize = 4000;
+/// 单次快照的序列化预算。控制响应帧上限是 1 MiB（`MAX_CONTROL_FRAME`），
+/// 留约 128 KiB 给 session/审批/信封与 JSON 转义；超过就丢最旧的消息或
+/// 截断最后一条，绝不能把帧撑爆后断连（B-04）。
+const MAX_SNAPSHOT_BYTES: usize = 900 * 1024;
+/// 快照里允许内联的 base64 图片大小。超过就降级成占位，否则一张原图
+/// 就能把整帧撑爆；0.2 客户端应走 blobId，老客户端只能看到占位（B-12）。
+const MAX_INLINE_IMAGE_BYTES: usize = 512 * 1024;
 /// spawn_locks 条目上限；超过时清理已无人持有的锁。
 const SPAWN_LOCK_LIMIT: usize = 256;
 
@@ -235,6 +244,10 @@ pub struct SessionManager {
     approvals: ApprovalManager,
     pi_path: PathBuf,
     guard: PathBuf,
+    /// 图片 blob 库；与会话同生命周期，fork 时复制引用、close 时清理孤儿。
+    blobs: BlobStore,
+    /// 正在 fork 迁移的旧会话：窗口内拒绝新 prompt，避免写进即将被替换的运行时。
+    migrating: Mutex<HashSet<String>>,
     live: Mutex<HashMap<String, Arc<LiveSession>>>,
     /// 每个会话 id 一把 attach 互斥锁，防止并发 open 对同一会话双开 pi 进程。
     spawn_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
@@ -252,7 +265,7 @@ impl SessionManager {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: Config,
-        _paths: Paths,
+        paths: Paths,
         store: Store,
         clock: Arc<dyn Clock>,
         ids: Arc<dyn IdGen>,
@@ -263,6 +276,7 @@ impl SessionManager {
         // 容量与 protocol::EVENT_QUEUE_CAPACITY 对齐：客户端落后超过这个数会收到
         // SNAPSHOT_REQUIRED 并重拉快照，所以它需要覆盖一个快照周期的峰值事件量。
         let (events, _) = broadcast::channel(pi_carry_protocol::EVENT_QUEUE_CAPACITY);
+        let blobs = BlobStore::new(paths.blobs(), store.clone());
         Arc::new(Self {
             config,
             store,
@@ -271,6 +285,8 @@ impl SessionManager {
             approvals,
             pi_path,
             guard,
+            blobs,
+            migrating: Mutex::new(HashSet::new()),
             live: Mutex::new(HashMap::new()),
             spawn_locks: Mutex::new(HashMap::new()),
             events,
@@ -285,6 +301,11 @@ impl SessionManager {
 
     pub fn approvals(&self) -> &ApprovalManager {
         &self.approvals
+    }
+
+    /// 图片 blob 库（server 的 blob.* 操作与快照投影共用）。
+    pub fn blobs(&self) -> &BlobStore {
+        &self.blobs
     }
 
     pub fn sessions_dir(&self) -> PathBuf {
@@ -393,6 +414,13 @@ impl SessionManager {
     }
 
     pub async fn open(self: &Arc<Self>, id: &str) -> Result<SessionSummary> {
+        // 已迁移的旧会话不得再拉起 runtime：两份 pi 进程写同一 jsonl 会静默
+        // 分叉出与原 fork 不一致的历史（B-14）。快照走 snapshot，不受此限。
+        if let Some(to) = self.store.migrated_to(id)? {
+            return Err(CoreError::SessionConflict(format!(
+                "会话已迁移到 fork 会话 {to}，旧会话只读"
+            )));
+        }
         if let Some(l) = self.live.lock().expect("live poisoned").get(id).cloned() {
             if !l.client.is_closed() {
                 return Ok(l.summary.lock().expect("summary poisoned").clone());
@@ -549,6 +577,7 @@ impl SessionManager {
                 last_source: "mobile".into(),
                 writable: true,
                 parent_id: None,
+                migrated_to: None,
             },
             Err(e) => {
                 // 子进程已启动，错误路径上必须先关掉，否则每次开放失败都泄漏一个 pi。
@@ -687,29 +716,61 @@ impl SessionManager {
     }
 
     pub fn snapshot(&self, id: &str) -> Result<SessionSnapshot> {
+        let mut snap = self.snapshot_inner(id, false, true)?;
+        snap.messages = bound_snapshot_messages(snap.messages);
+        Ok(snap)
+    }
+
+    /// [cold] 为 false 时跳过整份会话文件的冷读：调用方马上会用 pi 的
+    /// get_entries 覆盖消息，先读一遍只是白白把大文件解析两次（N-02）。
+    /// [project_images] 只保留参数占位，投影由调用方在热路径之后统一做。
+    fn snapshot_inner(
+        &self,
+        id: &str,
+        _project_images: bool,
+        cold: bool,
+    ) -> Result<SessionSnapshot> {
         let summary = self.summary(id)?;
         let last_seq = self.store.last_seq(id)?;
-        Ok(SessionSnapshot {
-            session: summary,
-            last_seq,
-            messages: self
-                .resolve_path(id)
+        let messages = if cold {
+            self.resolve_path(id)
                 .ok()
                 .map(|p| read_session_messages(&p))
-                .unwrap_or_default(),
-            pending_approvals: self.store.list_pending_approvals(Some(id))?,
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let snap = SessionSnapshot {
+            session: summary,
+            last_seq,
+            messages,
+            // 走审批管理器而不是直接读库：后者把 remainingSeconds 固定成 0，
+            // 客户端会显示“剩 0 秒”但审批其实还在等待（N-01）。
+            pending_approvals: self.approvals.pending(Some(id))?,
             run: None,
             queue: json!({"steering": [], "followUp": []}),
-        })
+        };
+        Ok(snap)
     }
 
     /// 带 get_messages 的完整快照（服务端使用）。
     pub async fn snapshot_async(&self, id: &str) -> Result<SessionSnapshot> {
-        let mut snap = self.snapshot(id)?;
+        self.snapshot_async_with_blobs(id, false).await
+    }
+
+    /// 客户端声明支持 blob 图片时，把命中本机 blob 的历史图投影成 blobId。
+    pub async fn snapshot_async_with_blobs(
+        &self,
+        id: &str,
+        project_images: bool,
+    ) -> Result<SessionSnapshot> {
+        // 先看有没有 live：有的话不需要读整份 jsonl，get_entries 会覆盖消息；
+        // 冷路径也要等热路径覆盖后再统一投影一次（B-22/N-02）。
         let live = {
             let map = self.live.lock().expect("live poisoned");
             map.get(id).cloned()
         };
+        let mut snap = self.snapshot_inner(id, false, live.is_none())?;
         if let Some(live) = live {
             // 必须用 get_entries 而不是 get_messages：只有 entry 带行级 id，
             // 与冷路径 read_session_messages 的 id 同源，客户端才对齐得了。
@@ -727,6 +788,9 @@ impl SessionManager {
                     .collect();
                 // 空会话合法；只有拿到有效条目才覆盖冷路径结果。
                 snap.messages = msgs;
+            } else {
+                // get_entries 失败时仍给出可读历史，而不是空白会话。
+                snap.messages = read_session_messages(&live.path);
             }
             let st = live.state.lock().expect("state poisoned");
             snap.run = Some(json!({
@@ -738,6 +802,12 @@ impl SessionManager {
             snap.queue = st.queue.clone();
         }
         snap.last_seq = self.store.last_seq(id)?;
+        if project_images {
+            // 先收编/投影再裁剪：反过来的话，>512 KiB 的历史图会先被降级成
+            // unavailable，blob 客户端永远看不到本可收编的原图（B-12/I4）。
+            snap.messages = self.project_images(id, snap.messages);
+        }
+        snap.messages = bound_snapshot_messages(snap.messages);
         Ok(snap)
     }
 
@@ -762,7 +832,23 @@ impl SessionManager {
         }
         // 图片数量/大小必须在进入 payload 前挡：超限帧会被 read_frame 拒掉，
         // 但 1MiB 内的「5 张巨图」仍会作成一个超大 prompt 推给 pi。
+        if self.is_migrating(&p.session_id) {
+            return Err(CoreError::Protocol(ProtocolError::new(
+                ErrorCode::SessionBusy,
+                "会话正在迁移，请重试",
+            )));
+        }
+        // fork 后旧会话必须保持只读：再冷开一个 pi 进程写同一份 jsonl，
+        // 会和 fork 出来的新会话静默分叉（B-14）。
+        if let Some(to) = self.store.migrated_to(&p.session_id)? {
+            return Err(CoreError::SessionConflict(format!(
+                "会话已迁移到 fork 会话 {to}，旧会话只读"
+            )));
+        }
         validate_images(&p.images)?;
+        // blob 引用在这里变成 base64：pi 的 RPC 只认内联图片，blob 只在
+        // carry 的传输层存在，不会写进 pi 的 JSONL。
+        let images = self.resolve_prompt_images(&p.session_id, &p.images)?;
         let live = self.ensure_live(&p.session_id).await?;
         // 只用来决定 auto 模式发 steer 还是 prompt；writer 的释放判据不能复用
         // 这个快照（见 `should_release_writer`）。
@@ -777,8 +863,8 @@ impl SessionManager {
             p.mode.as_str()
         };
         let mut payload = json!({"message": p.message});
-        if !p.images.is_empty() {
-            payload["images"] = Value::Array(p.images.iter().map(image_json).collect());
+        if !images.is_empty() {
+            payload["images"] = Value::Array(images.iter().map(image_json).collect());
         }
         // 先校验模式再占用 writer：非法模式不能把别的写者踢掉。
         match mode {
@@ -862,7 +948,88 @@ impl SessionManager {
         Ok(json!({"accepted": true, "mode": mode}))
     }
 
+    fn is_migrating(&self, id: &str) -> bool {
+        self.migrating
+            .lock()
+            .expect("migrating poisoned")
+            .contains(id)
+    }
+
+    /// 返回 false 表示已有迁移在飞；调用方必须直接拒绝，不能再排队。
+    fn begin_migration(&self, id: &str) -> bool {
+        self.migrating
+            .lock()
+            .expect("migrating poisoned")
+            .insert(id.to_string())
+    }
+
+    fn end_migration(&self, id: &str) {
+        self.migrating
+            .lock()
+            .expect("migrating poisoned")
+            .remove(id);
+    }
+
+    /// 把 PromptPayload 里的 blob 引用换成 pi 能接受的内联 base64。
+    /// 非 blob 图片原样透传（老客户端兼容）。
+    fn resolve_prompt_images(
+        &self,
+        session_id: &str,
+        images: &[ImagePayload],
+    ) -> Result<Vec<ImagePayload>> {
+        let mut out = Vec::with_capacity(images.len());
+        // 以真实字节重新累计：blob 的 `size` 是客户端声明值，不能作为配额依据（B-11）。
+        let mut total = 0u64;
+        for (i, img) in images.iter().enumerate() {
+            let Some(sha) = img.blob_id.as_deref().filter(|s| !s.is_empty()) else {
+                out.push(img.clone());
+                continue;
+            };
+            let (bytes, mime) = self.blobs.read_image(session_id, sha).map_err(|e| {
+                CoreError::InvalidArgument(format!("第 {} 张图片不可用：{e}", i + 1))
+            })?;
+            total = total.saturating_add(bytes.len() as u64);
+            if total > pi_carry_protocol::MAX_PROMPT_IMAGE_BYTES as u64 {
+                return Err(CoreError::InvalidArgument(format!(
+                    "本条消息图片实际合计超过上限 {} MiB",
+                    pi_carry_protocol::MAX_PROMPT_IMAGE_BYTES / (1024 * 1024)
+                )));
+            }
+            out.push(ImagePayload {
+                r#type: "image".into(),
+                data: base64::engine::general_purpose::STANDARD.encode(&bytes),
+                blob_id: Some(sha.to_string()),
+                mime_type: mime,
+                width: img.width,
+                height: img.height,
+                size: bytes.len() as u64,
+            });
+        }
+        Ok(out)
+    }
+
+    /// 快照里的历史图如果在本会话的 blob 库里，就把 base64 换成 blobId：
+    /// 一张 20 MiB 的图 base64 后约 27 MiB，直接塞快照会超过 4 MiB 事件帧。
+    /// 未命中（老会话/已清理）保持原样，客户端仍能按 base64 渲染。
+    fn project_images(&self, session_id: &str, messages: Vec<Value>) -> Vec<Value> {
+        let live = self.is_live(session_id);
+        messages
+            .into_iter()
+            .map(|mut m| {
+                project_images_in(&mut m, self, session_id, live);
+                m
+            })
+            .collect()
+    }
+
     async fn ensure_live(self: &Arc<Self>, id: &str) -> Result<Arc<LiveSession>> {
+        // 迁移后的旧会话即使还留着一个未关闭的 live 句柄，也绝不能再拉起/复用：
+        // 所有走 ensure_live 的入口都要先看到只读错误（R-07）。
+        if let Some(to) = self.store.migrated_to(id)? {
+            return Err(CoreError::SessionConflict(format!(
+                "会话已迁移到 fork 会话 {to}，旧会话只读"
+            )));
+        }
         if let Some(l) = self.live.lock().expect("live poisoned").get(id).cloned() {
             if !l.client.is_closed() {
                 return Ok(l);
@@ -898,6 +1065,12 @@ impl SessionManager {
             }),
         );
         Ok(v)
+    }
+
+    /// 会话是否已打开。blob.put 用它拒绝关闭后的上传：否则 cleanup 刚跑完，
+    /// 新引用又会被写入，直到下一次关闭才清理（B-29）。
+    pub fn is_live(&self, id: &str) -> bool {
+        self.live.lock().expect("live poisoned").contains_key(id)
     }
 
     fn require_live(&self, id: &str) -> Result<Arc<LiveSession>> {
@@ -982,7 +1155,7 @@ impl SessionManager {
     }
 
     /// 修改会话显示名；pi 会把新名字写回会话文件。
-    pub async fn rename(&self, id: &str, name: &str) -> Result<SessionSummary> {
+    pub async fn rename(self: &Arc<Self>, id: &str, name: &str) -> Result<SessionSummary> {
         let name = name.trim();
         if name.is_empty() {
             return Err(CoreError::InvalidArgument("会话名不能为空".into()));
@@ -990,12 +1163,21 @@ impl SessionManager {
         if name.chars().count() > 200 {
             return Err(CoreError::InvalidArgument("会话名过长".into()));
         }
-        let live = self.require_live(id)?;
+        if let Some(to) = self.store.migrated_to(id)? {
+            return Err(CoreError::SessionConflict(format!(
+                "会话已迁移到 fork 会话 {to}，旧会话只读"
+            )));
+        }
+        // 冷会话也要能改名：设置只在 pi 进程内生效，ensure_live 会顺手
+        // 拉起 runtime；旧实现直接报「尚未打开」，列表里的重命名会失败（B-34）。
+        let live = self.ensure_live(id).await?;
         live.client
             .request("set_session_name", json!({ "name": name }))
             .await?;
         let mut summary = live.summary.lock().expect("summary poisoned").clone();
         summary.name = name.to_string();
+        summary.updated_at = chrono::Utc::now().to_rfc3339();
+        *live.summary.lock().expect("summary poisoned") = summary.clone();
         self.store
             .upsert_session(&summary, &live.path.display().to_string())?;
         self.emit_logged(
@@ -1043,14 +1225,86 @@ impl SessionManager {
         live.client.request("get_commands", Value::Null).await
     }
 
-    pub async fn get_entries(&self, id: &str, since: Option<String>) -> Result<Value> {
-        let live = self.require_live(id)?;
-        live.client
-            .request(
-                "get_entries",
-                since.map(|s| json!({"since": s})).unwrap_or(Value::Null),
-            )
-            .await
+    pub async fn get_entries(self: &Arc<Self>, id: &str, since: Option<String>) -> Result<Value> {
+        // 分支面板与 openSession 是并发发起的：首次点击时会话可能还没 live。
+        // 先 ensure_live，避免用户看到「尚未打开」这种无意义错误（B-35）。
+        let live = self.ensure_live(id).await;
+        let mut live_err = None;
+        if let Ok(live) = &live {
+            let res = live
+                .client
+                .request(
+                    "get_entries",
+                    since
+                        .clone()
+                        .map(|s| json!({"since": s}))
+                        .unwrap_or(Value::Null),
+                )
+                .await;
+            match res {
+                Ok(v) => return Ok(v),
+                // 历史图超过 pi 的单行上限时响应会被截断，别让面板干等 120 秒：
+                // 先试本地文件兜底，再决定报哪个错（B-01/B-35）。
+                Err(e) => live_err = Some(e),
+            }
+        }
+        if let Ok(v) = self.entries_from_file(id, since) {
+            return Ok(v);
+        }
+        match (live_err, live) {
+            (Some(e), _) => Err(e),
+            (None, Err(e)) => Err(e),
+            (None, Ok(_)) => Err(CoreError::Internal("读取会话 entries 失败".into())),
+        }
+    }
+
+    /// 不经过 pi 的 entries 兜底：只保留 entry id/父子关系与很短的消息预览。
+    /// 目的只是让分支面板与 fork 选点可用，不用于渲染聊天历史。
+    fn entries_from_file(&self, id: &str, since: Option<String>) -> Result<Value> {
+        let path = self.resolve_path(id)?;
+        let file = std::fs::File::open(&path)?;
+        let mut reader = BufReader::new(file);
+        let mut entries: Vec<Value> = Vec::new();
+        loop {
+            let Some((bytes, truncated)) = read_line_prefix(&mut reader, MAX_JSONL_LINE)? else {
+                break;
+            };
+            let text = String::from_utf8_lossy(&bytes);
+            if !looks_like_message_line(&text) {
+                continue;
+            }
+            let parsed = if truncated {
+                truncated_entry(&text)
+            } else {
+                serde_json::from_str::<Value>(&text).ok()
+            };
+            let Some(entry) = parsed else { continue };
+            if entry.get("type").and_then(Value::as_str) != Some("message") {
+                continue;
+            }
+            entries.push(entry_preview(&entry));
+        }
+        // leafId 始终是文件里最后一条 entry，供客户端知道“当前叶子”；
+        // since 只影响返回的增量，不影响 leaf 的定义。
+        let leaf = entries
+            .last()
+            .and_then(|e| e.get("id"))
+            .cloned()
+            .unwrap_or(Value::Null);
+        if let Some(since) = since {
+            match entries
+                .iter()
+                .position(|e| e.get("id").and_then(Value::as_str) == Some(since.as_str()))
+            {
+                Some(pos) => {
+                    entries.drain(..=pos);
+                }
+                // since 不在当前文件里（文件被替换/截断）：不能退化成返回全量，
+                // 否则客户端会把整棵旧树当成新条目。返回空增量 + 真实 leaf（R-05）。
+                None => entries.clear(),
+            }
+        }
+        Ok(json!({"entries": entries, "leafId": leaf}))
     }
 
     pub async fn fork(self: &Arc<Self>, id: &str, entry_id: &str) -> Result<SessionSummary> {
@@ -1061,6 +1315,21 @@ impl SessionManager {
                 "运行中的会话不能 fork，请先停止当前运行",
             )));
         }
+        // 迁移窗口内拒绝并发 fork/prompt：同一会话只允许一次 fork 在飞，
+        // 否则两个调用会争用同一个 pi 进程的 live 记录。
+        if !self.begin_migration(id) {
+            return Err(CoreError::Protocol(ProtocolError::new(
+                ErrorCode::SessionBusy,
+                "会话正在迁移，请重试",
+            )));
+        }
+        let result = self.fork_migrate(id, entry_id).await;
+        self.end_migration(id);
+        result
+    }
+
+    async fn fork_migrate(self: &Arc<Self>, id: &str, entry_id: &str) -> Result<SessionSummary> {
+        let live = self.require_live(id)?;
         let v = live
             .client
             .request("fork", json!({"entryId": entry_id}))
@@ -1128,24 +1397,79 @@ impl SessionManager {
         if let Some(h) = old.task.lock().expect("task poisoned").take() {
             h.abort();
         }
+        // fork 会复制到所选 entry，旧会话仍引用同一批图片：先给新会话加引用，
+        // 之后关闭旧会话时才不会把历史图删掉。
+        if let Err(e) = self.blobs.copy_session_refs(id, &new_id) {
+            self.rollback_fork(id, &new_id).await;
+            return Err(e);
+        }
+        // 旧会话的待审批项必须取消：它们属于旧 runtime，批准后也无处执行。
+        if let Err(e) = self.approvals.cancel_session(id) {
+            self.rollback_fork(id, &new_id).await;
+            return Err(e);
+        }
         if let Err(e) = self
             .store
             .upsert_session(&summary, &path.display().to_string())
-            .and_then(|_| {
-                self.emit_raw(
-                    &new_id,
-                    json!({
-                        "type": ev::SESSION_UPDATED,
-                        "session": summary,
-                    }),
-                )
-            })
         {
-            // 迁移已发生：pi 在服务新会话，只能把新 live 关掉，不能留半完成态。
-            let _ = self.close(&new_id).await;
+            self.rollback_fork(id, &new_id).await;
+            return Err(e);
+        }
+        // 等等：先把「旧会话只读」落库，再广播。否则客户端已切到新页，
+        // 旧会话却仍能开新 runtime 写入，形成静默双写（B-14）。
+        if let Err(e) = self.store.mark_session_migrated(id, &new_id) {
+            self.rollback_fork(id, &new_id).await;
+            return Err(e);
+        }
+        if let Err(e) = self.emit_raw(
+            &new_id,
+            json!({
+                "type": ev::SESSION_UPDATED,
+                "session": summary,
+            }),
+        ) {
+            self.rollback_fork(id, &new_id).await;
+            return Err(e);
+        }
+        // 在旧会话的流上广播迁移：客户端此刻多半还开着旧会话，
+        // 它据此替换路由并保留草稿。广播失败必须回滚，否则没有任何客户端
+        // 知道旧 id 已经不可用（B-13/B-18）。
+        if let Err(e) = self.emit_raw(id, ev::session_migrated(id, &new_id, "fork")) {
+            self.rollback_fork(id, &new_id).await;
             return Err(e);
         }
         Ok(summary)
+    }
+
+    /// fork 的任一步失败后收尾：关掉新 runtime、撤掉复制过来的图片引用、
+    /// 删除新会话索引，并清掉旧会话的迁移标记（B-13）。
+    async fn rollback_fork(&self, old_id: &str, new_id: &str) {
+        if let Err(e) = self.store.clear_session_migrated(old_id) {
+            tracing::warn!(session_id = old_id, error = %e, "回滚迁移标记失败");
+        }
+        // fork 出来的 jsonl 已经写到磁盘：回滚时一并删掉，避免留下孤儿会话文件（B-13）。
+        let path = self
+            .live
+            .lock()
+            .expect("live poisoned")
+            .get(new_id)
+            .map(|l| l.path.clone());
+        let _ = self.close(new_id).await;
+        if let Some(path) = path {
+            let _ = std::fs::remove_file(path);
+        }
+        let _ = self.approvals.cancel_session(new_id);
+        // 清理会删文件，不能阻塞异步控制循环（R-09）。
+        let blobs = self.blobs.clone();
+        let cleanup_id = new_id.to_string();
+        match tokio::task::spawn_blocking(move || blobs.cleanup_session(&cleanup_id)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => tracing::warn!(session_id = new_id, error = %e, "回滚 fork blob 失败"),
+            Err(e) => tracing::warn!(session_id = new_id, error = %e, "回滚 fork blob 任务失败"),
+        }
+        if let Err(e) = self.store.delete_session(new_id) {
+            tracing::warn!(session_id = new_id, error = %e, "回滚 fork 会话索引失败");
+        }
     }
 
     pub fn resolve_ui(&self, session_id: &str, p: UiResponsePayload) -> Result<()> {
@@ -1684,8 +2008,208 @@ fn image_json(img: &ImagePayload) -> Value {
 }
 
 /// 校验图片数量、类型与体积。
-/// 注意：这里的「字节数」按 base64 解码后估算，因为上限常量描述的是图片本身；
-/// 真正的帧体积限制由 `read_frame(MAX_CONTROL_FRAME)` 负责。
+/// blob 图片按客户端声明的 `size` 计（服务端读 blob 时还会再核对实际文件），
+/// 内联图片按 base64 估算；真正的帧体积限制由 `read_frame(MAX_CONTROL_FRAME)` 负责。
+fn project_images_in(value: &mut Value, manager: &SessionManager, session_id: &str, live: bool) {
+    let blobs = &manager.blobs;
+    match value {
+        Value::Object(map) => {
+            if map.get("type").and_then(Value::as_str) == Some("image") {
+                // 关闭中的会话不再收编：cleanup 会清掉引用，若快照在 cleanup 之后
+                // 才 finalize，就会留下永久孤儿引用（N-03）。此时保留 base64；
+                // 超大图仍由 snapshot 预算统一降级。
+                if !live {
+                    return;
+                }
+                // pi 的历史图有两种形状：顶层 data，或 Anthropic 风格的 source.data。
+                let top_data = map
+                    .get("data")
+                    .and_then(Value::as_str)
+                    .filter(|d| !d.is_empty());
+                let nested_data = map
+                    .get("source")
+                    .and_then(|s| s.get("data"))
+                    .and_then(Value::as_str)
+                    .filter(|d| !d.is_empty());
+                let from_source = top_data.is_none() && nested_data.is_some();
+                if let Some(data) = top_data.or(nested_data) {
+                    let projected: std::result::Result<(String, u64), String> = (|| {
+                        let bytes = base64::engine::general_purpose::STANDARD
+                            .decode(data)
+                            .map_err(|_| "图片 base64 无法解码".to_string())?;
+                        if bytes.is_empty() {
+                            return Err("图片内容为空".to_string());
+                        }
+                        if bytes.len() > MAX_IMAGE_BYTES {
+                            return Err("图片超过 20 MiB".to_string());
+                        }
+                        let declared = map
+                            .get("mimeType")
+                            .or_else(|| map.get("mediaType"))
+                            .or_else(|| map.get("source").and_then(|s| s.get("media_type")))
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        let mime = if crate::blob::ALLOWED_IMAGE_MIMES.contains(&declared) {
+                            declared
+                        } else {
+                            sniff_image_mime(&bytes).ok_or("图片格式不受支持".to_string())?
+                        };
+                        // 历史图（尤其是 0.1.x 内联进 jsonl 的）也要收编进 blob 库，
+                        // 否则多图快照会超过 1 MiB 控制帧，客户端连历史都打不开。
+                        let sha = match blobs.adopt(session_id, mime, &bytes) {
+                            Ok(sha) => sha,
+                            Err(e) => return Err(format!("图片收编失败：{e}")),
+                        };
+                        // 收编期间会话可能被关闭：此时 cleanup 已经跑过，
+                        // 主动释放这一次新建的引用，避免永久占额（N-03）。
+                        if !manager.is_live(session_id) {
+                            let _ = blobs.release(session_id, &sha);
+                            return Err("会话已关闭，停止收编内联图".to_string());
+                        }
+                        Ok((sha, bytes.len() as u64))
+                    })(
+                    );
+                    match projected {
+                        Ok((sha, size)) => {
+                            if from_source {
+                                if let Some(Value::Object(source)) = map.get_mut("source") {
+                                    source.remove("data");
+                                }
+                            } else {
+                                map.remove("data");
+                            }
+                            map.insert("blobId".into(), Value::String(sha));
+                            map.insert("size".into(), json!(size));
+                        }
+                        Err(reason) => {
+                            // 投影失败绝不能把原 base64 留在快照里：一张 20 MiB 图
+                            // 就足以把帧撑爆，导致断连（B-12）。
+                            if from_source {
+                                if let Some(Value::Object(source)) = map.get_mut("source") {
+                                    source.remove("data");
+                                }
+                            } else {
+                                map.remove("data");
+                            }
+                            map.insert("unavailable".into(), Value::Bool(true));
+                            map.insert("reason".into(), Value::String(reason));
+                        }
+                    }
+                }
+            }
+            for (_, v) in map.iter_mut() {
+                project_images_in(v, manager, session_id, live);
+            }
+        }
+        Value::Array(items) => {
+            for v in items {
+                project_images_in(v, manager, session_id, live);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// 快照帧预算：先降级放不下的内联图，再按条数与序列化字节裁剪最旧消息。
+/// 这是最后一道防线；投影成功的大图此时只剩 blobId，不会触发降级。
+fn bound_snapshot_messages(mut messages: Vec<Value>) -> Vec<Value> {
+    for m in &mut messages {
+        degrade_oversized_images(m);
+    }
+    if messages.len() > MAX_SNAPSHOT_MESSAGES {
+        let drop = messages.len() - MAX_SNAPSHOT_MESSAGES;
+        messages.drain(..drop);
+    }
+    let sizes: Vec<usize> = messages
+        .iter()
+        .map(|m| serde_json::to_vec(m).map(|b| b.len()).unwrap_or(0))
+        .collect();
+    let mut total: usize = sizes.iter().sum();
+    let mut start = 0;
+    while total > MAX_SNAPSHOT_BYTES && start + 1 < messages.len() {
+        total -= sizes[start];
+        start += 1;
+    }
+    if start > 0 {
+        messages.drain(..start);
+    }
+    // 只剩一条超大消息时上面的循环不会删；把正文换成占位，保留 id/role，
+    // 至少让客户端还能渲染“这条消息过长”。
+    if total > MAX_SNAPSHOT_BYTES {
+        if let Some(last) = messages.last_mut() {
+            if let Some(map) = last.as_object_mut() {
+                let placeholder = json!([{"type":"text","text":"（消息过长，快照已截断）"}]);
+                if let Some(body) = map.get_mut("message").and_then(Value::as_object_mut) {
+                    body.remove("images");
+                    body.insert("content".into(), placeholder);
+                } else {
+                    map.remove("images");
+                    map.insert("content".into(), placeholder);
+                }
+            }
+        }
+    }
+    messages
+}
+
+fn degrade_oversized_images(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            if map.get("type").and_then(Value::as_str) == Some("image") {
+                let limit = MAX_INLINE_IMAGE_BYTES / 3 * 4;
+                let top_too_big = map
+                    .get("data")
+                    .and_then(Value::as_str)
+                    .is_some_and(|d| d.len() > limit);
+                let nested_too_big = map
+                    .get("source")
+                    .and_then(|s| s.get("data"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|d| d.len() > limit);
+                if top_too_big || nested_too_big {
+                    if nested_too_big {
+                        if let Some(Value::Object(source)) = map.get_mut("source") {
+                            source.remove("data");
+                        }
+                    } else {
+                        map.remove("data");
+                    }
+                    map.insert("unavailable".into(), Value::Bool(true));
+                    map.insert(
+                        "reason".into(),
+                        Value::String("图片过大，快照已省略；请升级客户端或重新发送".into()),
+                    );
+                }
+            }
+            for (_, v) in map.iter_mut() {
+                degrade_oversized_images(v);
+            }
+        }
+        Value::Array(items) => {
+            for v in items {
+                degrade_oversized_images(v);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn sniff_image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        return Some("image/png");
+    }
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return Some("image/jpeg");
+    }
+    if bytes.starts_with(b"GIF8") {
+        return Some("image/gif");
+    }
+    if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    None
+}
+
 fn validate_images(images: &[ImagePayload]) -> Result<()> {
     if images.len() > pi_carry_protocol::MAX_IMAGES_PER_PROMPT {
         return Err(CoreError::InvalidArgument(format!(
@@ -1694,7 +2218,7 @@ fn validate_images(images: &[ImagePayload]) -> Result<()> {
             images.len()
         )));
     }
-    let mut total = 0usize;
+    let mut total = 0u64;
     for (i, img) in images.iter().enumerate() {
         // 只接受 pi 支持的图片类型：否则 pi 会在 run 中报错，而用户看不到原因。
         if !matches!(
@@ -1707,9 +2231,34 @@ fn validate_images(images: &[ImagePayload]) -> Result<()> {
                 img.mime_type
             )));
         }
+        let is_blob = img.blob_id.as_deref().is_some_and(|s| !s.is_empty());
+        if is_blob {
+            // blob 的 size 是客户端声明值，只做「单图不超过 20 MiB」的上界提示；
+            // 真实体积与合计在 resolve_prompt_images 读盘后重算（B-11）。
+            if img.size == 0 {
+                return Err(CoreError::InvalidArgument(format!(
+                    "第 {} 张图片缺少 size，无法校验",
+                    i + 1
+                )));
+            }
+            if img.size > pi_carry_protocol::MAX_IMAGE_BYTES as u64 {
+                return Err(CoreError::InvalidArgument(format!(
+                    "第 {} 张图片声明体积超过单图上限 {} MiB",
+                    i + 1,
+                    pi_carry_protocol::MAX_IMAGE_BYTES / (1024 * 1024)
+                )));
+            }
+            continue;
+        }
+        if img.data.is_empty() {
+            return Err(CoreError::InvalidArgument(format!(
+                "第 {} 张图片缺少图片数据",
+                i + 1
+            )));
+        }
         // base64 每 4 字符 = 3 字节，末尾可能有 padding。
-        let raw_len = img.data.len() / 4 * 3;
-        if raw_len > pi_carry_protocol::MAX_IMAGE_BYTES {
+        let raw_len = (img.data.len() / 4 * 3) as u64;
+        if raw_len > pi_carry_protocol::MAX_IMAGE_BYTES as u64 {
             return Err(CoreError::InvalidArgument(format!(
                 "第 {} 张图片约 {} MiB，超过单图上限 {} MiB",
                 i + 1,
@@ -1717,9 +2266,9 @@ fn validate_images(images: &[ImagePayload]) -> Result<()> {
                 pi_carry_protocol::MAX_IMAGE_BYTES / (1024 * 1024)
             )));
         }
-        total += raw_len;
+        total = total.saturating_add(raw_len);
     }
-    if total > pi_carry_protocol::MAX_PROMPT_IMAGE_BYTES {
+    if total > pi_carry_protocol::MAX_PROMPT_IMAGE_BYTES as u64 {
         return Err(CoreError::InvalidArgument(format!(
             "本条消息图片合计约 {} MiB，超过上限 {} MiB",
             total / (1024 * 1024),
@@ -1805,16 +2354,26 @@ fn read_session_messages(path: &Path) -> Vec<Value> {
         return out;
     };
     // 快照必须整读：以前只读末尾 1 MiB，长会话在手机上重建时前半段历史被无声
-    // 截断（journal 只保留最近事件，回放补不回来）。这里用流式 BufReader 逐行读，
-    // 内存只与保留的消息条数成正比，不会把整份文件读成一个大字符串。
-    for line in BufReader::new(file).lines() {
-        let Ok(line) = line else { continue };
+    // 截断（journal 只保留最近事件，回放补不回来）。这里逐行流式读，单行上限
+    // 8 MiB：0.2 的原图内联会让一行达到数十 MB，整行进 String 会直接吃爆内存（B-10）。
+    let mut reader = BufReader::new(file);
+    loop {
+        let Some((bytes, truncated)) = read_line_prefix(&mut reader, MAX_JSONL_LINE).ok().flatten()
+        else {
+            break;
+        };
+        let line = String::from_utf8_lossy(&bytes);
         if !looks_like_message_line(&line) {
             continue;
         }
-        let Ok(v) = serde_json::from_str::<Value>(&line) else {
-            continue;
+        let entry = if truncated {
+            // 保留 entry id/parentId/role，让客户端的历史合并与分支树不断链；
+            // 图片内容降级成占位，避免把超长 base64 塞进快照。
+            truncated_entry(&line)
+        } else {
+            serde_json::from_str::<Value>(&line).ok()
         };
+        let Some(v) = entry else { continue };
         if let Some(msg) = entry_to_message(&v) {
             out.push(msg);
             if out.len() > MAX_SNAPSHOT_MESSAGES {
@@ -1824,6 +2383,188 @@ fn read_session_messages(path: &Path) -> Vec<Value> {
         }
     }
     out
+}
+
+/// 有上限地读一行，超出 `limit` 的部分丢弃；返回（保留的前缀, 是否被截断）。
+/// 保留前缀是为了从里面抢救 entry id，让截断的消息仍能参与历史合并。
+fn read_line_prefix<R: BufRead>(
+    reader: &mut R,
+    limit: usize,
+) -> std::io::Result<Option<(Vec<u8>, bool)>> {
+    let mut out = Vec::new();
+    let mut truncated = false;
+    let mut any = false;
+    loop {
+        let buf = reader.fill_buf()?;
+        if buf.is_empty() {
+            if !any {
+                return Ok(None);
+            }
+            break;
+        }
+        any = true;
+        if let Some(end) = buf.iter().position(|b| *b == b'\n') {
+            if !truncated {
+                if out.len() + end <= limit {
+                    out.extend_from_slice(&buf[..end]);
+                } else {
+                    truncated = true;
+                }
+            }
+            reader.consume(end + 1);
+            break;
+        }
+        let len = buf.len();
+        if !truncated {
+            if out.len() + len <= limit {
+                out.extend_from_slice(buf);
+            } else {
+                truncated = true;
+            }
+        }
+        reader.consume(len);
+    }
+    Ok(Some((out, truncated)))
+}
+
+/// 从（可能被截断的）JSON 前缀里抓顶层字符串字段。
+fn json_string_field(text: &str, key: &str) -> Option<String> {
+    let pat = format!("\"{key}\"");
+    let mut from = 0;
+    while let Some(pos) = text[from..].find(&pat) {
+        let start = from + pos + pat.len();
+        let rest = text[start..].trim_start();
+        let Some(rest) = rest.strip_prefix(':') else {
+            from = start;
+            continue;
+        };
+        let rest = rest.trim_start();
+        let Some(rest) = rest.strip_prefix('"') else {
+            from = start;
+            continue;
+        };
+        let end = rest.find('"')?;
+        return Some(rest[..end].to_string());
+    }
+    None
+}
+
+fn json_u64_field(text: &str, key: &str) -> Option<u64> {
+    let pat = format!("\"{key}\"");
+    let pos = text.find(&pat)? + pat.len();
+    let rest = text[pos..].trim_start().strip_prefix(':')?.trim_start();
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
+}
+
+/// 8 MiB 截断的行可能来不及出现 `size`，但内联 data 的长度足以估算原图大小。
+/// 只用于客户端占位文案，不参与任何配额计算。
+fn truncated_image_size(prefix: &str) -> u64 {
+    if let Some(size) = json_u64_field(prefix, "size") {
+        return size;
+    }
+    let Some(start) = prefix.find("\"data\":\"") else {
+        return 0;
+    };
+    let encoded = prefix[start + 8..]
+        .bytes()
+        .take_while(|b| b.is_ascii_alphanumeric() || *b == b'+' || *b == b'/' || *b == b'=')
+        .count() as u64;
+    encoded.saturating_mul(3) / 4
+}
+
+/// 单行被 8 MiB 截断时 blobId 已在 data 之前，能从进行中的 JSON 前缀抢救回来，
+/// 让客户端仍可从 blob 库渲染，而不是永久显示“图片未加载”（B-01）。
+fn salvage_blob_images(prefix: &str) -> Vec<Value> {
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(rel) = prefix[from..].find("\"blobId\"") {
+        let start = from + rel;
+        let Some(id) = json_string_field(&prefix[start..], "blobId") else {
+            from = start + 8;
+            continue;
+        };
+        if id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit()) {
+            let tail = &prefix[start..];
+            let mime = json_string_field(tail, "mimeType").unwrap_or_else(|| "image/jpeg".into());
+            let size = json_u64_field(tail, "size").unwrap_or(0);
+            out.push(json!({
+                "type": "image",
+                "blobId": id,
+                "mimeType": mime,
+                "size": size
+            }));
+        }
+        from = start + 8 + id.len();
+    }
+    out
+}
+
+fn truncated_entry(prefix: &str) -> Option<Value> {
+    let id = json_string_field(prefix, "id")?;
+    let parent = json_string_field(prefix, "parentId");
+    let timestamp = json_string_field(prefix, "timestamp");
+    let role = json_string_field(prefix, "role").unwrap_or_else(|| "user".into());
+    let mut content = salvage_blob_images(prefix);
+    if content.is_empty() {
+        content.push(json!({
+            "type": "image",
+            "unavailable": true,
+            "size": truncated_image_size(prefix),
+            "reason": "消息超过 8 MiB，图片未加载"
+        }));
+    }
+    Some(json!({
+        "type": "message",
+        "id": id,
+        "parentId": parent,
+        "timestamp": timestamp,
+        "message": {
+            "role": role,
+            "timestamp": timestamp,
+            "content": content
+        }
+    }))
+}
+
+/// entries 面板只需要 id/父子关系与一小段预览，不能把整条历史图搬进去。
+fn entry_preview(entry: &Value) -> Value {
+    let msg = entry.get("message");
+    let role = msg
+        .and_then(|m| m.get("role"))
+        .cloned()
+        .unwrap_or_else(|| json!("user"));
+    let mut preview = String::new();
+    if let Some(items) = msg.and_then(|m| m.get("content")).and_then(Value::as_array) {
+        for item in items {
+            match item.get("type").and_then(Value::as_str) {
+                Some("text") => {
+                    if let Some(t) = item.get("text").and_then(Value::as_str) {
+                        if !preview.is_empty() {
+                            preview.push(' ');
+                        }
+                        preview.push_str(t);
+                    }
+                }
+                Some("image") => preview.push_str("[图片]"),
+                _ => {}
+            }
+            if preview.chars().count() > 160 {
+                break;
+            }
+        }
+    }
+    let preview: String = preview.chars().take(160).collect();
+    json!({
+        "type": "message",
+        "id": entry.get("id").cloned().unwrap_or(Value::Null),
+        "parentId": entry.get("parentId").cloned().unwrap_or(Value::Null),
+        "timestamp": entry.get("timestamp").cloned().unwrap_or(Value::Null),
+        "message": {
+            "role": role,
+            "content": [{"type": "text", "text": preview}],
+        }
+    })
 }
 
 /// 廉价类型预筛：整读文件时先做子串检查，避免对每个非消息行都跑一遍 JSON 解析。
@@ -2030,6 +2771,7 @@ fn scan_one(path: &Path) -> Result<Option<SessionSummary>> {
         last_source: String::new(),
         writable: true,
         parent_id,
+        migrated_to: None,
     }))
 }
 
@@ -2201,7 +2943,15 @@ mod tests {
     /// 快照消息数上限：超长会话保留最新一段，不得让一个帧撑爆。
     #[test]
     fn snapshot_is_capped_but_keeps_the_newest_messages() {
-        assert!(MAX_SNAPSHOT_MESSAGES > 0);
+        let huge = json!({
+            "id": "m1",
+            "message": {"role": "user", "content": "x".repeat(MAX_SNAPSHOT_BYTES + 1024)}
+        });
+        let out = bound_snapshot_messages(vec![huge]);
+        assert_eq!(out.len(), 1, "唯一一条消息也要保留 id/role");
+        assert_eq!(out[0]["id"], "m1");
+        let size = serde_json::to_vec(&out[0]).unwrap().len();
+        assert!(size <= MAX_SNAPSHOT_BYTES, "单条消息仍超预算: {size}");
     }
 
     #[test]
@@ -2663,6 +3413,56 @@ mod tests {
             "usage": {"input": 1, "output": 1, "cost": 0.25}
         }));
         assert!((stats.cost - 0.25).abs() < 1e-9);
+    }
+
+    fn image(blob: &str, size: u64) -> ImagePayload {
+        ImagePayload {
+            r#type: "image".into(),
+            data: String::new(),
+            blob_id: Some(blob.into()),
+            mime_type: "image/png".into(),
+            width: 0,
+            height: 0,
+            size,
+        }
+    }
+
+    #[test]
+    fn validate_images_accepts_ten_blob_images() {
+        let images: Vec<_> = (0..10).map(|i| image(&format!("{i:064x}"), 1024)).collect();
+        assert!(validate_images(&images).is_ok());
+        let too_many: Vec<_> = (0..11).map(|i| image(&format!("{i:064x}"), 1024)).collect();
+        assert!(validate_images(&too_many)
+            .unwrap_err()
+            .to_string()
+            .contains("最多 10 张"));
+    }
+
+    #[test]
+    fn validate_images_enforces_blob_size_and_missing_data() {
+        let huge = pi_carry_protocol::MAX_IMAGE_BYTES as u64 + 1;
+        let err = validate_images(&[image(&"a".repeat(64), huge)]).unwrap_err();
+        assert!(err.to_string().contains("超过单图上限"), "{err}");
+
+        let mut inline = image("", 0);
+        inline.blob_id = None;
+        let err = validate_images(&[inline]).unwrap_err();
+        assert!(err.to_string().contains("缺少图片数据"), "{err}");
+    }
+
+    #[test]
+    fn truncated_entry_salvages_blob_id_from_prefix() {
+        let sha = "a".repeat(64);
+        // 模拟被 8 MiB 截断在 data 中间的行：blobId/size/mimeType 已在 data 之前。
+        let prefix = format!(
+            "{{\"type\":\"message\",\"id\":\"m9\",\"parentId\":\"m8\",\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"image\",\"blobId\":\"{sha}\",\"size\":12345,\"mimeType\":\"image/png\",\"data\":\"AAAA"
+        );
+        let entry = truncated_entry(&prefix).unwrap();
+        let content = &entry["message"]["content"][0];
+        assert_eq!(content["blobId"], json!(sha));
+        assert_eq!(content["mimeType"], json!("image/png"));
+        assert_eq!(content["size"], json!(12345));
+        assert!(content.get("unavailable").is_none());
     }
 
     #[test]

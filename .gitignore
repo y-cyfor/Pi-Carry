@@ -1,7 +1,9 @@
 # 项目内部资料，不进入开源仓库
 /mvp.md
 /plan/
-/design/
+# 设计稿默认不公开；desktop-ui 是 Tauri 生产前端，必须入库
+/design/*
+!/design/desktop-ui/
 /.pi/
 
 # docs 目录为内部文档，不发布到开源仓库

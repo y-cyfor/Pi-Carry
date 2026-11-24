@@ -216,6 +216,13 @@ fun PiCarryAppRoot(
                             nodeId = entry.arguments?.getString("nodeId").orEmpty(),
                             sessionId = entry.arguments?.getString("sessionId").orEmpty(),
                             onBack = { nav.popBackStack() },
+                            onMigrated = { newSessionId ->
+                                val node = entry.arguments?.getString("nodeId").orEmpty()
+                                val old = entry.arguments?.getString("sessionId").orEmpty()
+                                nav.navigate(Routes.chat(node, newSessionId)) {
+                                    popUpTo(Routes.chat(node, old)) { inclusive = true }
+                                }
+                            },
                         )
                     }
                     composable(
