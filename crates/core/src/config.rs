@@ -56,6 +56,9 @@ pub struct TransportConfig {
     pub bind_addr: Option<String>,
     pub enable_mdns: bool,
     pub max_devices: usize,
+    /// 强制本机确认：开启后必须先在电脑托盘点「允许」才能完成配对。
+    /// 默认关（同局域网下二维码只在电脑屏幕上显示）；在共享桌面/投屏/录屏环境建议开启。
+    pub require_local_confirm: bool,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -68,6 +71,7 @@ impl Default for TransportConfig {
             bind_addr: None,
             enable_mdns: false,
             max_devices: pi_carry_protocol::MAX_DEVICES,
+            require_local_confirm: false,
             extra: BTreeMap::new(),
         }
     }
@@ -105,8 +109,13 @@ pub struct SessionsConfig {
     pub journal_max_events: u32,
     /// 默认给新设备的能力：read / control / full。
     pub default_capability: String,
-    /// 允许创建会话的工作区根目录；为空时仅允许当前用户主目录。
+    /// 允许创建会话的工作区根目录；为空时使用默认根（主目录 + 桥接进程的启动目录）。
+    /// 显式配置后只认这里的路径。任一情况下都不是「全盘放行」。
     pub allowed_roots: Vec<String>,
+    /// 显式允许加载**项目级可执行资源**（`.pi/extensions`、`.agents/skills`）的根目录。
+    /// 空（默认）表示一律传 `--no-approve`：手机端不会因为某个仓库带了 `.pi/extensions`
+    /// 就自动执行那里的代码。与 `allowedRoots` 分离：前者只需“能读文件”，后者是“能执行代码”。
+    pub trusted_roots: Vec<String>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -122,6 +131,7 @@ impl Default for SessionsConfig {
             journal_max_events: 10_000,
             default_capability: "full".into(),
             allowed_roots: Vec::new(),
+            trusted_roots: Vec::new(),
             extra: BTreeMap::new(),
         }
     }
@@ -226,13 +236,54 @@ impl Config {
                 "approvals.timeoutSecs 必须在 10..=3600".into(),
             ));
         }
+        // max_pending = 0 会让所有审批在插入前就被拒绝，等于关闭审批能力却看不出来。
+        if self.approvals.max_pending == 0 || self.approvals.max_pending > 1024 {
+            return Err(CoreError::Config(
+                "approvals.maxPending 必须在 1..=1024".into(),
+            ));
+        }
+        // journal 每会话上限过小会让 seq 归零，客户端水位会把新事件当成旧事件丢掉。
+        if self.sessions.journal_max_events < 100 {
+            return Err(CoreError::Config(
+                "sessions.journalMaxEvents 不能小于 100".into(),
+            ));
+        }
+        if self.sessions.journal_retention_days < 1 {
+            return Err(CoreError::Config(
+                "sessions.journalRetentionDays 不能小于 1".into(),
+            ));
+        }
+        if self.sessions.scan_limit == 0 || self.sessions.scan_limit > 5000 {
+            return Err(CoreError::Config(
+                "sessions.scanLimit 必须在 1..=5000".into(),
+            ));
+        }
         if !matches!(
             self.sessions.default_capability.as_str(),
             "read" | "control" | "full"
         ) {
             return Err(CoreError::Config(
-                "sessions.defaultCapability 必须是 read/control".into(),
+                "sessions.defaultCapability 必须是 read/control/full".into(),
             ));
+        }
+        // allowedRoots 为空表示「默认根」（家目录 + 当前目录）；一旦显式配置，
+        // 每项必须是绝对路径，否则相对路径会随进程 cwd 漂移、形同虚设。
+        for root in &self.sessions.allowed_roots {
+            if root.trim().is_empty() || !Path::new(root).is_absolute() {
+                return Err(CoreError::Config(format!(
+                    "sessions.allowedRoots 每项必须是绝对路径，实际 {root}"
+                )));
+            }
+        }
+        // trustedRoots 直接决定「是否给 pi 加 --approve」（等于信任项目里的可执行扩展），
+        // 相对路径会随进程 cwd 漂移，于是同一个配置在不同启动目录下给出不同的信任结果，
+        // 比 allowed_roots 更不能容忍，必须同样要求绝对路径。
+        for root in &self.sessions.trusted_roots {
+            if root.trim().is_empty() || !Path::new(root).is_absolute() {
+                return Err(CoreError::Config(format!(
+                    "sessions.trustedRoots 每项必须是绝对路径，实际 {root}"
+                )));
+            }
         }
         Ok(())
     }
@@ -314,17 +365,37 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    // tmp 名带 pid + 时间戳：并发写入（多进程/多线程）不会互相覆盖同一个临时文件。
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
     let tmp = path.with_extension(format!(
-        "{}.tmp-{}",
+        "{}.tmp-{}-{stamp}",
         path.extension().and_then(|s| s.to_str()).unwrap_or(""),
         std::process::id()
     ));
-    std::fs::write(&tmp, bytes)?;
-    // Windows 上 rename 覆盖已存在文件会失败，先移除目标。
-    if path.exists() {
-        std::fs::remove_file(path)?;
+    // 先写临时文件并 fsync：否则 rename 成功而数据仍在页缓存时断电，目标文件会变成 0 字节。
+    // 密码哈希、设备列表都走这个函数，丢一次就要重新配对。
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
     }
-    std::fs::rename(&tmp, path)?;
+    // 不先 remove 目标：那会留下一个「文件不存在」的窗口，进程这时崩溃就丢配置。
+    // Windows 的 std::fs::rename 不能覆盖已存在文件，失败时再退回删除重试。
+    if let Err(first) = std::fs::rename(&tmp, path) {
+        if path.exists() && std::fs::remove_file(path).is_ok() {
+            std::fs::rename(&tmp, path).map_err(|e| {
+                let _ = std::fs::remove_file(&tmp);
+                CoreError::from(e)
+            })?;
+        } else {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(CoreError::from(first));
+        }
+    }
     Ok(())
 }
 
@@ -334,7 +405,25 @@ fn restrict_permissions(path: &Path) {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        // secrets.json 里是设备密钥，Windows 默认继承父目录 ACL，其他本机用户可读。
+        // 用 icacls 关掉继承并只给当前用户：失败不致命（例如受限环境无 icacls）。
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let user = std::env::var("USERNAME").unwrap_or_default();
+        if !user.is_empty() {
+            let mut grant = std::process::Command::new("icacls");
+            grant
+                .arg(path)
+                .arg("/inheritance:r")
+                .arg("/grant:r")
+                .arg(format!("{user}:F"))
+                .creation_flags(CREATE_NO_WINDOW);
+            let _ = grant.output();
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     let _ = path;
 }
 
@@ -398,6 +487,52 @@ mod tests {
         assert!(cfg.validate().is_ok());
         cfg.ui.theme = "sepia".into();
         assert!(cfg.validate().is_err());
+    }
+
+    /// B-4：`trustedRoots` 直接决定是否给 pi 加 `--approve`（= 信任项目里的可执行扩展），
+    /// 相对路径会随进程 cwd 漂移，必须在加载时就拒绝。
+    #[test]
+    fn validate_rejects_relative_trusted_root() {
+        let mut cfg = Config::default();
+        cfg.sessions.trusted_roots = vec!["repo".into()];
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("sessions.trustedRoots"),
+            "错误文案必须指明是哪个字段: {err}"
+        );
+
+        // 空项同样拒绝：它会被当成「空路径」静默失效。
+        let mut cfg = Config::default();
+        cfg.sessions.trusted_roots = vec!["   ".into()];
+        assert!(cfg.validate().is_err());
+
+        // 绝对路径通过。
+        let mut cfg = Config::default();
+        cfg.sessions.trusted_roots = vec![std::env::temp_dir().display().to_string()];
+        cfg.validate().expect("绝对路径的 trustedRoots 必须通过");
+    }
+
+    #[test]
+    fn validate_rejects_degenerate_limits() {
+        // 这些值共同的效果是让功能“静默关闭”或让客户端水位失效，必须在加载时就拒绝。
+        let mut cfg = Config::default();
+        cfg.approvals.max_pending = 0;
+        assert!(cfg.validate().is_err());
+
+        let mut cfg = Config::default();
+        cfg.sessions.journal_max_events = 10;
+        assert!(cfg.validate().is_err());
+
+        let mut cfg = Config::default();
+        cfg.sessions.scan_limit = 0;
+        assert!(cfg.validate().is_err());
+
+        let mut cfg = Config::default();
+        cfg.sessions.journal_retention_days = 0;
+        assert!(cfg.validate().is_err());
+
+        // 默认值必须自身合法，否则用户首次启动就会失败。
+        assert!(Config::default().validate().is_ok());
     }
 
     #[test]

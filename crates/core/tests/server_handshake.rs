@@ -357,3 +357,337 @@ async fn same_client_key_reconnects_as_one_device_and_refreshes_name() {
     client.close().await;
     bridge.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn revoking_device_closes_its_existing_connection() {
+    // 吊销写在库里（托盘/CLI 都可能改库），既有连接必须在下一个心跳周期内断开，
+    // 而不是“连接不死、只是新请求被拒”。
+    let (_dir, bridge) = start_bridge().await;
+    let pairing = bridge.begin_pairing(None);
+    let socket = bridge.server.endpoint().bound_sockets()[0];
+    let client = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        .bind()
+        .await
+        .unwrap();
+    let addr = iroh::EndpointAddr::new(bridge.server.endpoint().id()).with_ip_addr(socket);
+    let conn = client.connect(addr, ALPN).await.unwrap();
+    let (mut send, mut recv) = conn.open_bi().await.unwrap();
+
+    let hello = call(
+        &mut send,
+        &mut recv,
+        "h1",
+        "hello",
+        serde_json::json!({
+            "protocol": PROTOCOL_VERSION,
+            "client": {"name": "待吊销手机", "platform": "android", "deviceClass": "phone"},
+            "token": pairing.token,
+        }),
+    )
+    .await;
+    assert!(
+        matches!(hello, ServerFrame::Response { ok: true, .. }),
+        "{hello:?}"
+    );
+    let device_id = bridge.store.list_devices().unwrap()[0].id.clone();
+    bridge
+        .store
+        .revoke_device(&device_id, "2026-11-19T08:00:00.000Z")
+        .unwrap();
+
+    let ping = ClientFrame::Ping { nonce: 1 };
+    write_frame(&mut send, &ping, MAX_CONTROL_FRAME)
+        .await
+        .unwrap();
+
+    let mut saw_revoked = false;
+    let mut closed = false;
+    // 不要用固定帧数：连接建立时可能已经排了若干事件帧，固定上限会在
+    // 事件较多时提前退出并误判为“未关闭”。改为循环到流结束或超时。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while std::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let read = tokio::time::timeout(remaining, read_frame(&mut recv, 4 * 1024 * 1024)).await;
+        match read {
+            Err(_) => break,
+            Ok(Ok(Some(bytes))) => {
+                let frame: ServerFrame = serde_json::from_slice(&bytes).unwrap();
+                if let ServerFrame::Event { event, .. } = frame {
+                    if event["type"] == "device.revoked" {
+                        saw_revoked = true;
+                    }
+                }
+            }
+            Ok(Ok(None)) | Ok(Err(_)) => {
+                closed = true;
+                break;
+            }
+        }
+    }
+    assert!(closed, "吊销后连接必须被服务端关闭");
+    assert!(saw_revoked, "关连接前应通知 device.revoked");
+
+    conn.close(0u8.into(), b"done");
+    client.close().await;
+    bridge.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn read_only_device_does_not_receive_ui_or_command_events() {
+    // 事件总线是全局广播；只读设备不该看到含完整工具参数/命令明文的载荷。
+    let (_dir, bridge) = start_bridge_with(|c| c.sessions.default_capability = "read".into()).await;
+    let pairing = bridge.begin_pairing(None);
+    let socket = bridge.server.endpoint().bound_sockets()[0];
+    let client = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        .bind()
+        .await
+        .unwrap();
+    let addr = iroh::EndpointAddr::new(bridge.server.endpoint().id()).with_ip_addr(socket);
+    let conn = client.connect(addr, ALPN).await.unwrap();
+    let (mut send, mut recv) = conn.open_bi().await.unwrap();
+
+    let hello = call(
+        &mut send,
+        &mut recv,
+        "h1",
+        "hello",
+        serde_json::json!({
+            "protocol": PROTOCOL_VERSION,
+            "client": {"name": "只读平板", "platform": "android", "deviceClass": "tablet"},
+            "token": pairing.token,
+        }),
+    )
+    .await;
+    match hello {
+        ServerFrame::Response { ok, payload, .. } => {
+            assert!(ok);
+            let resp: pi_carry_protocol::HelloResponse =
+                serde_json::from_value(payload.unwrap()).unwrap();
+            assert_eq!(resp.device.capability, "read");
+        }
+        other => panic!("期望 response，得到 {other:?}"),
+    }
+    // 等转发任务订阅上广播，否则事件可能发生在订阅之前。
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    bridge
+        .sessions
+        .emit_raw(
+            "s1",
+            serde_json::json!({
+                "type": "ui.requested",
+                "requestId": "q1",
+                "method": "select",
+                "title": "选一个",
+                "options": ["a", "b"],
+            }),
+        )
+        .unwrap();
+    // 审批事件：read 档仍应看到「有待审批」，但命令原文/参数/路径必须被裁掉。
+    bridge
+        .sessions
+        .emit_raw(
+            "s1",
+            serde_json::json!({
+                "type": "approval.requested",
+                "approval": {
+                    "id": "a1",
+                    "sessionId": "s1",
+                    "toolName": "bash",
+                    "summary": "改配置",
+                    "command": "rm -rf /etc/app",
+                    "args": {"file": "/etc/app/secret.env"},
+                    "path": "/etc/app/secret.env",
+                },
+            }),
+        )
+        .unwrap();
+    bridge
+        .sessions
+        .emit_raw(
+            "s1",
+            serde_json::json!({"type": "message.delta", "delta": "hello"}),
+        )
+        .unwrap();
+
+    let ping = ClientFrame::Request {
+        id: "p1".into(),
+        op: "node.status".into(),
+        payload: serde_json::json!({}),
+    };
+
+    fn has_type(events: &[serde_json::Value], want: &str) -> bool {
+        events.iter().any(|e| e["type"].as_str() == Some(want))
+    }
+    // 保留完整事件体而不只是类型：裁剪与否只能看载荷本身。
+    let mut seen: Vec<serde_json::Value> = Vec::new();
+    // 先把事件读出来再发请求：事件由独立的转发任务写 out_tx，控制响应由控制循环写，
+    // 两者先后无保证。旧写法直接发请求，偶发会遇到「响应先到、还没读到任何事件」的失败。
+    let wait_events = async {
+        while !has_type(&seen, "message.delta") {
+            let bytes = read_frame(&mut recv, 4 * 1024 * 1024)
+                .await
+                .unwrap()
+                .expect("连接提前关闭");
+            let frame: ServerFrame = serde_json::from_slice(&bytes).unwrap();
+            if let ServerFrame::Event { event, .. } = frame {
+                seen.push(event);
+            }
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), wait_events)
+        .await
+        .expect("等待转发事件超时");
+
+    write_frame(&mut send, &ping, MAX_CONTROL_FRAME)
+        .await
+        .unwrap();
+
+    loop {
+        let bytes = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            read_frame(&mut recv, 4 * 1024 * 1024),
+        )
+        .await
+        .expect("等待响应超时")
+        .unwrap()
+        .expect("连接提前关闭");
+        let frame: ServerFrame = serde_json::from_slice(&bytes).unwrap();
+        match frame {
+            ServerFrame::Event { event, .. } => seen.push(event),
+            ServerFrame::Response { id, .. } if id.as_deref() == Some("p1") => break,
+            _ => {}
+        }
+    }
+    assert!(
+        has_type(&seen, "message.delta"),
+        "普通事件仍应转发: {seen:?}"
+    );
+    assert!(
+        !has_type(&seen, "ui.requested"),
+        "只读设备不该收到 ui.requested: {seen:?}"
+    );
+    let approval = seen
+        .iter()
+        .find(|e| e["type"] == "approval.requested")
+        .unwrap_or_else(|| panic!("read 档仍应收到审批事件，只是没有命令原文: {seen:?}"));
+    for field in ["command", "args", "path"] {
+        assert!(
+            approval["approval"].get(field).is_none(),
+            "read 档收到的审批事件不得包含 {field}: {approval:?}"
+        );
+    }
+    assert_eq!(
+        approval["approval"]["summary"], "改配置",
+        "非隐私字段必须保留，否则客户端渲染不出审批卡"
+    );
+
+    conn.close(0u8.into(), b"done");
+    client.close().await;
+    bridge.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hello_and_status_expose_connection_method() {
+    // 需求 0.1.4-5：连接方式必须同时出现在 hello 响应与桌面端 node.status 里。
+    // 手机端首屏读 hello，桌面壳读 node.status，两条路径都要能拿到同一份快照。
+    let (_dir, bridge) = start_bridge().await;
+    let pairing = bridge.begin_pairing(None);
+    let socket = bridge.server.endpoint().bound_sockets()[0];
+    let client = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        .bind()
+        .await
+        .unwrap();
+    let addr = iroh::EndpointAddr::new(bridge.server.endpoint().id()).with_ip_addr(socket);
+    let conn = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        client.connect(addr, ALPN),
+    )
+    .await
+    .expect("connect 超时")
+    .expect("连接失败");
+    let (mut send, mut recv) = conn.open_bi().await.unwrap();
+
+    let hello = call(
+        &mut send,
+        &mut recv,
+        "h1",
+        "hello",
+        serde_json::json!({
+            "protocol": PROTOCOL_VERSION,
+            "client": {"name": "连接方式测试机", "platform": "android", "deviceClass": "phone"},
+            "token": pairing.token,
+        }),
+    )
+    .await;
+    match hello {
+        ServerFrame::Response {
+            ok, payload, error, ..
+        } => {
+            assert!(ok, "hello 失败: {error:?}");
+            let resp: pi_carry_protocol::HelloResponse =
+                serde_json::from_value(payload.unwrap()).unwrap();
+            let c = resp.connection.expect("hello 必须带 connection");
+            assert_eq!(c["type"], "lan", "回环连接应判为 lan");
+            assert_eq!(c["direct"], true);
+            assert!(
+                c["remoteAddr"].as_str().unwrap_or("").contains("127.0.0.1"),
+                "remoteAddr 应带真实对端地址: {c}"
+            );
+        }
+        other => panic!("期望 response，得到 {other:?}"),
+    }
+
+    // 远程 node.status 只返回节点信息；设备列表走 bridge 的 node_status（桌面壳路径）。
+    let status = call(
+        &mut send,
+        &mut recv,
+        "s1",
+        "node.status",
+        serde_json::json!({}),
+    )
+    .await;
+    match status {
+        ServerFrame::Response { ok, payload, .. } => {
+            assert!(ok);
+            let v = payload.unwrap();
+            assert_eq!(v["node"]["name"], "test-node");
+            let caps: Vec<&str> = v["node"]["capabilities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|c| c.as_str())
+                .collect();
+            assert!(caps.contains(&"connection-info"), "能力位缺失: {caps:?}");
+            assert!(caps.contains(&"fs-browse"), "能力位缺失: {caps:?}");
+            assert!(caps.contains(&"run-summary"), "能力位缺失: {caps:?}");
+        }
+        other => panic!("期望 response，得到 {other:?}"),
+    }
+
+    // 桌面壳读的 node_status 必须把 connection 合并进 devices。
+    let v = bridge.node_status();
+    let devices = v["devices"].as_array().expect("devices 必须是数组");
+    assert_eq!(devices.len(), 1);
+    let c = &devices[0]["connection"];
+    assert!(c.is_object(), "在线设备必须带 connection: {devices:?}");
+    assert_eq!(c["type"], "lan");
+
+    // 断开后连快速照必须清掉，否则桌面会长期显示一条已失效的路径。
+    let device_id = bridge.store.list_devices().unwrap()[0].id.clone();
+    conn.close(0u8.into(), b"done");
+    client.close().await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if bridge.server.conn_infos().get(&device_id).is_none() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        bridge.server.conn_infos().get(&device_id).is_none(),
+        "连接关闭后必须清掉连接方式快照"
+    );
+
+    bridge.shutdown().await;
+}

@@ -35,6 +35,8 @@ enum Command {
     /// 显示本机节点、设备与会话概况（不联网）。
     Status,
     /// 生成一次性配对码并等待手机连接。
+    /// 与 `serve` 等价：serve 本身就会打印配对信息并保持运行，
+    /// 所以这里不再单独实现一份，避免两处行为漂移。
     Pair,
     /// 查看已配对设备。
     Devices,
@@ -58,6 +60,8 @@ async fn main() -> anyhow::Result<()> {
         .init();
     match cli.command.unwrap_or(Command::Serve { json: false }) {
         Command::Serve { json } => serve(json).await,
+        // Pair 只是 Serve 的别名：保留这个名字是为了让“我现在要配对”这一步
+        // 在 `--help` 里可发现，但底层行为必须只有一份实现。
         Command::Pair => serve(false).await,
         Command::Status => status(),
         Command::Devices => devices(),
@@ -81,7 +85,8 @@ async fn serve(json: bool) -> anyhow::Result<()> {
         println!("{}", serde_json::to_string(&line)?);
         std::io::stdout().flush()?;
     }
-    bridge.clone().run_until_signal().await?;
+    // json 模式下 stdout 只留那一行结果：配对信息改走 stderr。
+    bridge.clone().run_until_signal_announcing(!json).await?;
     Ok(())
 }
 
@@ -155,7 +160,7 @@ fn doctor() -> anyhow::Result<()> {
         {"name": "pi 可执行文件", "ok": pi.is_ok(), "detail": pi.map(|p| p.display().to_string()).unwrap_or_else(|e| e.to_string())},
         {"name": "会话目录", "ok": sessions.is_dir(), "detail": sessions},
         {"name": "配置解析", "ok": config.validate().is_ok(), "detail": config.node.name},
-        {"name": "relay 模式", "ok": matches!(config.transport.relay_mode.as_str(), "n0"|"disabled"|"custom"), "detail": config.transport.relay_mode},
+        {"name": "relay 模式", "ok": matches!(config.transport.relay_mode.as_str(), "n0"|"default"|"disabled"|"custom"), "detail": config.transport.relay_mode},
     ]);
     println!("{}", serde_json::to_string_pretty(&checks)?);
     let ok = checks

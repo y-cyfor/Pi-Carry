@@ -1,4 +1,4 @@
-pi carry 0.1.3（Windows x64 便携版）
+pi carry 0.1.4（Windows x64 便携版）
 
 运行要求
 - Windows 10/11 x64

@@ -24,12 +24,17 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -68,12 +73,17 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -102,10 +112,28 @@ import dev.picarry.app.data.ChatMessage
 import dev.picarry.app.data.CommandItem
 import dev.picarry.app.data.LinkState
 import dev.picarry.app.data.ModelOption
+import dev.picarry.app.data.ModelPrefs
+import dev.picarry.app.data.ModelPrefsCodec
+import dev.picarry.app.data.ProviderGroup
 import dev.picarry.app.data.Session
 import dev.picarry.app.data.ToolCall
+import dev.picarry.app.data.Turn
+import dev.picarry.app.data.computeTurns
+import dev.picarry.app.data.displayName
+import dev.picarry.app.data.formatCost
+import dev.picarry.app.data.formatMs
+import dev.picarry.app.data.formatPercent
+import dev.picarry.app.data.formatSpeed
+import dev.picarry.app.data.formatTokens
+import dev.picarry.app.data.defaultModelFor
+import dev.picarry.app.data.defaultThinkingLevel
+import dev.picarry.app.data.groupModelsByProvider
+import dev.picarry.app.data.modelPillText
+import dev.picarry.app.data.thinkingLabel
+import dev.picarry.app.data.withCurrentModel
 import dev.picarry.app.ui.components.CarryCard
 import dev.picarry.app.ui.components.MonoLabel
+import dev.picarry.app.ui.components.NullableStringSaver
 import dev.picarry.app.ui.components.Pill
 import dev.picarry.app.ui.components.riskColor
 import dev.picarry.app.ui.components.statusColor
@@ -126,18 +154,61 @@ import io.noties.markwon.Markwon
 import io.noties.markwon.core.MarkwonTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 
-private val fallbackModels = listOf(
-    ModelOption("anthropic", "claude-sonnet-4-5", "Claude Sonnet 4.5", "200k ctx", "$3 / $15"),
-    ModelOption("anthropic", "claude-opus-4-1", "Claude Opus 4.1", "200k ctx", "$15 / $75"),
-    ModelOption("openai", "gpt-5.1-codex", "GPT-5.1 Codex", "272k ctx", "$1.25 / $10"),
-    ModelOption("google", "gemini-2.5-pro", "Gemini 2.5 Pro", "1M ctx", "$1.25 / $10"),
+/**
+ * 待发图片的 base64 上限（字符数）。
+ *
+ * 来历：ImageCompressor 把长边压到 1568px、JPEG 质量 85，典型手机照片编码后约 300–700K 字符，
+ * 细节丰富的夜景/文字图可到 1.5M。旧上限 200_000 低于绝大多数照片，切屏/旋转后图片被静默丢掉。
+ * 这里取 4_000_000 字符（对应约 3MB 原始图片），既能装下所有常规照片，又不会把 state 撑得离谱；
+ * 但 rememberSaveable 的 state 最终随 savedInstanceState 过 Binder，超过上限时仍不能硬塞，
+ * 所以超限不再是静默丢弃，而是记一个标记并在界面上提示用户重新选择（见 [DROPPED_IMAGE_MARKER]）。
+ */
+internal const val MAX_SAVED_IMAGE_CHARS = 4_000_000
+
+/** 超过 [MAX_SAVED_IMAGE_CHARS] 时不能写进 Bundle，只能丢弃：重建后靠这个标记给出可见提示。 */
+internal const val DROPPED_IMAGE_MARKER = "dropped-for-size"
+
+/**
+ * 流式文本的 Markdown 渲染间隔。
+ *
+ * 每个 delta 都全量 `markwon.setMarkdown` 是 O(n²)；长回复（代码块/表格）会明显掉帧。
+ * 80ms 与 bridge 侧的 delta 合并节奏（50–80ms）对齐：再快也不会有新内容，再慢就开始“打字卡顿”。
+ */
+private const val STREAM_RENDER_INTERVAL_MS = 80L
+
+/**
+ * 待发图片的可保存状态。
+ *
+ * 图片本身放 triple；[droppedForSize] 记录「上次保存时因超限被丢弃」，
+ * 这样旋转后能弹一句可见提示，而不是让图片悄无声息地消失。
+ */
+internal class PendingImageState(
+    val image: Triple<String, String, String>? = null,
+    val droppedForSize: Boolean = false,
 )
-private val fallbackThinkingLevels = listOf("off", "minimal", "low", "medium", "high", "xhigh", "max")
+
+internal val PendingImageSaver: Saver<PendingImageState?, List<String>> = Saver(
+    save = { state ->
+        val image = state?.image ?: return@Saver null
+        if (image.second.length > MAX_SAVED_IMAGE_CHARS) listOf(DROPPED_IMAGE_MARKER)
+        else listOf("kept", image.first, image.second, image.third)
+    },
+    restore = { saved ->
+        when {
+            saved.size == 4 && saved[0] == "kept" ->
+                PendingImageState(Triple(saved[1], saved[2], saved[3]))
+            saved.size == 1 && saved[0] == DROPPED_IMAGE_MARKER ->
+                PendingImageState(droppedForSize = true)
+            else -> null
+        }
+    },
+)
 
 private val commands = listOf(
     CommandItem("compact", "压缩上下文，释放 token 空间"),
@@ -164,26 +235,79 @@ fun ChatScreen(repo: CarryRepository, nodeId: String, sessionId: String, onBack:
     val key = repo.sessionKey(nodeId, sessionId)
     val messages = allMessages[key].orEmpty()
     val pending = approvals.filter { it.sessionId == sessionId && it.state == "pending" }
-    val models = catalogs[key].orEmpty().ifEmpty { fallbackModels }
-    val levels = levelCatalogs[key].orEmpty().ifEmpty { fallbackThinkingLevels }
+    // 模型列表以节点为准：本地硬编码的价格表会过期，节点返回空时更不该假装有模型。
+    val models = catalogs[key].orEmpty()
+    // 思考等级同样以节点为准：以前这里兜底成一份硬编码档位表，chips 看起来全都可点，
+    // 点了必然 `thinking.set` 失败。现在把空表如实传下去，由选择器显示「不可用 + 重试」。
+    val levels = levelCatalogs[key].orEmpty()
     val run = runInfo[key]
-    val currentModel = (run?.get("model") as? kotlinx.serialization.json.JsonObject)
-        ?.get("id")?.jsonPrimitive?.contentOrNull.orEmpty()
+    val runModel = run?.get("model") as? kotlinx.serialization.json.JsonObject
+    val currentProvider = runModel?.get("provider")?.jsonPrimitive?.contentOrNull.orEmpty()
+    val currentModelId = runModel?.get("id")?.jsonPrimitive?.contentOrNull.orEmpty()
+    // 复合键：不同 provider 可能有同名 id，只比 id 会误勾选。老旧节点没有 provider 时退化为只比 id。
+    val currentKey = if (currentProvider.isBlank()) "" else "$currentProvider|$currentModelId"
+    fun isCurrent(m: ModelOption) = if (currentKey.isBlank()) m.id == currentModelId else m.key == currentKey
+    val currentName = models.firstOrNull(::isCurrent)?.name ?: currentModelId
     val currentThinking = (run?.get("thinkingLevel") ?: run?.get("thinking"))?.jsonPrimitive?.contentOrNull ?: "high"
+    // 每轮总结走 run.summary（权威）与历史消息推导（冷数据）两条路，合成后按消息 id 索引。
+    val summaries by repo.runSummaries.collectAsState()
+    val turns = remember(messages, summaries) { computeTurns(messages, summaries) }
+    val turnByAnchor = remember(turns) { turns.associateBy { it.anchorMessageId } }
+    // 轨迹面板也是「用户正在看的弹层」：只存锚点消息 id 而不是 Turn 本身（不可序列化），
+    // 重建后从 turns 里找回；该轮已被列表淘汰时自然回退成关闭，语义正确。
+    var openTurnAnchor by rememberSaveable(stateSaver = NullableStringSaver) { mutableStateOf<String?>(null) }
+    val openTurn = remember(openTurnAnchor, turns) { turns.firstOrNull { it.anchorMessageId == openTurnAnchor } }
 
-    var text by remember { mutableStateOf("") }
-    var mode by remember { mutableStateOf("auto") }
-    var showModels by remember { mutableStateOf(false) }
-    var showCommands by remember { mutableStateOf(false) }
+    // 草稿/模式/待发图片都要跨旋转与进程重建：长 prompt 和已压缩图片丢了就是直接回归。
+    var text by rememberSaveable { mutableStateOf("") }
+    var mode by rememberSaveable { mutableStateOf("auto") }
+    // 两个 sheet 是用户正在看的弹层，旋转后重建等于把刚打开的列表吞掉；
+    // 下拉菜单（showMenu）属于瞬时交互，重建后关掉更符合预期，故仍用 remember。
+    var showModels by rememberSaveable { mutableStateOf(false) }
+    var showCommands by rememberSaveable { mutableStateOf(false) }
     var showMenu by remember { mutableStateOf(false) }
-    var openApproval by remember { mutableStateOf<Approval?>(null) }
-    var pendingImage by remember { mutableStateOf<Triple<String, String, String>?>(null) }
+    // 弹窗只记录审批 id：旋转后按 id 从仓库状态恢复，审批被超时/其它设备解决时对话框自然消失。
+    var openApprovalId by rememberSaveable(stateSaver = NullableStringSaver) { mutableStateOf<String?>(null) }
+    var pendingImageState by rememberSaveable(stateSaver = PendingImageSaver) { mutableStateOf<PendingImageState?>(null) }
+    // 编辑器与外发都只看图片本身；超限丢图的信息单独提成可见错误。
+    val pendingImage = pendingImageState?.image
     var imageError by remember { mutableStateOf<String?>(null) }
+    // 旋转/重建后图片因超限被丢：立刻给出中文提示，不能让用户以为图片还在。
+    LaunchedEffect(pendingImageState?.droppedForSize) {
+        if (pendingImageState?.droppedForSize == true) {
+            imageError = "图片过大，未能保留在待发区，请重新选择（建议先裁剪）"
+            pendingImageState = null
+        }
+    }
+    var sentTick by remember { mutableStateOf(0) }
+    // 进入会话时先强跟一次底部（历史快照到达后列表本就该停在最新），之后才看是否接近底部。
+    // 必须跨旋转保留：复位成 null 会让「首次进入」的强制滚动条件重新成立，把用户上滑阅读的位置拽回底部。
+    var followedSession by rememberSaveable(stateSaver = NullableStringSaver) { mutableStateOf<String?>(null) }
+    // 「用户是否想跟着最新内容」的粘性开关：旋转后 nearBottom 会因为列表还没布局而短暂为 true，
+    // 直接拿它当滚动条件会无条件滚到底，所以把结论单独存成可保存状态。
+    var stickBottom by rememberSaveable { mutableStateOf(true) }
+    val openApproval = openApprovalId?.let { id -> approvals.firstOrNull { it.id == id && it.state == "pending" } }
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
     val listState = rememberLazyListState()
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val scope = rememberCoroutineScope()
+    // 只有接近底部才跟随新内容；用户上滑阅读历史时不再被拽回底部。
+    val nearBottom by remember {
+        derivedStateOf {
+            val info = listState.layoutInfo
+            val last = info.visibleItemsInfo.lastOrNull()?.index ?: -1
+            info.totalItemsCount == 0 || last >= info.totalItemsCount - 2
+        }
+    }
+    // 空布局时 nearBottom 恒为 true（见上），若此时回写会把用户的上滑阅读状态冲掉，
+    // 所以只在列表真的有 item 之后才把 nearBottom 的结论同步进 stickBottom。
+    // 用 snapshotFlow 而不是把这些值当 LaunchedEffect 的 key：layoutInfo 每帧都会变，
+    // 在组合期直接读会拉高重组频率，这里只在它真变化时收一次回调。
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.layoutInfo.totalItemsCount to nearBottom }
+            .collect { (count, bottom) -> if (count > 0) stickBottom = bottom }
+    }
 
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
@@ -191,7 +315,7 @@ fun ChatScreen(repo: CarryRepository, nodeId: String, sessionId: String, onBack:
         scope.launch {
             val result = withContext(Dispatchers.Default) { runCatching { ImageCompressor.compress(context, uri) } }
             result.onSuccess { (mime, data) ->
-                pendingImage = Triple(mime, data, "image")
+                pendingImageState = PendingImageState(Triple(mime, data, "image"))
                 imageError = null
             }.onFailure { imageError = it.message ?: "图片处理失败" }
         }
@@ -204,10 +328,22 @@ fun ChatScreen(repo: CarryRepository, nodeId: String, sessionId: String, onBack:
     }
 
     LaunchedEffect(nodeId, sessionId) { repo.openSession(nodeId, sessionId) }
-    LaunchedEffect(messages.size, messages.lastOrNull()?.text?.length, pending.size) {
-        if (messages.isNotEmpty()) {
+    LaunchedEffect(
+        messages.size,
+        messages.lastOrNull()?.text?.length,
+        messages.lastOrNull()?.thinking?.length,
+        pending.size,
+    ) {
+        if (messages.isEmpty()) return@LaunchedEffect
+        if (stickBottom || followedSession != sessionId) {
             runCatching { listState.animateScrollToItem(messages.size + pending.size) }
+            followedSession = sessionId
         }
+    }
+    // 自己发送时无论当前滚动位置都回到底部，否则看不到刚发出的消息。
+    LaunchedEffect(sentTick) {
+        if (sentTick == 0) return@LaunchedEffect
+        runCatching { listState.animateScrollToItem(messages.size + pending.size) }
     }
 
     Column(Modifier.fillMaxSize().statusBarsPadding().imePadding()) {
@@ -244,7 +380,9 @@ fun ChatScreen(repo: CarryRepository, nodeId: String, sessionId: String, onBack:
                     repo.compact(nodeId, sessionId); showMenu = false
                 }, leadingIcon = { Icon(Icons.Outlined.Tune, null, tint = TextMuted) })
                 DropdownMenuItem(text = { Text("关闭会话") }, onClick = {
-                    repo.closeSession(nodeId, sessionId); showMenu = false; onBack()
+                    showMenu = false
+                    // 请求成功才返回列表；失败留在会话内，错误由仓库写入聊天流的提示气泡，可直接重试。
+                    repo.closeSession(nodeId, sessionId) { onBack() }
                 }, leadingIcon = { Icon(Icons.Outlined.Close, null, tint = Rose) })
             }
         }
@@ -260,11 +398,19 @@ fun ChatScreen(repo: CarryRepository, nodeId: String, sessionId: String, onBack:
                 filled = true,
             )
             Pill(
-                "模型 · ${models.firstOrNull { it.id == currentModel }?.name ?: currentModel.ifBlank { "默认" }}",
+                "模型 · " + modelPillText(currentProvider, currentName.ifBlank { "默认" }),
                 Violet,
             )
             Pill("thinking · $currentThinking", Cyan)
-            MonoLabel(session?.cwd?.substringAfterLast('/')?.ifBlank { "~" } ?: "~", color = TextMuted)
+            // 末段截取必须认反斜杠（Windows 路径），且不能走 MonoLabel：那里会 uppercase，
+            // `C:\\Users\\me\\Project` 会变成 `C:\\USERS\\ME\\PROJECT` 且截不出末段（U-05）。
+            Text(
+                displayName(session?.cwd.orEmpty()).ifBlank { "~" },
+                style = MaterialTheme.typography.labelSmall,
+                color = TextMuted,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
 
         if (session?.writable == false) {
@@ -290,9 +436,13 @@ fun ChatScreen(repo: CarryRepository, nodeId: String, sessionId: String, onBack:
                     "system" -> SystemBubble(msg)
                     else -> AssistantBlock(msg)
                 }
+                // 总结行插在本轮最后一条消息之后（任意角色）：用户说话后也能一眼看到刚才那轮花了多少。
+                turnByAnchor[msg.id]?.let { turn ->
+                    TurnSummaryRow(turn = turn, onClick = { openTurnAnchor = turn.anchorMessageId })
+                }
             }
             items(pending, key = { "ap-${it.id}" }) { approval ->
-                ApprovalCard(approval) { openApproval = approval }
+                ApprovalCard(approval) { openApprovalId = approval.id }
             }
             if (messages.isEmpty() && pending.isEmpty()) {
                 item {
@@ -315,13 +465,14 @@ fun ChatScreen(repo: CarryRepository, nodeId: String, sessionId: String, onBack:
             pendingImage = pendingImage,
             imageError = imageError,
             onPickImage = { imagePicker.launch("image/*") },
-            onClearImage = { pendingImage = null },
+            onClearImage = { pendingImageState = null },
             onCommands = { showCommands = true },
             onModels = { showModels = true },
             onSend = {
                 repo.sendPrompt(nodeId, sessionId, text.trim(), mode, listOfNotNull(pendingImage))
                 text = ""
-                pendingImage = null
+                pendingImageState = null
+                sentTick += 1
             },
             onStop = { repo.abort(nodeId, sessionId) },
         )
@@ -330,12 +481,14 @@ fun ChatScreen(repo: CarryRepository, nodeId: String, sessionId: String, onBack:
     if (showModels) {
         ModalBottomSheet(onDismissRequest = { showModels = false }, sheetState = sheetState, containerColor = Panel) {
             ModelSheet(
+                repo = repo,
+                nodeId = nodeId,
+                sessionId = sessionId,
                 models = models,
                 levels = levels,
-                currentModel = currentModel,
+                currentProvider = currentProvider,
+                currentModelId = currentModelId,
                 currentThinking = currentThinking,
-                onModel = { m -> repo.setModel(nodeId, sessionId, m.provider, m.id); showModels = false },
-                onThinking = { level -> repo.setThinking(nodeId, sessionId, level); showModels = false },
             )
         }
     }
@@ -351,13 +504,18 @@ fun ChatScreen(repo: CarryRepository, nodeId: String, sessionId: String, onBack:
             }
         }
     }
+    openTurn?.let { turn ->
+        ModalBottomSheet(onDismissRequest = { openTurnAnchor = null }, sheetState = sheetState, containerColor = Panel) {
+            TurnDetailSheet(turn)
+        }
+    }
     openApproval?.let { approval ->
         ApprovalDialog(
             approval = approval,
-            onDismiss = { openApproval = null },
+            onDismiss = { openApprovalId = null },
             onDecide = { decision, remember ->
                 repo.resolveApproval(nodeId, approval.id, decision, remember)
-                openApproval = null
+                openApprovalId = null
             },
         )
     }
@@ -427,7 +585,7 @@ private fun AssistantBlock(msg: ChatMessage) {
         }
         if (msg.text.isNotBlank()) {
             Spacer(Modifier.height(7.dp))
-            MarkdownBody(msg.text)
+            MarkdownBody(msg.text, streaming = msg.streaming)
         }
         if (msg.images.isNotEmpty()) {
             Spacer(Modifier.height(8.dp))
@@ -531,11 +689,27 @@ private fun summarizeToolArgs(args: String): String {
 }
 
 @Composable
-private fun MarkdownBody(text: String) {
+private fun MarkdownBody(text: String, streaming: Boolean = false) {
     val context = LocalContext.current
     val textColor = TextPrimary.toArgb()
     val codeBg = PanelHigh.toArgb()
     val linkColor = Violet.toArgb()
+    // 流式期间每个 delta 都会重组，若每次都 markwon.setMarkdown 全量重解析，
+    // 长度为 n 的回复是 O(n²) 开销（长代码块/表格时明显掉帧）。
+    // 这里把流式渲染节流到 STREAM_RENDER_INTERVAL_MS，非流式（最终消息）立即渲染。
+    var shown by remember { mutableStateOf(text) }
+    var lastRenderedAt by remember { mutableLongStateOf(0L) }
+    LaunchedEffect(text, streaming) {
+        if (!streaming) {
+            shown = text
+            return@LaunchedEffect
+        }
+        val nowMs = System.nanoTime() / 1_000_000
+        val wait = STREAM_RENDER_INTERVAL_MS - (nowMs - lastRenderedAt)
+        if (wait > 0) delay(wait)
+        lastRenderedAt = System.nanoTime() / 1_000_000
+        shown = text
+    }
     val markwon = remember(context, textColor, codeBg, linkColor) {
         Markwon.builder(context)
             .usePlugin(object : AbstractMarkwonPlugin() {
@@ -566,7 +740,12 @@ private fun MarkdownBody(text: String) {
         update = { view ->
             view.setTextColor(textColor)
             view.setLinkTextColor(linkColor)
-            markwon.setMarkdown(view, text)
+            // 文本没变就不要全量重解析 Markdown（节流后同一帧可能重复进入 update）。
+            val rendered = shown + "\u0000" + textColor + "\u0000" + linkColor
+            if (view.tag != rendered) {
+                view.tag = rendered
+                markwon.setMarkdown(view, shown)
+            }
         },
         modifier = Modifier.fillMaxWidth(),
     )
@@ -641,7 +820,7 @@ private fun ApprovalCard(approval: Approval, onClick: () -> Unit) {
             Spacer(Modifier.size(6.dp))
             Text("待审批 · ${approval.toolName}", style = MaterialTheme.typography.titleMedium, color = Rose)
             Spacer(Modifier.weight(1f))
-            MonoLabel("${remaining}s", color = Rose)
+            MonoLabel(if (remaining <= 0) "已超时" else "${remaining}s", color = if (remaining <= 0) TextMuted else Rose)
         }
         Spacer(Modifier.height(6.dp))
         Text(approval.summary.ifBlank { approval.command ?: "高风险操作" }, style = MaterialTheme.typography.bodyMedium, color = TextSecondary, maxLines = 2)
@@ -660,12 +839,15 @@ private fun ApprovalCard(approval: Approval, onClick: () -> Unit) {
 private fun ApprovalDialog(approval: Approval, onDismiss: () -> Unit, onDecide: (String, Boolean) -> Unit) {
     var rememberRule by remember { mutableStateOf(false) }
     var remaining by remember(approval.id) { mutableStateOf(approval.remainingSeconds) }
-    LaunchedEffect(approval.id) {
+    LaunchedEffect(approval.id, approval.remainingSeconds) {
+        remaining = approval.remainingSeconds
         while (remaining > 0) {
             delay(1000)
             remaining -= 1
         }
     }
+    // 服务端到点即超时拒绝：按钮必须一起失效，否则用户以为还能批准。
+    val expired = remaining <= 0
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = Panel,
@@ -674,12 +856,19 @@ private fun ApprovalDialog(approval: Approval, onDismiss: () -> Unit, onDecide: 
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text("待审批操作", style = MaterialTheme.typography.titleLarge, color = TextPrimary)
-                    MonoLabel("${approval.toolName} · ${approval.cwd.substringAfterLast('/')}", color = TextMuted)
+                    // 审批弹窗里的目录名同样不能大写（U-05）：路径大小写对用户是有意义的信息。
+                    Text(
+                        "${approval.toolName} · ${displayName(approval.cwd)}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TextMuted,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 }
                 Box(
                     Modifier.size(44.dp).clip(CircleShape).border(1.dp, Rose.copy(alpha = 0.6f), CircleShape),
                     contentAlignment = Alignment.Center,
-                ) { Text("$remaining", style = MaterialTheme.typography.labelLarge, color = Rose) }
+                ) { Text("$remaining", style = MaterialTheme.typography.labelLarge, color = if (expired) TextMuted else Rose) }
             }
         },
         text = {
@@ -712,20 +901,25 @@ private fun ApprovalDialog(approval: Approval, onDismiss: () -> Unit, onDecide: 
                 }
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    "本对话都允许：后续普通工具不再询问；rm -rf 等危险命令仍会逐次确认，重启 App/桥后恢复逐次审批。",
+                    if (expired) "已超时：服务端已按拒绝处理，请等待下一次审批请求。"
+                    else "本对话都允许：后续普通工具不再询问；rm -rf 等危险命令仍会逐次确认，重启 App/桥后恢复逐次审批。",
                     style = MaterialTheme.typography.labelSmall,
-                    color = TextMuted,
+                    color = if (expired) Rose else TextMuted,
                 )
             }
         },
         confirmButton = {
-            TextButton(onClick = { onDecide("allow", rememberRule) }) { Text("批准并执行", color = Rose, fontWeight = FontWeight.SemiBold) }
+            TextButton(onClick = { onDecide("allow", rememberRule) }, enabled = !expired) {
+                Text("批准并执行", color = if (expired) TextMuted else Rose, fontWeight = FontWeight.SemiBold)
+            }
         },
         dismissButton = {
             Row {
-                TextButton(onClick = { onDecide("deny", false) }) { Text("拒绝", color = TextSecondary) }
-                TextButton(onClick = { onDecide("allow_always", rememberRule) }) {
-                    Text("本对话都允许", color = Cyan, fontWeight = FontWeight.SemiBold)
+                TextButton(onClick = { onDecide("deny", false) }, enabled = !expired) {
+                    Text("拒绝", color = if (expired) TextMuted else TextSecondary)
+                }
+                TextButton(onClick = { onDecide("allow_always", rememberRule) }, enabled = !expired) {
+                    Text("本对话都允许", color = if (expired) TextMuted else Cyan, fontWeight = FontWeight.SemiBold)
                 }
             }
         },
@@ -772,7 +966,7 @@ private fun Composer(
                 Text("/", style = MaterialTheme.typography.titleMedium, color = TextMuted)
             }
             Box(Modifier.size(30.dp).clip(CircleShape).clickable(onClick = onModels), contentAlignment = Alignment.Center) {
-                Icon(Icons.Outlined.Tune, null, tint = TextMuted, modifier = Modifier.size(16.dp))
+                Icon(Icons.Outlined.Tune, "选择模型", tint = TextMuted, modifier = Modifier.size(16.dp))
             }
         }
         if (pendingImage != null || imageError != null) {
@@ -785,13 +979,13 @@ private fun Composer(
                 Spacer(Modifier.size(6.dp))
                 Text(if (pendingImage != null) "已附加 1 张图片" else imageError.orEmpty(), style = MaterialTheme.typography.bodySmall, color = if (pendingImage != null) Cyan else Rose)
                 Spacer(Modifier.weight(1f))
-                if (pendingImage != null) Icon(Icons.Outlined.Close, null, tint = TextMuted, modifier = Modifier.size(15.dp).clickable(onClick = onClearImage))
+                if (pendingImage != null) Icon(Icons.Outlined.Close, "移除图片", tint = TextMuted, modifier = Modifier.size(15.dp).clickable(onClick = onClearImage))
             }
         }
         Spacer(Modifier.height(7.dp))
         Row(verticalAlignment = Alignment.Bottom) {
             Box(Modifier.size(38.dp).clip(CircleShape).background(Panel).clickable(onClick = onPickImage), contentAlignment = Alignment.Center) {
-                Icon(Icons.Outlined.Image, null, tint = TextMuted, modifier = Modifier.size(18.dp))
+                Icon(Icons.Outlined.Image, "添加图片", tint = TextMuted, modifier = Modifier.size(18.dp))
             }
             Spacer(Modifier.width(8.dp))
             Box(
@@ -815,18 +1009,27 @@ private fun Composer(
                 )
             }
             Spacer(Modifier.width(8.dp))
+            // 空输入且不在运行时发送按钮应为置灰禁用态：可点但什么都不发生，
+            // 用户会以为“点了没反应/消息丢了”。
+            val idleEmpty = !running && text.isBlank()
             Box(
                 Modifier
                     .size(40.dp)
                     .clip(CircleShape)
-                    .background(if (running) Rose else Violet)
-                    .clickable { if (running && text.isBlank()) onStop() else onSend() },
+                    .background(
+                        when {
+                            running && text.isBlank() -> Rose
+                            idleEmpty -> PanelHigh
+                            else -> Violet
+                        }
+                    )
+                    .clickable(enabled = !idleEmpty) { if (running && text.isBlank()) onStop() else onSend() },
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
                     if (running && text.isBlank()) Icons.Outlined.StopCircle else Icons.Outlined.ArrowUpward,
                     if (running && text.isBlank()) "停止" else "发送",
-                    tint = Color.White,
+                    tint = if (idleEmpty) TextMuted else Color.White,
                     modifier = Modifier.size(20.dp),
                 )
             }
@@ -846,71 +1049,565 @@ private fun ModeChip(label: String, active: Boolean, onClick: () -> Unit) {
     ) { Text(label, style = MaterialTheme.typography.labelSmall, color = if (active) Violet else TextMuted) }
 }
 
+/** 按节点隔离的模型偏好存储键。 */
+private fun modelPrefsKey(nodeId: String) = "model_prefs_$nodeId"
+
+/**
+ * 单页模型选择器：顶部供应商条 + 中部联动 pager + 底部固定思考等级。
+ *
+ * 三条不变量：
+ * 1. 滑动只浏览——切页只按「默认选择规则」更新待选高亮，绝不发 `model.set`；
+ * 2. 点选即提交——`model.set` 成功后才拉 `thinking.levels` 并决定等级，两步串行；
+ * 3. 偏好只在提交成功后落盘，浏览/打开 sheet 都不写。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ModelSheet(
+    repo: CarryRepository,
+    nodeId: String,
+    sessionId: String,
     models: List<ModelOption>,
     levels: List<String>,
-    currentModel: String,
+    currentProvider: String,
+    currentModelId: String,
     currentThinking: String,
-    onModel: (ModelOption) -> Unit,
-    onThinking: (String) -> Unit,
 ) {
+    val prefsKey = remember(nodeId) { modelPrefsKey(nodeId) }
+    var prefs by remember(prefsKey) { mutableStateOf(ModelPrefsCodec.decode(repo.settingString(prefsKey, ""))) }
+    // 当前模型不在列表里时补伪条目：否则用户看不到打勾项，也说不清自己在用哪个模型。
+    val groups = remember(models, currentProvider, currentModelId) {
+        withCurrentModel(groupModelsByProvider(models), currentProvider, currentModelId, currentModelId)
+    }
+    val scope = rememberCoroutineScope()
+    var busy by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var levelsError by remember { mutableStateOf(false) }
+    // 可用等级是本地可刷新状态：先用仓库里已有的那份，`model.set` 成功后用 fresh 覆盖。
+    // 空表表示「节点还没给出能力」，此时不能渲染 chips——否则全是假可点。
+    var levelList by remember(levels) { mutableStateOf(levels) }
+    // 待提交意图 `provider|modelId|level`（level 为空表示只提交模型）。
+    // 旋转会销毁 sheet 的协程作用域，把「模型已切、等级没切」静默丢掉；写进可保存状态后
+    // 重组时重放一次即可补齐（见下方 LaunchedEffect）。
+    var inflight by rememberSaveable(stateSaver = NullableStringSaver) { mutableStateOf<String?>(null) }
+    val currentKey = if (currentProvider.isBlank()) "" else "$currentProvider|$currentModelId"
+    // prune 的入参：当前节点真实返回的 provider→id 集合。`models` 为空时返回 null——
+    // 那种情况多半是没拉到 `models.list`，拿空表清偏好会把整张历史抹掉。
+    val available = remember(models) {
+        models.groupBy { it.provider }
+            .mapValues { (_, list) -> list.map { it.id }.toSet() }
+            .takeIf { models.isNotEmpty() }
+    }
+
+    fun savePrefs(next: ModelPrefs) {
+        prefs = next
+        repo.setSettingString(prefsKey, ModelPrefsCodec.encode(next))
+    }
+
+    /** 清掉已下线模型的偏好记录，否则偏好表会随模型下线上线无限增长。 */
+    fun pruned(p: ModelPrefs): ModelPrefs = if (available == null) p else p.prune(available)
+
+    if (groups.isEmpty()) {
+        Column(Modifier.fillMaxWidth().fillMaxHeight(0.5f).padding(horizontal = 18.dp)) {
+            Text("模型与思考等级", style = MaterialTheme.typography.headlineMedium, color = TextPrimary)
+            Spacer(Modifier.height(10.dp))
+            Text(
+                "节点没有返回可用模型，请确认 pi 已登录并检查网络后重试。",
+                style = MaterialTheme.typography.bodySmall,
+                color = TextMuted,
+            )
+        }
+        return
+    }
+
+    val initialPage = groups.indexOfFirst { it.provider == currentProvider }.coerceAtLeast(0)
+    val pagerState = rememberPagerState(initialPage = initialPage) { groups.size }
+    val tabsState = rememberLazyListState()
+    // 顶部标签跟随页面滚到可见位置：滑到第 5 个供应商时标签条不能还停在开头。
+    LaunchedEffect(pagerState.currentPage) {
+        runCatching { tabsState.animateScrollToItem(pagerState.currentPage) }
+    }
+
+    val page = pagerState.currentPage.coerceIn(0, groups.lastIndex)
+    val group = groups[page]
+    // 待选模型完全由「页面 + 偏好」推导：切页自然回到该供应商的默认项，不需要额外的选中状态。
+    val pending = defaultModelFor(group, prefs)
+    val pendingLevel = pending?.let {
+        defaultThinkingLevel(levelList, prefs.thinkingFor(group.provider, it.id), currentThinking)
+    }
+
+    /** 点选模型：model.set → 拉 levels → 按规则 thinking.set，两步串行、sheet 保持打开。 */
+    fun commitModel(model: ModelOption) {
+        if (busy) return
+        error = null
+        levelsError = false
+        busy = true
+        // 先记「只提交模型」的意图：真在 model.set 途中被旋转打断，重放至少把模型补上。
+        inflight = "${model.provider}|${model.id}|"
+        scope.launch {
+            // 步骤名跟着调用链走：applyThinking 失败也走这个 catch，一律说「设置模型失败」会误导。
+            var step = "模型"
+            try {
+                repo.applyModel(nodeId, sessionId, model.provider, model.id)
+                val withModel = pruned(prefs.withModel(model.provider, model.id))
+                savePrefs(withModel)
+                val fresh = repo.fetchThinkingLevels(nodeId, sessionId)
+                if (fresh == null) {
+                    // 模型已生效，只是等级拉不到：思考区禁用并允许重试，不能谎报整体失败。
+                    levelsError = true
+                    inflight = null
+                    return@launch
+                }
+                levelList = fresh
+                val want = defaultThinkingLevel(
+                    fresh,
+                    withModel.thinkingFor(model.provider, model.id),
+                    currentThinking,
+                )
+                if (want == null) {
+                    // fresh 非空时理论上推不出 null；真出现就只算提交模型，不卡着意图。
+                    inflight = null
+                    return@launch
+                }
+                step = "思考等级"
+                // 意图补上等级：此刻被打断的话，重放能把两步都补回来。
+                inflight = "${model.provider}|${model.id}|$want"
+                repo.applyThinking(nodeId, sessionId, want)
+                savePrefs(withModel.withThinking(model.provider, model.id, want))
+                inflight = null
+            } catch (t: Throwable) {
+                // 取消（旋转/dispose）不算失败：保留 inflight 交给重组后的重放，
+                // 其它异常才算真失败，清掉意图并给出文案。
+                if (t is kotlinx.coroutines.CancellationException) throw t
+                inflight = null
+                error = "设置${step}失败：${t.message ?: t.javaClass.simpleName}"
+            } finally {
+                busy = false
+            }
+        }
+    }
+
+    /** 点思考等级：待选模型还没生效时先提交模型，再提交等级；失败不回滚。 */
+    fun commitThinking(level: String) {
+        if (busy) return
+        error = null
+        busy = true
+        scope.launch {
+            // 这条链的第一跳可能是 applyModel，失败时不能说成「设置思考等级失败」。
+            var step = "思考等级"
+            try {
+                val model = defaultModelFor(group, prefs) ?: return@launch
+                var next = prefs
+                if (model.key != currentKey) {
+                    step = "模型"
+                    // 这条链同样是两步：旋转正好卡在中间时，靠 inflight 让重组后补上等级（同 U-08）。
+                    inflight = "${model.provider}|${model.id}|$level"
+                    repo.applyModel(nodeId, sessionId, model.provider, model.id)
+                    next = next.withModel(model.provider, model.id)
+                    savePrefs(next)
+                    step = "思考等级"
+                }
+                repo.applyThinking(nodeId, sessionId, level)
+                savePrefs(next.withThinking(model.provider, model.id, level))
+                // 这一跳既有模型又有等级：重放里只提交单模型的意图会被这里一并清掉。
+                inflight = null
+            } catch (t: Throwable) {
+                if (t is kotlinx.coroutines.CancellationException) throw t
+                // 取消（旋转/dispose）保留意图交给重放；真失败清掉，别在重组时又跑一遍。
+                inflight = null
+                error = "设置${step}失败：${t.message ?: t.javaClass.simpleName}"
+            } finally {
+                busy = false
+            }
+        }
+    }
+
+    /** 重新拉一次思考等级：能力缺失时这是唯一出口，不能只留一句「不可用」。 */
+    fun retryLevels() {
+        if (busy) return
+        levelsError = false
+        busy = true
+        scope.launch {
+            try {
+                val fresh = repo.fetchThinkingLevels(nodeId, sessionId)
+                if (fresh == null) levelsError = true else levelList = fresh
+            } catch (t: Throwable) {
+                if (t is kotlinx.coroutines.CancellationException) throw t
+                levelsError = true
+            } finally {
+                busy = false
+            }
+        }
+    }
+
+    // 重放被打断的提交链（旋转把 sheet 的协程取消掉时发生）。
+    //
+    // 为什么重放安全：`model.set` / `thinking.set` 都是「把当前值设成 X」的幂等操作，重复执行
+    // 不会累加计费或产生副作用；会话仍由 sessionId 定位，与发起时的 sheet 实例无关。
+    // 为什么只在 sheet 存活期间重放：进程被杀/退出后没有任何依据判断用户还想提交，
+    // 所以不做跨进程续跑——saved state 恢复后重放一次，成功即清空 inflight。
+    LaunchedEffect(inflight) {
+        val intent = inflight ?: return@LaunchedEffect
+        // 真在提交中（重放自身触发的重组）不要并发插第二次。
+        if (busy) return@LaunchedEffect
+        val parts = intent.split("|", limit = 3)
+        val provider = parts.getOrNull(0).orEmpty()
+        val modelId = parts.getOrNull(1).orEmpty()
+        val level = parts.getOrNull(2).orEmpty()
+        if (provider.isBlank() || modelId.isBlank()) {
+            inflight = null
+            return@LaunchedEffect
+        }
+        busy = true
+        var step = "模型"
+        try {
+            repo.applyModel(nodeId, sessionId, provider, modelId)
+            // 同样走 prune：重放也是落盘点，不能让已下线模型的记录从这条路漏回来。
+            savePrefs(pruned(prefs.withModel(provider, modelId)))
+            if (level.isNotBlank()) {
+                step = "思考等级"
+                repo.applyThinking(nodeId, sessionId, level)
+                savePrefs(pruned(prefs.withThinking(provider, modelId, level)))
+            }
+            error = null
+            inflight = null
+        } catch (t: Throwable) {
+            if (t is kotlinx.coroutines.CancellationException) throw t
+            inflight = null
+            error = "设置${step}失败：${t.message ?: t.javaClass.simpleName}"
+        } finally {
+            busy = false
+        }
+    }
+
     Column(
         Modifier
             .fillMaxWidth()
             .fillMaxHeight(0.82f)
-            .padding(horizontal = 18.dp)
-            .padding(bottom = 28.dp),
+            .padding(bottom = 20.dp),
     ) {
-        Text("模型与思考等级", style = MaterialTheme.typography.headlineMedium, color = TextPrimary)
-        Spacer(Modifier.height(4.dp))
-        Text("切换只影响下一次运行，不会中断当前生成。", style = MaterialTheme.typography.bodySmall, color = TextMuted)
-        Spacer(Modifier.height(14.dp))
+        Column(Modifier.padding(horizontal = 18.dp)) {
+            Text("模型与思考等级", style = MaterialTheme.typography.headlineMedium, color = TextPrimary)
+            Spacer(Modifier.height(4.dp))
+            Text("切换只影响下一次运行，不会中断当前生成。", style = MaterialTheme.typography.bodySmall, color = TextMuted)
+        }
+        Spacer(Modifier.height(10.dp))
+
+        // 顶部供应商条：顺序固定为 models.list 首次出现顺序，不因当前选择重排。
+        LazyRow(
+            state = tabsState,
+            contentPadding = PaddingValues(horizontal = 18.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            itemsIndexed(groups) { index, g ->
+                val active = index == page
+                // 热区至少 44dp（U-09）：外层 Box 只负责撑热区，内层标签的 padding/圆角/字号一律不动，
+                // 避免视觉上「按钮被调高变丑」。
+                Box(
+                    Modifier
+                        .sizeIn(minHeight = 44.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable { scope.launch { runCatching { pagerState.animateScrollToPage(index) } } },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Column(
+                        Modifier
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(if (active) Violet.copy(alpha = 0.18f) else PanelHigh.copy(alpha = 0.5f))
+                            .border(0.7.dp, if (active) Violet.copy(alpha = 0.5f) else Line, RoundedCornerShape(12.dp))
+                            .padding(horizontal = 12.dp, vertical = 7.dp),
+                    ) {
+                        Text(
+                            g.label,
+                            style = MaterialTheme.typography.labelLarge,
+                            color = if (active) Violet else TextSecondary,
+                            maxLines = 1,
+                        )
+                        MonoLabel("${g.models.size} 个模型", color = TextMuted)
+                    }
+                }
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+
+        HorizontalPager(state = pagerState, modifier = Modifier.weight(1f).fillMaxWidth()) { index ->
+            ModelPage(
+                group = groups[index],
+                currentKey = currentKey,
+                pendingKey = pending?.key.orEmpty(),
+                busy = busy,
+                onPick = { commitModel(it) },
+            )
+        }
+
+        if (error != null) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 4.dp)
+                    .clip(RoundedCornerShape(10.dp)).background(Rose.copy(alpha = 0.10f)).padding(9.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(error.orEmpty(), style = MaterialTheme.typography.bodySmall, color = Rose, modifier = Modifier.weight(1f))
+                Spacer(Modifier.size(6.dp))
+                Text("重试", style = MaterialTheme.typography.labelMedium, color = Rose, modifier = Modifier.clickable {
+                    pending?.let { commitModel(it) }
+                })
+            }
+        }
+
+        HorizontalDivider(color = Line.copy(alpha = 0.5f))
+        Column(Modifier.padding(horizontal = 18.dp)) {
+            Spacer(Modifier.height(10.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                MonoLabel("思考等级", color = TextSecondary)
+                Spacer(Modifier.weight(1f))
+                if (busy) CircularProgressIndicator(Modifier.size(10.dp), color = Violet, strokeWidth = 1.4.dp)
+            }
+            Spacer(Modifier.height(7.dp))
+            if (levelList.isEmpty()) {
+                // 拿不到能力就不渲染 chips：以前兜底成硬编码档位，看起来全可点，点了必然失败。
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "思考等级不可用（未获取到模型能力）",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Amber,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Box(
+                        Modifier
+                            .sizeIn(minWidth = 44.dp, minHeight = 44.dp)
+                            .clip(RoundedCornerShape(50))
+                            .clickable(enabled = !busy) { retryLevels() },
+                        contentAlignment = Alignment.Center,
+                    ) { Text("重试", style = MaterialTheme.typography.labelMedium, color = Amber) }
+                }
+            } else {
+                Row(
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                ) {
+                    levelList.forEach { level ->
+                        val active = !levelsError && level == pendingLevel
+                        // 热区至少 44dp（U-09）：外层 Box 撑热区，内层胶囊尺寸与样式不变。
+                        // 提交链进行中或等级未知时禁止点击：否则会把一个不属于该模型的等级写进去。
+                        Box(
+                            Modifier
+                                .sizeIn(minHeight = 44.dp)
+                                .clip(RoundedCornerShape(50))
+                                .clickable(enabled = !busy && !levelsError) { commitThinking(level) },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Column(
+                                Modifier
+                                    .clip(RoundedCornerShape(50))
+                                    .background(if (active) Violet.copy(alpha = 0.20f) else PanelHigh)
+                                    .border(0.7.dp, if (active) Violet.copy(alpha = 0.55f) else Line, RoundedCornerShape(50))
+                                    .padding(horizontal = 11.dp, vertical = 5.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                            ) {
+                                Text(
+                                    thinkingLabel(level),
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = if (active) Violet else TextMuted,
+                                )
+                                Text(level, style = MaterialTheme.typography.labelSmall, color = TextMuted.copy(alpha = 0.7f))
+                            }
+                        }
+                    }
+                }
+            }
+            if (levelsError) {
+                Spacer(Modifier.height(6.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "思考等级拉取失败，可重试",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Amber,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text("重试", style = MaterialTheme.typography.labelMedium, color = Amber, modifier = Modifier.clickable {
+                        pending?.let { commitModel(it) }
+                    })
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "只影响下一次运行；高等级会显著增加思考 token 与首字延迟。",
+                style = MaterialTheme.typography.bodySmall,
+                color = TextMuted,
+            )
+        }
+    }
+}
+
+/** 单个供应商的模型列表页；超过 30 个模型时才给本地过滤框（不新增 op）。 */
+@Composable
+private fun ModelPage(
+    group: ProviderGroup,
+    currentKey: String,
+    pendingKey: String,
+    busy: Boolean,
+    onPick: (ModelOption) -> Unit,
+) {
+    var query by remember(group.provider) { mutableStateOf("") }
+    val visible = remember(group.models, query) {
+        if (query.isBlank()) {
+            group.models
+        } else {
+            group.models.filter {
+                it.name.contains(query, ignoreCase = true) || it.id.contains(query, ignoreCase = true)
+            }
+        }
+    }
+    Column(Modifier.fillMaxSize().padding(horizontal = 18.dp)) {
+        if (group.models.size > 30) {
+            BasicTextField(
+                value = query,
+                onValueChange = { query = it },
+                singleLine = true,
+                textStyle = TextStyle(color = TextPrimary, fontSize = 14.sp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 8.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(PanelHigh.copy(alpha = 0.6f))
+                    .border(0.7.dp, Line, RoundedCornerShape(10.dp))
+                    .padding(horizontal = 11.dp, vertical = 9.dp),
+                decorationBox = { inner ->
+                    if (query.isEmpty()) Text("过滤模型", style = MaterialTheme.typography.bodySmall, color = TextMuted)
+                    inner()
+                },
+            )
+        }
         LazyColumn(Modifier.weight(1f).fillMaxWidth()) {
-            items(models) { m ->
+            items(visible, key = { it.key }) { m ->
+                val isCurrent = currentKey.isNotEmpty() && m.key == currentKey
+                val isPending = m.key == pendingKey
                 Row(
                     Modifier
                         .fillMaxWidth()
+                        .padding(bottom = 7.dp)
                         .clip(RoundedCornerShape(13.dp))
-                        .background(PanelHigh.copy(alpha = if (m.id == currentModel) 0.7f else 0.35f))
-                        .border(0.7.dp, if (m.id == currentModel) Violet.copy(alpha = 0.5f) else Line, RoundedCornerShape(13.dp))
-                        .clickable { onModel(m) }
+                        .background(PanelHigh.copy(alpha = if (isPending || isCurrent) 0.7f else 0.35f))
+                        .border(
+                            0.7.dp,
+                            when {
+                                isCurrent -> Violet.copy(alpha = 0.5f)
+                                isPending -> Violet.copy(alpha = 0.3f)
+                                else -> Line
+                            },
+                            RoundedCornerShape(13.dp),
+                        )
+                        .clickable(enabled = !busy) { onPick(m) }
                         .padding(12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Box(Modifier.size(30.dp).clip(RoundedCornerShape(9.dp)).background(Violet.copy(alpha = 0.12f)), contentAlignment = Alignment.Center) {
-                        Text(m.name.take(1), style = MaterialTheme.typography.titleMedium, color = Violet)
-                    }
+                    Box(
+                        Modifier.size(30.dp).clip(RoundedCornerShape(9.dp)).background(Violet.copy(alpha = 0.12f)),
+                        contentAlignment = Alignment.Center,
+                    ) { Text(m.name.take(1), style = MaterialTheme.typography.titleMedium, color = Violet) }
                     Spacer(Modifier.size(10.dp))
                     Column(Modifier.weight(1f)) {
-                        Text(m.name, style = MaterialTheme.typography.titleMedium, color = TextPrimary)
-                        MonoLabel("${m.provider} · ${m.context}", color = TextMuted)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                m.name,
+                                style = MaterialTheme.typography.titleMedium,
+                                color = TextPrimary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false),
+                            )
+                            // 伪条目的名字往往就是裸 id，不标注的话用户看不出这个模型已经下线；
+                            // 仍然可点：用户可能就想切回来。
+                            if (m.unavailable) {
+                                Spacer(Modifier.size(6.dp))
+                                Pill("当前（不在列表）", Amber)
+                            }
+                        }
+                        MonoLabel(
+                            listOfNotNull(
+                                m.key,
+                                m.context.takeIf { it.isNotBlank() },
+                                "reasoning".takeIf { m.reasoning },
+                            ).joinToString(" · "),
+                            color = TextMuted,
+                        )
                     }
-                    MonoLabel(m.price, color = TextMuted)
+                    if (m.priceText.isNotBlank()) {
+                        Spacer(Modifier.size(6.dp))
+                        MonoLabel(m.priceText, color = TextMuted)
+                    }
                     Spacer(Modifier.size(8.dp))
-                    if (m.id == currentModel) Icon(Icons.Outlined.Check, null, tint = Violet, modifier = Modifier.size(17.dp))
+                    // 已生效的当前模型必须有勾；待选只在没有当前模型时用浅色圈提示。
+                    when {
+                        isCurrent -> Icon(Icons.Outlined.Check, null, tint = Violet, modifier = Modifier.size(17.dp))
+                        isPending -> Box(
+                            Modifier.size(14.dp).clip(CircleShape).border(1.2.dp, Violet.copy(alpha = 0.5f), CircleShape),
+                        )
+                        else -> Spacer(Modifier.size(17.dp))
+                    }
                 }
-                Spacer(Modifier.height(7.dp))
             }
         }
-        Spacer(Modifier.height(12.dp))
-        MonoLabel("思考等级")
-        Spacer(Modifier.height(7.dp))
-        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-            levels.forEach { level ->
-                val active = level == currentThinking
-                Box(
-                    Modifier
-                        .clip(RoundedCornerShape(50))
-                        .background(if (active) Violet.copy(alpha = 0.20f) else PanelHigh)
-                        .border(0.7.dp, if (active) Violet.copy(alpha = 0.55f) else Line, RoundedCornerShape(50))
-                        .clickable { onThinking(level) }
-                        .padding(horizontal = 12.dp, vertical = 6.dp),
-                ) { Text(level, style = MaterialTheme.typography.labelMedium, color = if (active) Violet else TextMuted) }
-            }
+    }
+}
+
+/**
+ * 每轮总结行：`46分钟25秒 · 4.6k ›`；被中断的轮追加琥珀色「已中断」。
+ *
+ * 只有该轮至少有一条 assistant 消息才返回内容（纯用户提问不产轮，由
+ * [computeTurns] 保证，这里再兜一层避免空行）。
+ */
+@Composable
+private fun TurnSummaryRow(turn: Turn, onClick: () -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(9.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 4.dp, vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(
+            "${turn.durationText} · ${turn.tokenText}",
+            style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+            color = TextMuted.copy(alpha = 0.85f),
+        )
+        if (turn.aborted) {
+            Text("已中断", style = MaterialTheme.typography.labelSmall, color = Amber)
         }
-        Spacer(Modifier.height(12.dp))
-        Text("高等级会显著增加思考 token 与首字延迟。", style = MaterialTheme.typography.bodySmall, color = TextMuted)
+        Spacer(Modifier.weight(1f))
+        Icon(Icons.Outlined.ExpandMore, "查看轨迹", tint = TextMuted.copy(alpha = 0.7f), modifier = Modifier.size(13.dp))
+    }
+}
+
+/** 轨迹面板：字段缺失一律显示 `—`，不拿 0 冒充真实值。 */
+@Composable
+private fun TurnDetailSheet(turn: Turn) {
+    Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp).padding(bottom = 28.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("本轮轨迹", style = MaterialTheme.typography.headlineMedium, color = TextPrimary)
+            Spacer(Modifier.weight(1f))
+            if (turn.aborted) Pill("已中断", Amber, filled = true)
+        }
+        Spacer(Modifier.height(4.dp))
+        MonoLabel(if (turn.model.isBlank()) "MODEL —" else "MODEL ${turn.model}", color = TextMuted)
+        Spacer(Modifier.height(14.dp))
+        KeyValue("请求数", if (turn.requests > 0) "${turn.requests}" else "—")
+        KeyValue("本轮用时", turn.durationText)
+        KeyValue("输入 token", if (turn.inputTokens > 0) formatTokens(turn.inputTokens) else "—")
+        KeyValue("输出 token", if (turn.outputTokens > 0) formatTokens(turn.outputTokens) else "—")
+        KeyValue("缓存读取", if (turn.cacheReadTokens > 0) formatTokens(turn.cacheReadTokens) else "—")
+        KeyValue("缓存写入", if (turn.cacheWriteTokens > 0) formatTokens(turn.cacheWriteTokens) else "—")
+        KeyValue("缓存命中率", formatPercent(turn.cacheHitRate))
+        KeyValue("平均速度", formatSpeed(turn.avgSpeed))
+        KeyValue("首字时长", formatMs(turn.firstTokenMs))
+        KeyValue("成本", formatCost(turn.cost))
+        Spacer(Modifier.height(10.dp))
+        Text(
+            "缺失字段来自老节点或历史聊天记录：它们没有上报 usage，不做推算也不显示 0。",
+            style = MaterialTheme.typography.bodySmall,
+            color = TextMuted,
+        )
     }
 }
 
@@ -952,7 +1649,8 @@ private fun CommandSheet(onPick: (CommandItem) -> Unit) {
 @Composable
 private fun rememberCountdown(approval: Approval): Long {
     var remaining by remember(approval.id) { mutableStateOf(approval.remainingSeconds) }
-    LaunchedEffect(approval.id) {
+    LaunchedEffect(approval.id, approval.remainingSeconds) {
+        remaining = approval.remainingSeconds
         while (remaining > 0) {
             delay(1000)
             remaining -= 1

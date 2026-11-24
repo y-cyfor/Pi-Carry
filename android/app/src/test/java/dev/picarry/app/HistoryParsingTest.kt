@@ -75,4 +75,22 @@ class HistoryParsingTest {
         assertEquals("QUJD", msg.tool?.images?.first()?.data)
         assertTrue(msg.tool?.result?.contains("QUJD") != true)
     }
+
+    @Test
+    fun missingToolCallIdYieldsStableIdAcrossRepeatedParsing() {
+        // 老节点/老 journal 的 toolResult 可能缺 toolCallId（N-11）。
+        // 兜底 id 必须每次回放都相同，否则历史合并去重会把同一条结果当成新消息越堆越多。
+        val r = repo
+        val json = """
+            {"role":"toolResult","toolName":"bash","isError":false,
+             "content":[{"type":"text","text":"total 0"}]}
+        """.trimIndent()
+        val first = r.parseHistoryMessages("s1", 7, Json.parseToJsonElement(json).jsonObject).single()
+        val second = r.parseHistoryMessages("s1", 7, Json.parseToJsonElement(json).jsonObject).single()
+
+        assertEquals(first.id, second.id)
+        assertTrue(first.id.startsWith("tool-tr-7-"))
+        // 同一条消息在合并时应该被认成同一个 id，而不是两条。
+        assertEquals(1, mergeHistoryMessages(listOf(first) + listOf(second)).size)
+    }
 }

@@ -27,7 +27,7 @@ fn default_class() -> String {
 pub struct HelloPayload {
     pub protocol: String,
     pub client: ClientInfo,
-    /// 密码兜底认证；与 token/code 三选一。
+    /// 已配对设备的可选二次认证密码；新设备首配**不能**只用密码（必须 token/code）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
     /// 二维码配对 token。
@@ -91,6 +91,18 @@ pub struct HelloResponse {
     pub device: DeviceInfo,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// 服务端当前时间（RFC3339，毫秒精度）。
+    /// 手机用它算时钟偏移，倒计时/「最近活跃」才不会因为两端时间差而漂移（R20）。
+    /// 旧客户端不认识这个字段就忽略，所以保持可选。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_time: Option<String>,
+    /// 服务端版本，方便客户端在诊断页区分是哪个版本在跑。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_version: Option<String>,
+    /// 本条连接实测的连接方式（`connection.updated` 同一结构）。
+    /// 旧客户端不认识就忽略；老节点不返回时客户端不显示连接方式。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

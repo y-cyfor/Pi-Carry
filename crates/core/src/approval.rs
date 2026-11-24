@@ -1,8 +1,10 @@
 //! 审批分类与等待队列。默认 fail-closed：无审批者、超时、断网都拒绝。
 
+use crate::clock::UlidGen;
 use crate::config::ApprovalsConfig;
 use crate::error::{CoreError, Result};
 use crate::store::{PendingApproval, Store};
+use crate::IdGen;
 use chrono::{DateTime, Duration, Utc};
 use pi_carry_protocol::{events, ApprovalView};
 use serde_json::{json, Value};
@@ -278,6 +280,32 @@ fn truncate(s: &str, n: usize) -> String {
     }
 }
 
+/// 审批状态已落库并广播**之后**的审计写入。
+///
+/// 到这一步状态 CAS、waiter 唤醒、事件广播都已完成，结果对 pi 和客户端都已生效。
+/// 若此时因审计表不可用而返回 Err，手机端会显示“审批失败”，而重试只会拿到
+/// `ALREADY_RESOLVED`——比丢掉一条审计记录更容易误导人，所以只记 warn。
+fn audit_or_warn(store: &Store, ts: &str, actor: &str, action: &str, detail: &Value) {
+    if let Err(e) = store.audit(ts, actor, action, detail) {
+        tracing::warn!(action, actor, error = %e, "审计写入失败，但审批变更已生效");
+    }
+}
+
+/// 工具入参转成审批视图里的 `args` 字段。
+///
+/// 参数是给手机端审批卡展示的：太大会把控制帧预算吃满（1MiB），所以按序列化后的
+/// 字符数截断。空对象/Null 保持原样，UI 据此决定是否展示“参数”块。
+fn truncate_json(input: &Value, max_chars: usize) -> Value {
+    if input.is_null() {
+        return Value::Null;
+    }
+    let text = input.to_string();
+    if text.chars().count() <= max_chars {
+        return input.clone();
+    }
+    Value::String(truncate(&text, max_chars))
+}
+
 #[derive(Debug, Clone)]
 pub struct ApprovalEvent {
     pub session_id: String,
@@ -299,7 +327,7 @@ struct Inner {
     store: Store,
     config: ApprovalsConfig,
     clock: Arc<dyn crate::Clock>,
-    ids: Arc<dyn crate::IdGen>,
+    ids: Arc<dyn IdGen>,
     waiters: Mutex<HashMap<String, Waiter>>,
     /// 用户在审批卡选择“本对话都允许”后，本进程内该会话的普通工具直接放行。
     session_allow: Mutex<HashSet<String>>,
@@ -400,7 +428,7 @@ impl ApprovalManager {
         }
 
         let timeout = self.inner.config.timeout_secs;
-        let view = self.build_view(session_id, tool_name, &c, "pending", timeout);
+        let view = self.build_view_with_args(session_id, tool_name, &c, "pending", timeout, input);
         if self
             .inner
             .store
@@ -413,12 +441,8 @@ impl ApprovalManager {
                 self.inner.config.max_pending
             )));
         }
-        let pending = PendingApproval {
-            view: view.clone(),
-            tool_call_id: tool_call_id.to_string(),
-            resolved_by: None,
-        };
-        self.inner.store.insert_approval(&pending)?;
+        // waiter 必须先于审批落库注册：其他设备可能一看到 approval.list 就 resolve，
+        // 那时若 waiter 还不存在，resolve 找不到接收方，本请求会永久挂起。
         let (tx, rx) = oneshot::channel();
         self.inner.waiters.lock().expect("waiters poisoned").insert(
             view.id.clone(),
@@ -427,11 +451,16 @@ impl ApprovalManager {
                 tx,
             },
         );
-        let _ = self.inner.events.send(ApprovalEvent {
-            session_id: session_id.to_string(),
-            event: events::approval_requested(&view),
-        });
-        self.inner.store.audit(
+        let pending = PendingApproval {
+            view: view.clone(),
+            tool_call_id: tool_call_id.to_string(),
+            resolved_by: None,
+        };
+        if let Err(e) = self.inner.store.insert_approval(&pending) {
+            self.drop_waiter(&view.id);
+            return Err(e);
+        }
+        if let Err(e) = self.inner.store.audit(
             &view.requested_at,
             "pi",
             "approval.requested",
@@ -440,7 +469,21 @@ impl ApprovalManager {
                 "toolName": tool_name,
                 "risk": c.risk.as_str(),
             }),
-        )?;
+        ) {
+            // 请求方拿不到结果，已落库的审批必须收尾：置为 denied 并撤掉 waiter，
+            // 否则手机会挂一张无人等待的幽灵审批卡。
+            let now = crate::rfc3339(self.inner.clock.now());
+            let _ = self
+                .inner
+                .store
+                .resolve_approval(&view.id, "denied", "system", &now, false);
+            self.drop_waiter(&view.id);
+            return Err(e);
+        }
+        let _ = self.inner.events.send(ApprovalEvent {
+            session_id: session_id.to_string(),
+            event: events::approval_requested(&view),
+        });
 
         // 真实时间超时；测试用 expire_due 驱动，不依赖 sleep 精度。
         let inner = self.inner.clone();
@@ -458,6 +501,14 @@ impl ApprovalManager {
         }
     }
 
+    fn drop_waiter(&self, id: &str) {
+        self.inner
+            .waiters
+            .lock()
+            .expect("waiters poisoned")
+            .remove(id);
+    }
+
     fn build_view(
         &self,
         session_id: &str,
@@ -466,11 +517,24 @@ impl ApprovalManager {
         state: &str,
         ttl_secs: u64,
     ) -> ApprovalView {
+        self.build_view_with_args(session_id, tool_name, c, state, ttl_secs, &Value::Null)
+    }
+
+    fn build_view_with_args(
+        &self,
+        session_id: &str,
+        tool_name: &str,
+        c: &Classification,
+        state: &str,
+        ttl_secs: u64,
+        input: &Value,
+    ) -> ApprovalView {
         let now = self.inner.clock.now();
+        // 进程内序号只用来保证同进程唯一；ULID 提供跨重启/跨进程熵。
+        // 旧实现只用注入的 SeqIdGen（进程内计数），重启后第 N 条审批必然
+        // 与永不清理的历史行撞 approvals 主键，插入失败导致工具调用被静默拒绝。
         let seq = self.inner.seq.fetch_add(1, Ordering::SeqCst);
-        let uid = self.inner.ids.next_id();
-        let short = &uid[..uid.len().min(8)];
-        let id = format!("ap-{seq}-{short}");
+        let id = format!("ap-{seq}-{}", UlidGen.next_id());
         ApprovalView {
             id,
             session_id: session_id.to_string(),
@@ -480,7 +544,9 @@ impl ApprovalManager {
             summary: c.summary.clone(),
             command: c.command.clone(),
             path: c.path.clone(),
-            args: Value::Null,
+            // 完整工具入参：卡片要能展示「到底要写哪个文件/跑什么参数」，
+            // 只给 command 时写文件类审批会看不见目标内容（P3 群）。
+            args: truncate_json(input, 4000),
             requested_at: crate::rfc3339(now),
             expires_at: crate::rfc3339(now + Duration::seconds(ttl_secs as i64)),
             remaining_seconds: ttl_secs,
@@ -556,7 +622,9 @@ impl ApprovalManager {
         {
             if let Some(cmd) = pending.view.command.as_deref() {
                 if let Err(e) = self.inner.store.add_remembered_rule(
-                    &self.inner.ids.next_id(),
+                    // 规则 id 也要有跨重启熵：规则表用 INSERT OR IGNORE，
+                    // 撞主键会被默默丢成一条不生效的“记住”规则。
+                    &format!("rule-{}-{}", self.inner.ids.next_id(), UlidGen.next_id()),
                     &pending.view.session_id,
                     &pending.view.tool_name,
                     cmd,
@@ -589,7 +657,9 @@ impl ApprovalManager {
             session_id: view.session_id.clone(),
             event: events::approval_resolved(id, state, by, false),
         });
-        self.inner.store.audit(
+        // 状态已提交并广播，审计失败不能再让调用方以为审批没生效（V-05）。
+        audit_or_warn(
+            &self.inner.store,
             &crate::rfc3339(now),
             by,
             "approval.resolved",
@@ -599,7 +669,7 @@ impl ApprovalManager {
                 "remember": remember,
                 "toolName": view.tool_name,
             }),
-        )?;
+        );
         Ok(view)
     }
 
@@ -629,13 +699,25 @@ impl ApprovalManager {
             .parse::<DateTime<Utc>>()
             .map_err(|e| CoreError::Internal(format!("审批过期时间非法: {e}")))?;
         let max = now + Duration::seconds(pi_carry_protocol::APPROVAL_MAX_EXTENSION_SEC as i64);
-        let next = (current + Duration::seconds(seconds.min(300) as i64)).min(max);
+        // 上限统一取协议常量：写死 300 会在常量被调整时与实际可延长量不一致。
+        let next = (current
+            + Duration::seconds(seconds.min(pi_carry_protocol::APPROVAL_MAX_EXTENSION_SEC) as i64))
+        .min(max);
         pending.view.expires_at = crate::rfc3339(next);
         let conn_view = pending.view.clone();
-        // 直接更新 expires_at：Store 只暴露 resolve；这里用 SQL 通过新方法完成。
-        self.inner
+        // CAS 式的更新：只有仍然 pending 的记录才能延长。返回 false 说明审批
+        // 在读→算→写 的窗口里已被解决（超时/其它设备/abort），此时绝不能
+        // 广播一个“已延期”的旧视图，否则手机端会看到一个点击后永远失败的按钮。
+        let updated = self
+            .inner
             .store
             .update_approval_expiry(id, &conn_view.expires_at)?;
+        if !updated {
+            return Err(CoreError::Protocol(pi_carry_protocol::ProtocolError::new(
+                pi_carry_protocol::ErrorCode::ApprovalExpired,
+                format!("审批 {id} 已被解决，无法延长"),
+            )));
+        }
         let _ = self.inner.events.send(ApprovalEvent {
             session_id: conn_view.session_id.clone(),
             event: events::approval_updated(&conn_view),
@@ -679,6 +761,53 @@ impl ApprovalManager {
     pub fn config(&self) -> &ApprovalsConfig {
         &self.inner.config
     }
+
+    /// 中止/关闭会话时调用：该会话所有 pending 审批置为 denied，
+    /// 移除 waiter 并让等待的工具调用立即拿 Deny（fail-closed）。
+    pub fn cancel_session(&self, session_id: &str) -> Result<usize> {
+        let now = crate::rfc3339(self.inner.clock.now());
+        let ids: Vec<String> = self
+            .inner
+            .store
+            .list_pending_approvals(Some(session_id))?
+            .into_iter()
+            .map(|v| v.id)
+            .collect();
+        let mut cancelled = 0;
+        for id in ids {
+            if !self
+                .inner
+                .store
+                .resolve_approval(&id, "denied", "system", &now, false)?
+            {
+                // 并发方已先一步处理并负责通知 waiter。
+                continue;
+            }
+            cancelled += 1;
+            if let Some(w) = self
+                .inner
+                .waiters
+                .lock()
+                .expect("waiters poisoned")
+                .remove(&id)
+            {
+                let _ = w.tx.send(Decision::Deny);
+            }
+            let _ = self.inner.events.send(ApprovalEvent {
+                session_id: session_id.to_string(),
+                event: events::approval_resolved(&id, "denied", "system", true),
+            });
+            // 同上：会话已取消完毕，审计失败不能把整个取消操作变成报错。
+            audit_or_warn(
+                &self.inner.store,
+                &now,
+                "system",
+                "approval.cancelled",
+                &json!({"approvalId": id, "reason": "session_cancelled"}),
+            );
+        }
+        Ok(cancelled)
+    }
 }
 
 /// 把一条确实到期的审批置为 expired；返回是否由本次调用完成了状态迁移。
@@ -712,9 +841,14 @@ fn expire_one(inner: &Arc<Inner>, id: &str, by: &str) -> Result<bool> {
         session_id,
         event: events::approval_resolved(id, "expired", by, true),
     });
-    inner
-        .store
-        .audit(&now, by, "approval.expired", &json!({"approvalId": id}))?;
+    // 到期已落库、waiter 已收到 Deny，审计失败只能记 warn（V-05）。
+    audit_or_warn(
+        &inner.store,
+        &now,
+        by,
+        "approval.expired",
+        &json!({"approvalId": id}),
+    );
     Ok(true)
 }
 
@@ -773,6 +907,78 @@ mod tests {
         mgr.resolve(&pending[0].id, "allow", "phone", false)
             .unwrap();
         assert_eq!(h.await.unwrap(), Decision::Allow { remember: false });
+    }
+
+    /// V-05：提交之后的审计失败不能把已经生效的审批变成报错。
+    ///
+    /// 故障注入：另开一条连接 DROP 掉 audit 表，让 `store.audit` 必然失败。
+    /// 此时状态 CAS、waiter 唤醒、事件广播都已完成，若仍返回 Err，
+    /// 手机端会显示失败而重试只会得到 ALREADY_RESOLVED。
+    #[tokio::test]
+    async fn resolve_succeeds_when_audit_write_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("state.db");
+        let store = Store::open(&db).unwrap();
+        let clock = FixedClock::new(Utc.with_ymd_and_hms(2026, 11, 19, 8, 0, 0).unwrap());
+        let (tx, _) = broadcast::channel(64);
+        let mgr = ApprovalManager::new(
+            store.clone(),
+            Config::default().approvals,
+            Arc::new(clock),
+            Arc::new(SeqIdGen::new()),
+            tx,
+        );
+        let mgr2 = mgr.clone();
+        let h = tokio::spawn(async move {
+            mgr2.request("s1", "tc1", "bash", &json!({"command": "cargo test"}))
+                .await
+                .unwrap()
+        });
+        let id = loop {
+            if let Some(v) = store.list_pending_approvals(Some("s1")).unwrap().first() {
+                break v.id.clone();
+            }
+            tokio::task::yield_now().await;
+        };
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute_batch("DROP TABLE audit;")
+            .unwrap();
+        let view = mgr
+            .resolve(&id, "allow", "phone", false)
+            .expect("审计失败不应把已生效的审批变成报错");
+        assert_eq!(view.state, "allowed");
+        assert_eq!(
+            h.await.unwrap(),
+            Decision::Allow { remember: false },
+            "审计失败也必须唤醒 pi 侧的 waiter"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_immediately_after_visible_never_hangs() {
+        // 审批一旦在库里可见，其他设备就可能立刻 resolve。
+        let (mgr, store, _clock) = setup();
+        for i in 0..5 {
+            let mgr2 = mgr.clone();
+            let h = tokio::spawn(async move {
+                mgr2.request("s1", "tc1", "bash", &json!({"command": "cargo test"}))
+                    .await
+                    .unwrap()
+            });
+            let id = loop {
+                if let Some(v) = store.list_pending_approvals(Some("s1")).unwrap().first() {
+                    break v.id.clone();
+                }
+                tokio::task::yield_now().await;
+            };
+            mgr.resolve(&id, "allow", "phone", false).unwrap();
+            let d = tokio::time::timeout(std::time::Duration::from_secs(2), h)
+                .await
+                .expect("审批可见后立即 resolve 必须唤醒请求方")
+                .unwrap();
+            assert_eq!(d, Decision::Allow { remember: false }, "round {i}");
+        }
     }
 
     #[tokio::test]
@@ -986,5 +1192,112 @@ mod tests {
     #[test]
     fn system_clock_is_available() {
         let _ = SystemClock.now();
+    }
+
+    #[tokio::test]
+    async fn approval_ids_survive_restart_without_pk_collision() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("carry.db");
+        let clock = FixedClock::new(Utc.with_ymd_and_hms(2026, 11, 19, 8, 0, 0).unwrap());
+
+        for round in 0..2 {
+            // 每次重启 SeqIdGen 从 1 重新计数；approvals 表从不删行，
+            // 所以 id 必须自带跨重启熵，否则第二轮必撞主键。
+            let store = Store::open(&path).unwrap();
+            let (tx, _) = broadcast::channel(8);
+            let mgr = ApprovalManager::new(
+                store.clone(),
+                Config::default().approvals,
+                Arc::new(clock.clone()),
+                Arc::new(SeqIdGen::new()),
+                tx,
+            );
+            let mgr2 = mgr.clone();
+            let h = tokio::spawn(async move {
+                mgr2.request("s1", "tc1", "bash", &json!({"command": "cargo test"}))
+                    .await
+                    .unwrap()
+            });
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            let id = mgr.pending(Some("s1")).unwrap()[0].id.clone();
+            assert_eq!(mgr.pending(Some("s1")).unwrap().len(), 1, "round {round}");
+            mgr.resolve(&id, "allow", "phone", false).unwrap();
+            assert_eq!(h.await.unwrap(), Decision::Allow { remember: false });
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_session_denies_pending_and_wakes_waiter() {
+        let (mgr, store, _clock) = setup();
+        let mgr2 = mgr.clone();
+        let h = tokio::spawn(async move {
+            mgr2.request("s1", "tc1", "bash", &json!({"command": "cargo test"}))
+                .await
+                .unwrap()
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        assert_eq!(mgr.cancel_session("s1").unwrap(), 1);
+        // fail-closed：会话没了，等待中的工具调用必须立刻拿到 Deny 而不是挂死。
+        assert_eq!(h.await.unwrap(), Decision::Deny);
+        assert_eq!(mgr.pending(Some("s1")).unwrap().len(), 0);
+        let id = store.list_pending_approvals(None).unwrap();
+        assert!(id.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancel_session_ignores_already_resolved() {
+        let (mgr, _store, _clock) = setup();
+        let mgr2 = mgr.clone();
+        let h = tokio::spawn(async move {
+            mgr2.request("s1", "tc1", "bash", &json!({"command": "cargo test"}))
+                .await
+                .unwrap()
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        let id = mgr.pending(Some("s1")).unwrap()[0].id.clone();
+        mgr.resolve(&id, "allow", "phone", false).unwrap();
+        assert_eq!(h.await.unwrap(), Decision::Allow { remember: false });
+        // 已解决的审批不能再被 cancel 覆写（CAS 失败直接跳过）。
+        assert_eq!(mgr.cancel_session("s1").unwrap(), 0);
+    }
+
+    /// 审批视图必须带上去敏后的工具入参：写文件类审批要能看到目标路径与内容，
+    /// 否则手机端的「待审批」卡片只有一句「写入文件」无从判断（P3 群）。
+    ///
+    /// 必须用 `#[tokio::test]`：`request()` 在内部 spawn 并依赖调度器推进到
+    /// 事件发送点，`std::thread::sleep` 会阻塞当前线程导致 pending 一直为空。
+    #[tokio::test]
+    async fn approval_view_carries_tool_args() {
+        let (mgr, _store, _clock) = setup();
+        let mgr2 = mgr.clone();
+        let h = tokio::spawn(async move {
+            mgr2.request(
+                "s1",
+                "tc-args",
+                "write",
+                &json!({"path": "src/main.rs", "content": "fn main() {}"}),
+            )
+            .await
+            .unwrap()
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        let view = mgr.pending(Some("s1")).unwrap().remove(0);
+        assert_eq!(view.args["path"], json!("src/main.rs"));
+        mgr.resolve(&view.id, "deny", "test", false).unwrap();
+        let _ = h.await;
+    }
+
+    /// 参数过大时必须截断成字符串：审批帧有 1MiB 上限，整份文件内容塞不进去。
+    #[test]
+    fn oversized_args_are_truncated_to_text() {
+        let big = "x".repeat(9000);
+        let v = truncate_json(&json!({ "content": big }), 100);
+        assert!(v.is_string(), "超长入参应降级为字符串，实际 {v}");
+        assert!(v.as_str().unwrap().chars().count() <= 101);
+        // 小入参保持结构化：UI 可以按字段渲染。
+        let small = truncate_json(&json!({ "path": "a.txt" }), 100);
+        assert_eq!(small["path"], json!("a.txt"));
+        // Null 保持 Null：UI 据此隐藏参数块。
+        assert!(truncate_json(&Value::Null, 100).is_null());
     }
 }

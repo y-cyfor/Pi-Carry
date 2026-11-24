@@ -50,4 +50,15 @@ class SeqWatermarkTest {
         assertTrue(watermark.accept("a::s1", 1))
         assertFalse(watermark.accept("b::s1", 1))
     }
+
+    @Test
+    fun forgetDropsSingleSessionWatermark() {
+        // closeSession 要能清掉该会话水位，重开会话时从快照 lastSeq 重建。
+        val watermark = SeqWatermark()
+        watermark.observe("n::s1", 9)
+        watermark.observe("n::s2", 9)
+        watermark.forget("n::s1")
+        assertTrue(watermark.accept("n::s1", 1))
+        assertFalse(watermark.accept("n::s2", 1))
+    }
 }

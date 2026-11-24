@@ -16,10 +16,32 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WindowEvent};
 use tracing_subscriber::fmt::time::ChronoLocal;
 
+/// desktop.log 超过这个大小就在下次写入前轮转，避免常驻托盘时无限增长。
+const LOG_ROTATE_BYTES: u64 = 5 * 1024 * 1024;
+/// get_logs 只读日志尾部这么多字节：日志可能很大，整文件读入会按文件大小分配内存。
+const LOG_TAIL_BYTES: u64 = 256 * 1024;
+
+/// 第二个实例发给首个实例的信号内容（Unix socket 实现）。
+#[cfg(unix)]
+const SHOW_MESSAGE: &str = "show";
+
+/// 首个实例保留的监听套接字。故意不 drop：单实例互斥必须覆盖整个进程生命周期。
+#[cfg(unix)]
+static SOCKET_LISTENER: std::sync::OnceLock<std::os::unix::net::UnixListener> =
+    std::sync::OnceLock::new();
+
 struct AppState {
     bridge: Mutex<Option<Arc<Bridge>>>,
     last_error: Mutex<Option<String>>,
     close_to_tray: AtomicBool,
+    /// restart_service 的并发守卫：两个并发重启会各自起一个 Bridge，后写入者覆盖前者造成泄漏。
+    restarting: AtomicBool,
+    /// 桥接生命周期锁：启动与重启都走它，否则「开机启动仍在 launch_bridge」时
+    /// 点一下重启就会同时存在两个 Bridge（同 endpoint_secret、同 SQLite），
+    /// 被覆盖的那个既不断连也不释放子进程（D-1）。
+    lifecycle: tokio::sync::Mutex<()>,
+    /// 设置读写锁：`update_settings` 是「读—改—写」，两次保存并发会互相覆盖。
+    settings: Mutex<()>,
 }
 
 impl Default for AppState {
@@ -28,7 +50,23 @@ impl Default for AppState {
             bridge: Mutex::new(None),
             last_error: Mutex::new(None),
             close_to_tray: AtomicBool::new(true),
+            restarting: AtomicBool::new(false),
+            lifecycle: tokio::sync::Mutex::new(()),
+            settings: Mutex::new(()),
         }
+    }
+}
+
+/// 安装新 Bridge。槽位里如果已经有（并发启动的）旧 Bridge，必须关掉它：
+/// 直接覆盖会让旧实例的 endpoint、pi 子进程、后台任务泄漏到进程退出。
+async fn install_bridge(state: &AppState, bridge: Arc<Bridge>) {
+    let displaced = {
+        let mut slot = lock(&state.bridge);
+        slot.replace(bridge)
+    };
+    if let Some(old) = displaced {
+        tracing::warn!("发现并发的旧 Bridge，正在关闭以免端点泄漏");
+        old.shutdown().await;
     }
 }
 
@@ -41,6 +79,14 @@ impl AppState {
         lock(&self.bridge)
             .clone()
             .ok_or_else(|| "桥接服务尚未启动".to_string())
+    }
+
+    /// 优先用桥接持有的路径；桥接未启动时退回本机发现，保证设置页仍可读改配置。
+    fn paths(&self) -> Paths {
+        match lock(&self.bridge).as_ref() {
+            Some(bridge) => bridge.paths.clone(),
+            None => Paths::discover(),
+        }
     }
 
     fn set_error(&self, message: Option<String>) {
@@ -60,6 +106,82 @@ fn now_rfc3339() -> String {
     pi_carry_core::rfc3339(chrono::Utc::now())
 }
 
+/// 从 node_status() 的返回值里算概览计数。
+///
+/// 直接复用 node_status 已经算好的 devices/sessions，不再各调一次 list_devices/sessions.list()：
+/// 两者都要全量扫盘，而 5 秒轮询会把它变成持续的 CPU/磁盘开销。
+fn status_counts(node: &Value) -> Value {
+    let empty = Vec::new();
+    let devices = node
+        .get("devices")
+        .and_then(Value::as_array)
+        .unwrap_or(&empty);
+    let sessions = node
+        .get("sessions")
+        .and_then(Value::as_array)
+        .unwrap_or(&empty);
+    let active_devices = || {
+        devices
+            // DeviceRecord 没有 rename_all，键名是 snake_case（revoked_at）。
+            .iter()
+            .filter(|d| d.get("revoked_at").map(Value::is_null).unwrap_or(true))
+    };
+    json!({
+        "deviceCount": active_devices().count(),
+        "onlineDevices": active_devices()
+            .filter(|d| d.get("online").and_then(Value::as_bool).unwrap_or(false))
+            .count(),
+        "sessionCount": sessions.len(),
+        "runningSessions": sessions
+            .iter()
+            .filter(|s| s.get("status").and_then(Value::as_str) == Some("streaming"))
+            .count(),
+        // SessionSummary 带 rename_all=camelCase，键名是 pendingApprovals。
+        "pendingApprovals": sessions
+            .iter()
+            .map(|s| {
+                s.get("pendingApprovals")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0)
+            })
+            .sum::<u64>(),
+    })
+}
+
+/// 把 `node_status()` 里的 devices（snake_case DeviceRecord）转成前端用的 camelCase 形式。
+///
+/// 前端每 5 秒轮询一次状态；如果概览不带上设备/会话明细，前端就得再调
+/// `list_devices` + `list_sessions` 各做一次全量扫盘（D-3）。
+/// `node_status()` 本身已经把两者都算好了，这里只做键名映射。
+fn device_items_from_node(devices: &[Value]) -> Value {
+    let items: Vec<Value> = devices
+        .iter()
+        .map(|d| {
+            let get = |k: &str| d.get(k).cloned().unwrap_or(Value::Null);
+            // 连接方式由 node_status 合并进 devices；离线设备没有，保持 null，
+            // 前端据此不渲染徽章（而不是渲染一个「未知」）。
+            let connection = d
+                .get("connection")
+                .filter(|c| c.is_object())
+                .cloned()
+                .unwrap_or(Value::Null);
+            json!({
+                "id": get("id"),
+                "name": get("name"),
+                "platform": get("platform"),
+                "deviceClass": get("device_class"),
+                "capability": get("capability"),
+                "pairedAt": get("paired_at"),
+                "lastSeen": get("last_seen"),
+                "revokedAt": get("revoked_at"),
+                "online": get("online"),
+                "connection": connection,
+            })
+        })
+        .collect();
+    Value::Array(items)
+}
+
 fn status_value(state: &AppState) -> Value {
     let Some(bridge) = lock(&state.bridge).clone() else {
         return json!({
@@ -68,12 +190,22 @@ fn status_value(state: &AppState) -> Value {
             "configPath": Paths::discover().config().display().to_string(),
             "dataDir": Paths::discover().home.display().to_string(),
             "version": pi_carry_core::VERSION,
+            "devices": [],
+            "sessions": [],
         });
     };
     let node = bridge.node_status();
-    let devices = bridge.store.list_devices().unwrap_or_default();
-    let sessions = bridge.sessions.list().unwrap_or_default();
+    let counts = status_counts(&node);
     let pairing = bridge.pairing.status();
+    let devices = node
+        .get("devices")
+        .and_then(Value::as_array)
+        .map(|d| device_items_from_node(d))
+        .unwrap_or_else(|| Value::Array(Vec::new()));
+    let sessions = node
+        .get("sessions")
+        .cloned()
+        .unwrap_or_else(|| Value::Array(Vec::new()));
     json!({
         "running": true,
         "nodeName": node.get("nodeName").cloned().unwrap_or(Value::Null),
@@ -81,39 +213,31 @@ fn status_value(state: &AppState) -> Value {
         "relayMode": node.get("relayMode").cloned().unwrap_or(Value::Null),
         "directAddresses": node.get("directAddresses").cloned().unwrap_or(Value::Null),
         "piInstalled": node.get("piInstalled").cloned().unwrap_or(Value::Bool(false)),
-        "deviceCount": devices.iter().filter(|d| d.revoked_at.is_none()).count(),
-        "onlineDevices": devices.iter().filter(|d| d.revoked_at.is_none() && d.online).count(),
-        "sessionCount": sessions.len(),
-        "runningSessions": sessions.iter().filter(|s| s.status == "streaming").count(),
-        "pendingApprovals": sessions.iter().map(|s| s.pending_approvals).sum::<u32>(),
+        "deviceCount": counts["deviceCount"].clone(),
+        "onlineDevices": counts["onlineDevices"].clone(),
+        "sessionCount": counts["sessionCount"].clone(),
+        "runningSessions": counts["runningSessions"].clone(),
+        "pendingApprovals": counts["pendingApprovals"].clone(),
         "pairing": pairing,
         "configPath": bridge.paths.config().display().to_string(),
         "dataDir": bridge.paths.home.display().to_string(),
         "version": pi_carry_core::VERSION,
         "lastError": state.error(),
+        // 概览自带明细：前端不需要再发起两次全量扫描（D-3）。
+        "devices": devices,
+        "sessions": sessions,
     })
 }
 
 fn devices_value(state: &AppState) -> Result<Value, String> {
     let bridge = state.bridge()?;
     let rows = bridge.store.list_devices().map_err(|e| e.to_string())?;
-    let items: Vec<Value> = rows
-        .into_iter()
-        .map(|d| {
-            json!({
-                "id": d.id,
-                "name": d.name,
-                "platform": d.platform,
-                "deviceClass": d.device_class,
-                "capability": d.capability,
-                "pairedAt": d.paired_at,
-                "lastSeen": d.last_seen,
-                "revokedAt": d.revoked_at,
-                "online": d.online,
-            })
-        })
-        .collect();
-    Ok(Value::Array(items))
+    // 走同一个映射函数，避免「概览」与「设备页」两条路径的字段漂移。
+    let raw = serde_json::to_value(&rows).map_err(|e| e.to_string())?;
+    let empty = Vec::new();
+    Ok(device_items_from_node(
+        raw.as_array().unwrap_or(&empty).as_slice(),
+    ))
 }
 
 fn sessions_value(state: &AppState) -> Result<Value, String> {
@@ -208,9 +332,11 @@ fn set_window_theme(window: tauri::Window, theme: String) -> Result<(), String> 
 
 #[tauri::command]
 fn get_settings(state: State<'_, AppState>) -> Result<Value, String> {
-    let bridge = state.bridge()?;
+    // 不依赖桥接存活：relay 等配置写坏导致桥接起不来时，用户仍要能在设置页改回去。
+    let bridge = lock(&state.bridge).clone();
+    let paths = state.paths();
     // 从磁盘读取，避免使用桥接启动时的配置快照：否则刚保存的主题/节点设置会被旧值覆盖。
-    let config = Config::load(&bridge.paths).map_err(|e| e.to_string())?;
+    let config = Config::load(&paths).map_err(|e| e.to_string())?;
     let mut value = serde_json::to_value(config).map_err(|e| e.to_string())?;
     if let Value::Object(map) = &mut value {
         map.insert(
@@ -219,20 +345,41 @@ fn get_settings(state: State<'_, AppState>) -> Result<Value, String> {
         );
         map.insert(
             "dataDir".into(),
-            Value::String(bridge.paths.home.display().to_string()),
+            Value::String(paths.home.display().to_string()),
         );
         map.insert(
             "configPath".into(),
-            Value::String(bridge.paths.config().display().to_string()),
+            Value::String(paths.config().display().to_string()),
+        );
+        map.insert(
+            "bridgeError".into(),
+            // 仅当真的启动失败（有 lastError）才报错：桥接还在启动中不算错误，避免设置页误报红。
+            match (&bridge, state.error()) {
+                (Some(_), _) | (None, None) => Value::Null,
+                (None, Some(err)) => Value::String(err),
+            },
         );
     }
     Ok(value)
 }
 
-#[tauri::command]
-fn update_settings(state: State<'_, AppState>, values: Value) -> Result<Value, String> {
-    let bridge = state.bridge()?;
-    let mut config = Config::load(&bridge.paths).map_err(|e| e.to_string())?;
+/// relay URL 形态校验：桥接启动时才 parse，非法值先落盘会让桥接再也起不来。
+fn validate_relay_urls(urls: &[String]) -> Result<(), String> {
+    for url in urls {
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            return Err(format!(
+                "relay URL 必须以 http:// 或 https:// 开头，非法值：{url}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// 把设置页提交的 payload 叠加到 `previous` 上。
+///
+/// 纯函数，不碰磁盘也不碰 `AppState`，因此可以直接单测：只覆盖 payload 里
+/// 真实出现的键，其余字段保留磁盘上的旧值——设置页只是「部分提交」。
+fn apply_settings(mut config: Config, values: &Value) -> Result<Config, String> {
     if let Some(v) = values.get("nodeName").and_then(Value::as_str) {
         config.node.name = v.trim().to_string();
     }
@@ -243,24 +390,24 @@ fn update_settings(state: State<'_, AppState>, values: Value) -> Result<Value, S
         config.transport.relay_mode = v.to_string();
     }
     if let Some(arr) = values.get("relayUrls").and_then(Value::as_array) {
-        config.transport.relay_urls = arr
+        let urls: Vec<String> = arr
             .iter()
             .filter_map(Value::as_str)
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string)
             .collect();
+        validate_relay_urls(&urls)?;
+        config.transport.relay_urls = urls;
     }
     if let Some(v) = values.get("enableMdns").and_then(Value::as_bool) {
         config.transport.enable_mdns = v;
     }
     if let Some(v) = values.get("autoStart").and_then(Value::as_bool) {
         config.service.autostart = v;
-        set_autostart(v)?;
     }
     if let Some(v) = values.get("closeToTray").and_then(Value::as_bool) {
         config.service.close_to_tray = v;
-        state.close_to_tray.store(v, Ordering::Relaxed);
     }
     if let Some(v) = values.get("defaultCapability").and_then(Value::as_str) {
         config.sessions.default_capability = v.to_string();
@@ -271,15 +418,72 @@ fn update_settings(state: State<'_, AppState>, values: Value) -> Result<Value, S
         }
         config.ui.theme = v.to_string();
     }
+    if let Some(arr) = values.get("allowedRoots").and_then(Value::as_array) {
+        // 每行一个绝对路径；空行忽略。校验交给 Config::validate（要求绝对路径），
+        // 不在这里自己拼第二套规则，否则两处会漂移。
+        config.sessions.allowed_roots = arr
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+    }
     if let Some(v) = values.get("approvalTimeoutSecs").and_then(Value::as_u64) {
         config.approvals.timeout_secs = v;
     }
+    Ok(config)
+}
+
+/// 配置的「读—改—写」三步。调用方必须持有 `AppState` 的 `settings` 守卫：
+/// 同一秒内的两次保存（用户快速拖两个滑块、WebView 重放事件）如果各自从
+/// 同一份旧快照出发，后写入者会把前者的字段覆盖回旧值，静默丢掉一次修改。
+///
+/// 返回 `(旧配置, 新配置)`：旧值用于开机自启失败时回滚。
+fn apply_and_save_settings(
+    _settings: &std::sync::MutexGuard<'_, ()>,
+    paths: &Paths,
+    values: &Value,
+) -> Result<(Config, Config), String> {
+    let previous = Config::load(paths).map_err(|e| e.to_string())?;
+    let config = apply_settings(previous.clone(), values)?;
+    // 先落盘再应用开机自启：反序时 save 失败（校验拒绝）会留下注册表已改、配置未改的不一致。
     config
-        .save(&bridge.paths)
+        .save(paths)
         .map_err(|e| format!("保存配置失败: {e}"))?;
-    let _ = bridge
-        .store
-        .audit(&now_rfc3339(), "desktop", "settings.update", &values);
+    Ok((previous, config))
+}
+
+#[tauri::command]
+fn update_settings(state: State<'_, AppState>, values: Value) -> Result<Value, String> {
+    // 整段「读—改—写」串行（理由见 apply_and_save_settings）。只锁本命令，
+    // 不与 restart_service 的 lifecycle 锁嵌套，也不在这里 await。
+    let settings = lock(&state.settings);
+    // 不依赖桥接存活：relay 等配置写坏导致桥接起不来时，用户仍要能在设置页改回去。
+    let bridge = lock(&state.bridge).clone();
+    let paths = state.paths();
+    // 传引用：守卫活到本函数结尾，开机自启失败的回滚落盘也在锁内。
+    let (previous, config) = apply_and_save_settings(&settings, &paths, &values)?;
+    // 落盘成功后才同步内存里的托盘开关：payload 被校验拒绝时不留半套状态。
+    if let Some(v) = values.get("closeToTray").and_then(Value::as_bool) {
+        state.close_to_tray.store(v, Ordering::Relaxed);
+    }
+    if let Some(v) = values.get("autoStart").and_then(Value::as_bool) {
+        if let Err(err) = set_autostart(v) {
+            // 注册表没改成，把配置回滚到旧值，避免两边对不上。
+            // 只回滚 service.autostart：同一 payload 里的其他字段已经成功落盘，
+            // 内存里的 close_to_tray 也已同步为新值，不再动它。
+            let mut rolled_back = config.clone();
+            rolled_back.service.autostart = previous.service.autostart;
+            let _ = rolled_back.save(&paths);
+            return Err(err);
+        }
+    }
+    if let Some(bridge) = &bridge {
+        let _ = bridge
+            .store
+            .audit(&now_rfc3339(), "desktop", "settings.update", &values);
+    }
     Ok(json!({
         "saved": true,
         "restartRequired": values.get("relayMode").is_some()
@@ -288,20 +492,41 @@ fn update_settings(state: State<'_, AppState>, values: Value) -> Result<Value, S
             || values.get("nodeName").is_some()
             || values.get("piPath").is_some()
             || values.get("defaultCapability").is_some()
+            // SessionManager 持有 Config 克隆，允许根目录只在启动时读取，
+            // 不重启的话给手机展示的仍是旧根目录。
+            || values.get("allowedRoots").is_some()
             || values.get("approvalTimeoutSecs").is_some(),
     }))
 }
 
 #[tauri::command]
 async fn restart_service(app: AppHandle, state: State<'_, AppState>) -> Result<Value, String> {
+    // 两个并发重启会各自起一个同 endpoint_secret 的 Bridge，后写入者覆盖前者并泄漏。
+    if state.restarting.swap(true, Ordering::SeqCst) {
+        return Err("正在重启桥接服务，请稍候".into());
+    }
+    // Drop 复位：中途 panic 或 future 被丢弃时守卫也会松开，否则重启按钮会永久失效。
+    struct RestartGuard<'a>(&'a AtomicBool);
+    impl Drop for RestartGuard<'_> {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::SeqCst);
+        }
+    }
+    let _guard = RestartGuard(&state.restarting);
+    restart_bridge_now(&app, &state).await
+}
+
+async fn restart_bridge_now(app: &AppHandle, state: &AppState) -> Result<Value, String> {
+    // 串行化整个「关旧的→起新的」过程：与开机启动的 launch_bridge 也不能重叠。
+    let _lifecycle = state.lifecycle.lock().await;
     if let Some(old) = state.take_bridge() {
         old.shutdown().await;
     }
     state.set_error(None);
     match launch_bridge().await {
         Ok(bridge) => {
-            *lock(&state.bridge) = Some(bridge);
-            let value = status_value(&state);
+            install_bridge(state, bridge).await;
+            let value = status_value(state);
             let _ = app.emit("bridge-status", value.clone());
             Ok(value)
         }
@@ -312,12 +537,37 @@ async fn restart_service(app: AppHandle, state: State<'_, AppState>) -> Result<V
     }
 }
 
+/// 只读日志尾部：整文件读入会按文件大小分配内存，而调用方只要最后几百行。
+fn read_log_tail(path: &std::path::Path, max_bytes: u64) -> std::io::Result<String> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    let truncated = len > max_bytes;
+    if truncated {
+        file.seek(SeekFrom::Start(len - max_bytes))?;
+    }
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)?;
+    let mut text = String::from_utf8_lossy(&buf).into_owned();
+    if truncated {
+        // 起点落在行中间：丢掉这半行，保证返回的每一行都是完整行。
+        match text.find('\n') {
+            Some(idx) => {
+                text.drain(..=idx);
+            }
+            None => text.clear(),
+        }
+    }
+    Ok(text)
+}
+
 #[tauri::command]
 fn get_logs(lines: Option<usize>) -> Value {
     let paths = Paths::discover();
     let log = paths.logs().join("desktop.log");
     let limit = lines.unwrap_or(240).min(2000);
-    match std::fs::read_to_string(&log) {
+    match read_log_tail(&log, LOG_TAIL_BYTES) {
         Ok(text) => {
             let mut rows: Vec<&str> = text.lines().collect();
             if rows.len() > limit {
@@ -334,15 +584,6 @@ fn get_logs(lines: Option<usize>) -> Value {
 
 #[tauri::command]
 fn open_data_dir() -> Result<(), String> {
-    let paths = Paths::discover();
-    paths
-        .ensure()
-        .map_err(|e| format!("创建数据目录失败: {e}"))?;
-    open_path(&paths.home)
-}
-
-#[tauri::command]
-fn open_config_dir() -> Result<(), String> {
     let paths = Paths::discover();
     paths
         .ensure()
@@ -401,16 +642,101 @@ fn set_autostart(enable: bool) -> Result<(), String> {
                 return Err(format!("reg add 退出码 {}", status.code().unwrap_or(-1)));
             }
         } else {
-            let _ = std::process::Command::new("reg")
+            let status = std::process::Command::new("reg")
                 .args(["delete", key, "/v", "pi-carry", "/f"])
-                .status();
+                .status()
+                .map_err(|e| format!("关闭开机自启失败: {e}"))?;
+            if !status.success() {
+                // 值本来就不存在时 reg delete 也返回非零：再查一次，确定没删掉才报错。
+                let still_registered = std::process::Command::new("reg")
+                    .args(["query", key, "/v", "pi-carry"])
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(true);
+                if still_registered {
+                    return Err(format!(
+                        "关闭开机自启失败：reg delete 退出码 {}",
+                        status.code().unwrap_or(-1)
+                    ));
+                }
+            }
         }
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
     {
-        let _ = enable;
+        // LaunchAgent：登录时由 launchd 拉起，与 Windows 的 Run 键语义对齐。
+        let exe = std::env::current_exe().map_err(|e| format!("无法获取程序路径: {e}"))?;
+        let home = std::env::var("HOME").map_err(|_| "无法定位 HOME 目录".to_string())?;
+        let dir = std::path::Path::new(&home).join("Library/LaunchAgents");
+        let plist = dir.join("dev.picarry.desktop.plist");
+        if enable {
+            std::fs::create_dir_all(&dir)
+                .map_err(|e| format!("创建 LaunchAgents 目录失败: {e}"))?;
+            let body = format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+                 <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+                 <plist version=\"1.0\"><dict>\n\
+                 \u{20}<key>Label</key><string>dev.picarry.desktop</string>\n\
+                 \u{20}<key>ProgramArguments</key><array><string>{}</string></array>\n\
+                 \u{20}<key>RunAtLoad</key><true/>\n\
+                 \u{20}<key>ProcessType</key><string>Interactive</string>\n\
+                 </dict></plist>\n",
+                xml_escape(&exe.to_string_lossy())
+            );
+            crate::config_atomic_write(&plist, body.as_bytes())?;
+            // load -w 让本次登录也立即生效；已加载时返回非零，不算失败。
+            let _ = std::process::Command::new("launchctl")
+                .args(["load", "-w", &plist.to_string_lossy()])
+                .status();
+        } else {
+            let _ = std::process::Command::new("launchctl")
+                .args(["unload", "-w", &plist.to_string_lossy()])
+                .status();
+            if plist.exists() {
+                std::fs::remove_file(&plist).map_err(|e| format!("删除开机自启配置失败: {e}"))?;
+            }
+        }
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        // XDG autostart：桌面环境在登录后按 .desktop 文件拉起。
+        let exe = std::env::current_exe().map_err(|e| format!("无法获取程序路径: {e}"))?;
+        let home = std::env::var("HOME").map_err(|_| "无法定位 HOME 目录".to_string())?;
+        let dir = std::path::Path::new(&home).join(".config/autostart");
+        let entry = dir.join("pi-carry.desktop");
+        if enable {
+            std::fs::create_dir_all(&dir).map_err(|e| format!("创建 autostart 目录失败: {e}"))?;
+            // Exec 需要引号包裹路径，且路径内的引号/反斜杠要按 Desktop Entry 规范转义。
+            let exec = format!(
+                "\"{}\"",
+                exe.to_string_lossy()
+                    .replace('\\', "\\\\")
+                    .replace('"', "\\\"")
+            );
+            let body = format!(
+                "[Desktop Entry]\nType=Application\nName=pi carry\nComment=pi 的远程桥接\nExec={exec}\nTerminal=false\nX-GNOME-Autostart-enabled=true\n"
+            );
+            crate::config_atomic_write(&entry, body.as_bytes())?;
+        } else if entry.exists() {
+            std::fs::remove_file(&entry).map_err(|e| format!("删除开机自启配置失败: {e}"))?;
+        }
     }
     Ok(())
+}
+
+/// XML 文本转义（plist 字符串值用）。
+#[cfg(target_os = "macos")]
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// 原子写配置文件的薄包装：桌面端与核心共用同一套「先写临时文件再 rename」语义。
+#[cfg(unix)]
+fn config_atomic_write(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    pi_carry_core::config::atomic_write(path, bytes)
+        .map_err(|e| format!("写入 {} 失败: {e}", path.display()))
 }
 
 fn qr_svg(data: &str) -> Result<String, String> {
@@ -440,13 +766,56 @@ fn show_main(app: &AppHandle) {
     }
 }
 
+/// 写入前轮转：常驻托盘时 desktop.log 只增不减，先转成 desktop.log.1 再新建。
+///
+/// 这里刻意不写 tracing 日志：它由下面的写入器在持锁状态下调用，再进 tracing 会重入死锁。
+fn rotate_log_if_needed(log: &std::path::Path) -> std::io::Result<()> {
+    let Ok(meta) = std::fs::metadata(log) else {
+        return Ok(());
+    };
+    if meta.len() <= LOG_ROTATE_BYTES {
+        return Ok(());
+    }
+    let backup = log.with_extension("log.1");
+    // Windows 上 rename 不会覆盖已存在的目标，先删掉上一份轮转文件。
+    let _ = std::fs::remove_file(&backup);
+    std::fs::rename(log, &backup)
+}
+
+/// 每次写入前检查大小并轮转。
+///
+/// 不长期持有文件句柄：Windows 上仍被打开的文件无法 rename，常驻进程会一直占着句柄，
+/// 只在启动时轮转等于让 desktop.log 无限增长。
+struct RotatingLog {
+    path: std::path::PathBuf,
+}
+
+impl std::io::Write for RotatingLog {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        rotate_log_if_needed(&self.path)?;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
+        file.write_all(buf)?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 fn init_logging() {
     let paths = Paths::discover();
     let _ = paths.ensure();
-    let file = std::fs::OpenOptions::new()
+    let log = paths.logs().join("desktop.log");
+    // 先建出文件：首次启动时日志目录可能是空的，get_logs 需要文件存在才不报空。
+    let prepared = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(paths.logs().join("desktop.log"));
+        .open(&log)
+        .is_ok();
     let level = std::env::var("PI_CARRY_LOG").unwrap_or_else(|_| "info".into());
     let filter = tracing_subscriber::EnvFilter::try_new(level)
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
@@ -454,12 +823,30 @@ fn init_logging() {
         .with_env_filter(filter)
         .with_timer(ChronoLocal::rfc_3339())
         .with_ansi(false);
-    if let Ok(file) = file {
-        let writer = Mutex::new(file);
+    if prepared {
+        // Mutex 保证单个事件的多段写入不与其他线程交错。
+        let writer = Mutex::new(RotatingLog { path: log });
         let _ = builder.with_writer(writer).try_init();
     } else {
         let _ = builder.try_init();
     }
+}
+
+/// --smoke 的数据目录：没指定 PI_CARRY_HOME 时自动建一个隔离临时目录。
+///
+/// 探针会起一个完整 Bridge（同一 endpoint_secret、同一 SQLite），如果和
+/// 正在跑的桌面实例共用数据目录，就会产生两个端点抢同一身份的状态（D-15）。
+fn isolated_smoke_home() -> std::io::Result<std::path::PathBuf> {
+    let dir = std::env::temp_dir().join(format!(
+        "pi-carry-smoke-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
 }
 
 fn run_smoke() -> Result<(), String> {
@@ -484,9 +871,16 @@ fn run_smoke() -> Result<(), String> {
     })
 }
 
-/// 单实例互斥：第二个进程启动时直接退出，避免两个托盘同时持有同一个端点。
+/// 单实例互斥：第二个进程启动时把「显示主窗口」信号交给已运行实例，然后退出。
+///
+/// 直接 `exit(0)` 会让用户双击图标“什么都没发生”（D-8）：
+/// 托盘隐藏、窗口最小化时尤其容易被当成程序没启动。
+///
+/// 返回 `Ok(true)` = 本进程是主实例；`Ok(false)` = 已有实例在跑；
+/// `Err` = 拿不到互斥锁（无法保证单实例）。后者必须让调用方失败退出：
+/// 放行会让两个桌面进程并发写同一份 SQLite 与同一个 endpoint_secret。
 #[cfg(windows)]
-fn acquire_single_instance() -> bool {
+fn acquire_single_instance() -> Result<bool, String> {
     use std::ptr;
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
     use windows_sys::Win32::System::Threading::CreateMutexW;
@@ -495,35 +889,190 @@ fn acquire_single_instance() -> bool {
     unsafe {
         let handle = CreateMutexW(ptr::null(), 1, name.as_ptr());
         if handle.is_null() {
-            return true;
+            let code = GetLastError();
+            return Err(format!(
+                "无法获取单实例锁（CreateMutexW 失败，错误码 {code}）：\n\
+                 请确认没有另一个 pi-carry 桌面进程在运行，并检查当前用户是否有权限。\n\
+                 为避免两个进程同时写坏数据目录，本次启动已中止。"
+            ));
         }
         if GetLastError() == ERROR_ALREADY_EXISTS {
             CloseHandle(handle);
-            return false;
+            return Ok(false);
         }
         // 故意不关闭：句柄随进程退出由系统释放，保证互斥覆盖整个生命周期。
         let _ = handle;
-        true
+        Ok(true)
     }
 }
 
-#[cfg(not(windows))]
-fn acquire_single_instance() -> bool {
-    true
+/// 让已运行实例把窗口提到前台（Windows：具名事件）。
+#[cfg(windows)]
+fn notify_running_instance() {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenEventW, SetEvent, EVENT_MODIFY_STATE};
+    let name: Vec<u16> = "Local\\pi-carry-desktop-show\0".encode_utf16().collect();
+    unsafe {
+        let ev = OpenEventW(EVENT_MODIFY_STATE, 0, name.as_ptr());
+        if !ev.is_null() {
+            SetEvent(ev);
+            CloseHandle(ev);
+        }
+    }
+}
+
+/// 监听「显示主窗口」信号（Windows）。
+#[cfg(windows)]
+fn spawn_show_listener(app: tauri::AppHandle) {
+    use std::ptr;
+    use windows_sys::Win32::System::Threading::{
+        CreateEventW, ResetEvent, WaitForSingleObject, INFINITE,
+    };
+    let name: Vec<u16> = "Local\\pi-carry-desktop-show\0".encode_utf16().collect();
+    std::thread::spawn(move || unsafe {
+        // 手动重置事件：第二个实例只在 SetEvent 的一瞬间置位，消费后必须清回。
+        let ev = CreateEventW(ptr::null(), 1, 0, name.as_ptr());
+        if ev.is_null() {
+            return;
+        }
+        loop {
+            WaitForSingleObject(ev, INFINITE);
+            ResetEvent(ev);
+            show_main(&app);
+        }
+    });
+}
+
+#[cfg(unix)]
+fn acquire_single_instance() -> Result<bool, String> {
+    use std::io::Write;
+    use std::os::unix::net::{UnixListener, UnixStream};
+    let path = single_instance_socket_path();
+    if path.exists() {
+        // 能连上 = 已有活着的实例，把「显示窗口」发过去再退出；
+        // 连不上 = 上次崩溃留下的死 socket，清掉重建。
+        if let Ok(mut stream) = UnixStream::connect(&path) {
+            let _ = stream.write_all(SHOW_MESSAGE.as_bytes());
+            return Ok(false);
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+    match UnixListener::bind(&path) {
+        // 故意泄漏监听套接字：互斥必须覆盖整个进程生命周期，drop 会立刻释放。
+        Ok(listener) => {
+            SOCKET_LISTENER.set(listener).ok();
+            Ok(true)
+        }
+        // 绑不上（目录无权限/路径被占）就等于无法保证单实例：
+        // 放行会让两个桌面进程并发写同一份 SQLite 与同一个 endpoint_secret。
+        Err(e) => Err(format!(
+            "无法创建单实例锁 {}: {e}\n为避免两个进程同时写坏数据目录，本次启动已中止。",
+            path.display()
+        )),
+    }
+}
+
+/// 第一个实例收到的信号走这里；单实例监听线程只接一个客户端。
+#[cfg(unix)]
+fn notify_running_instance() {
+    // 第二个实例的动作在 acquire_single_instance 里完成（连上即写信号）。
+}
+
+/// 监听「显示主窗口」信号（Unix：已绑定的 socket 接受连接）。
+#[cfg(unix)]
+fn spawn_show_listener(app: tauri::AppHandle) {
+    let Some(listener) = SOCKET_LISTENER.get() else {
+        return;
+    };
+    std::thread::spawn(move || {
+        use std::io::Read;
+        loop {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let mut buf = [0u8; 16];
+                    let n = stream.read(&mut buf).unwrap_or(0);
+                    if &buf[..n] == SHOW_MESSAGE.as_bytes() {
+                        show_main(&app);
+                    }
+                }
+                // 单实例监听不该失败；失败还硬循环会空转，直接退出线程由下一次启动重建。
+                Err(_) => break,
+            }
+        }
+    });
+}
+
+/// 单实例锁的位置：优先用运行时目录，回落到 /tmp 并按用户区分。
+#[cfg(unix)]
+fn single_instance_socket_path() -> std::path::PathBuf {
+    if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
+        if !dir.is_empty() {
+            return std::path::PathBuf::from(dir).join("pi-carry-desktop.sock");
+        }
+    }
+    let user = std::env::var("USER")
+        .or_else(|_| std::env::var("LOGNAME"))
+        .unwrap_or_else(|_| "default".into());
+    let safe: String = user
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    std::env::temp_dir().join(format!("pi-carry-desktop-{safe}.sock"))
 }
 
 fn main() {
     // --smoke 是测试探针，不是第二个桌面实例：不打开窗口、不抢单实例互斥。
     // 必须先于互斥判定，否则桌面端已运行时会被 exit(0) 提前放行，smoke 假绿。
     let smoke = std::env::args().any(|a| a == "--smoke");
-    if !smoke && !acquire_single_instance() {
-        eprintln!("pi carry 已在运行");
-        std::process::exit(0);
+    // 探针自建的隔离目录要在退出时删掉：里面含 endpoint_secret 与 SQLite，
+    // 留在 %TEMP% 等于把节点身份副本散落在磁盘上（NEW-16）。
+    let mut smoke_owned_home: Option<std::path::PathBuf> = None;
+    if smoke {
+        // 探针不能与正在运行的桌面实例共享数据目录（两个 Bridge 会抢同一个
+        // endpoint_secret 与 SQLite）。没显式指定就自动隔离到临时目录。
+        if std::env::var_os("PI_CARRY_HOME").is_none() {
+            match isolated_smoke_home() {
+                Ok(dir) => {
+                    std::env::set_var("PI_CARRY_HOME", &dir);
+                    smoke_owned_home = Some(dir);
+                }
+                Err(e) => {
+                    eprintln!("无法创建冒烟测试目录: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+    } else {
+        match acquire_single_instance() {
+            Ok(true) => {}
+            Ok(false) => {
+                // 已有实例在跑：把窗口提上前台再退出，而不是无声退出（D-8）。
+                notify_running_instance();
+                std::process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
     }
 
     init_logging();
     if smoke {
-        if let Err(e) = run_smoke() {
+        let result = run_smoke();
+        if let Some(dir) = smoke_owned_home {
+            // SQLite 的 WAL/SHM 文件在连接关闭后才能删干净；Bridge::shutdown 已跑完。
+            if let Err(e) = std::fs::remove_dir_all(&dir) {
+                eprintln!("清理冒烟目录 {} 失败: {e}", dir.display());
+            }
+        }
+        if let Err(e) = result {
             eprintln!("{e}");
             std::process::exit(1);
         }
@@ -552,7 +1101,6 @@ fn main() {
             restart_service,
             get_logs,
             open_data_dir,
-            open_config_dir,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -567,6 +1115,8 @@ fn main() {
             }
 
             let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/32x32.png"))?;
+            // 第二个实例不会自己开窗口，而是通知首个实例把窗口提上来。
+            spawn_show_listener(app.handle().clone());
             let show = MenuItem::with_id(app, "show", "打开 pi carry", true, None::<&str>)?;
             let pair = MenuItem::with_id(app, "pair", "开始配对", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
@@ -600,9 +1150,12 @@ fn main() {
             let _ = app.emit("bridge-status", status_value(&state));
             tauri::async_runtime::spawn(async move {
                 let state = handle.state::<AppState>();
+                // 与 restart_service 共用生命周期锁：启动期间用户点重启会排队，
+                // 而不是各自起一个 Bridge（D-1）。
+                let _lifecycle = state.lifecycle.lock().await;
                 match launch_bridge().await {
                     Ok(bridge) => {
-                        *lock(&state.bridge) = Some(bridge);
+                        install_bridge(&state, bridge).await;
                         state.set_error(None);
                     }
                     Err(err) => {
@@ -646,4 +1199,241 @@ fn main() {
             });
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_path(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "pi-carry-desktop-test-{}-{}",
+            std::process::id(),
+            name
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("创建临时目录");
+        dir
+    }
+
+    #[test]
+    fn config_service_autostart_serializes_as_autostart() {
+        // serde 的 camelCase 不改写单词 "autostart"：前端回显读 service.autostart 才是对的
+        // （M19 报告为缺陷，实测不成立）。
+        let value = serde_json::to_value(Config::default()).expect("序列化配置");
+        let service = value.get("service").expect("service 段");
+        assert!(service.get("autostart").is_some());
+        assert!(service.get("autoStart").is_none());
+    }
+
+    #[test]
+    fn config_with_unparseable_relay_url_still_loads() {
+        // 这是 D-2 的前提：桥接因 relay URL 非法起不来（CoreError::Config），
+        // 但 Config::load 本身能成功，所以设置页可以在无桥接时读回并修正。
+        let dir = temp_path("broken-relay-config");
+        let paths = Paths::at(&dir);
+        let mut config = Config::default();
+        config.transport.relay_mode = "custom".into();
+        config.transport.relay_urls = vec!["relay.example.com".into()];
+        config.save(&paths).expect("写坏配置应能落盘");
+
+        let loaded = Config::load(&paths).expect("坏 relay URL 不应阻止读取配置");
+        assert_eq!(loaded.transport.relay_urls, vec!["relay.example.com"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn status_counts_reuses_node_status_devices_and_sessions() {
+        let node = json!({
+            "devices": [
+                {"id": "d1", "revoked_at": null, "online": true},
+                {"id": "d2", "revoked_at": null, "online": false},
+                {"id": "d3", "revoked_at": "2026-01-01T00:00:00Z", "online": true},
+            ],
+            "sessions": [
+                {"id": "s1", "status": "streaming", "pendingApprovals": 2},
+                {"id": "s2", "status": "idle", "pendingApprovals": 1},
+            ],
+        });
+
+        let counts = status_counts(&node);
+        assert_eq!(counts["deviceCount"], 2, "已吊销设备不计入");
+        assert_eq!(counts["onlineDevices"], 1, "已吊销设备不算在线");
+        assert_eq!(counts["sessionCount"], 2);
+        assert_eq!(counts["runningSessions"], 1);
+        assert_eq!(counts["pendingApprovals"], 3);
+    }
+
+    #[test]
+    fn status_counts_tolerates_missing_arrays() {
+        let counts = status_counts(&json!({ "running": true }));
+        assert_eq!(counts["deviceCount"], 0);
+        assert_eq!(counts["sessionCount"], 0);
+        assert_eq!(counts["pendingApprovals"], 0);
+    }
+
+    #[test]
+    fn validate_relay_urls_accepts_http_and_https() {
+        let urls = vec![
+            "https://relay.example.com".to_string(),
+            "http://127.0.0.1:8080".to_string(),
+        ];
+        assert!(validate_relay_urls(&urls).is_ok());
+        assert!(validate_relay_urls(&[]).is_ok());
+    }
+
+    #[test]
+    fn validate_relay_urls_rejects_missing_scheme() {
+        let err = validate_relay_urls(&["relay.example.com".to_string()]).unwrap_err();
+        assert!(err.contains("http:// 或 https://"), "实际错误: {err}");
+        assert!(err.contains("relay.example.com"));
+    }
+
+    #[test]
+    fn apply_settings_keeps_fields_absent_from_payload() {
+        // 设置页是部分提交：payload 里没有的键必须保留磁盘上的旧值。
+        let mut previous = Config::default();
+        previous.node.name = "旧节点".into();
+        previous.ui.theme = "dark".into();
+
+        let applied =
+            apply_settings(previous, &json!({ "nodeName": "  新节点  " })).expect("应能应用");
+        assert_eq!(applied.node.name, "新节点", "前后空白应被裁掉");
+        assert_eq!(applied.ui.theme, "dark", "未提交的字段必须保留");
+    }
+
+    #[test]
+    fn apply_settings_rejects_invalid_theme_and_relay_url() {
+        let err = apply_settings(Config::default(), &json!({ "theme": "neon" })).unwrap_err();
+        assert!(err.contains("auto/dark/light"), "实际错误: {err}");
+
+        let err = apply_settings(
+            Config::default(),
+            &json!({ "relayUrls": ["relay.example.com"] }),
+        )
+        .unwrap_err();
+        assert!(err.contains("http:// 或 https://"), "实际错误: {err}");
+    }
+
+    #[test]
+    fn concurrent_settings_saves_keep_every_field() {
+        // E-1：两次保存并发时，若各自从同一份旧快照出发，后写入者会把前者的字段
+        // 覆盖回旧值。八个线程各改一个互不相同的字段，全部经 settings 锁串行落盘，
+        // 最终八个字段都必须还在。
+        let dir = temp_path("concurrent-settings");
+        let paths = Paths::at(&dir);
+        Config::default().save(&paths).expect("写入初始配置");
+        let settings = Mutex::new(());
+        // 每项的取值都必须与 Config::default() 不同，否则丢更新也看不出来。
+        let payloads = [
+            json!({ "nodeName": "并发节点" }),
+            json!({ "piPath": "pi-concurrent" }),
+            json!({ "relayMode": "disabled" }),
+            json!({ "enableMdns": true }),
+            json!({ "defaultCapability": "read" }),
+            json!({ "theme": "light" }),
+            json!({ "approvalTimeoutSecs": 42 }),
+            json!({ "closeToTray": false }),
+        ];
+
+        std::thread::scope(|scope| {
+            for payload in &payloads {
+                scope.spawn(|| {
+                    let guard = lock(&settings);
+                    apply_and_save_settings(&guard, &paths, payload).expect("保存设置");
+                });
+            }
+        });
+
+        let saved = Config::load(&paths).expect("读回配置");
+        assert_eq!(saved.node.name, "并发节点");
+        assert_eq!(saved.node.pi_path, "pi-concurrent");
+        assert_eq!(saved.transport.relay_mode, "disabled");
+        assert!(saved.transport.enable_mdns);
+        assert_eq!(saved.sessions.default_capability, "read");
+        assert_eq!(saved.ui.theme, "light");
+        assert_eq!(saved.approvals.timeout_secs, 42);
+        assert!(!saved.service.close_to_tray);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_relay_urls_rejects_other_schemes() {
+        for bad in ["ftp://relay.example.com", "//relay.example.com", "https:/x"] {
+            assert!(
+                validate_relay_urls(&[bad.to_string()]).is_err(),
+                "应拒绝 {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn read_log_tail_keeps_whole_lines_from_tail() {
+        let dir = temp_path("read-log-tail");
+        let log = dir.join("desktop.log");
+        std::fs::write(&log, "第一行\n第二行\n第三行\n").expect("写入日志");
+
+        let tail = read_log_tail(&log, 12).expect("读取日志尾部");
+        // 起点落在行中间时丢掉半行，剩余行序保持原顺序。
+        assert!(tail.ends_with('\n'), "尾部应保留换行: {tail:?}");
+        assert!(!tail.contains("第一行"), "应截掉最早的行: {tail:?}");
+        let rows: Vec<&str> = tail.lines().collect();
+        let mut sorted = rows.clone();
+        sorted.sort();
+        assert_eq!(rows, sorted, "行序应保持原顺序");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_log_tail_reads_small_file_whole() {
+        let dir = temp_path("read-log-small");
+        let log = dir.join("desktop.log");
+        std::fs::write(&log, "a\nb\n").expect("写入日志");
+
+        assert_eq!(read_log_tail(&log, LOG_TAIL_BYTES).unwrap(), "a\nb\n");
+        assert!(read_log_tail(&dir.join("missing.log"), LOG_TAIL_BYTES).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rotate_log_if_needed_moves_oversized_log() {
+        let dir = temp_path("rotate-log");
+        let log = dir.join("desktop.log");
+        std::fs::write(&log, vec![b'x'; (LOG_ROTATE_BYTES + 1) as usize]).expect("写入日志");
+
+        rotate_log_if_needed(&log).expect("轮转日志");
+        let backup = dir.join("desktop.log.1");
+        assert!(!log.exists(), "超限日志应被移走");
+        assert!(backup.exists(), "应生成 desktop.log.1");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rotate_log_if_needed_keeps_small_log() {
+        let dir = temp_path("rotate-log-small");
+        let log = dir.join("desktop.log");
+        std::fs::write(&log, "小日志\n").expect("写入日志");
+
+        rotate_log_if_needed(&log).expect("小日志不轮转");
+        assert!(log.exists());
+        assert!(!dir.join("desktop.log.1").exists());
+        // 文件不存在时不应报错（首次启动尚无日志）。
+        rotate_log_if_needed(&dir.join("missing.log")).expect("缺失文件不报错");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rotating_log_writes_and_rotates_on_size() {
+        use std::io::Write as _;
+
+        let dir = temp_path("rotating-log");
+        let log = dir.join("desktop.log");
+        std::fs::write(&log, vec![b'x'; (LOG_ROTATE_BYTES + 1) as usize]).expect("写入日志");
+
+        let mut writer = RotatingLog { path: log.clone() };
+        writer.write_all(b"after-rotate\n").expect("写入新日志");
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "after-rotate\n");
+        assert!(dir.join("desktop.log.1").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

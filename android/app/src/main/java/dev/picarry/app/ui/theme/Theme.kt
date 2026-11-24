@@ -191,7 +191,9 @@ val CarryTypography = Typography(
     bodySmall = TextStyle(fontFamily = FontFamily.SansSerif, fontSize = 11.sp, lineHeight = 16.sp),
     labelLarge = TextStyle(fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Medium, fontSize = 12.sp, letterSpacing = 0.4.sp),
     labelMedium = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 10.sp, letterSpacing = 0.6.sp),
-    labelSmall = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 9.sp, letterSpacing = 0.8.sp),
+    // 9sp 低于可读下限（TalkBack/低视力用户实际读不清），提到 10sp；
+    // 再大会撞上 360dp 宽度下密集 chip 的换行阈值，这是当前排版的可行上限。
+    labelSmall = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 10.sp, letterSpacing = 0.6.sp),
 )
 
 @Composable

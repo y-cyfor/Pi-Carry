@@ -3,13 +3,18 @@
 //! 所有写入串行化在一个连接上；journal 的 seq 分配在事务内完成。
 
 use crate::error::Result;
+use chrono::{DateTime, Duration, Utc};
 use pi_carry_protocol::{ApprovalView, SessionSummary};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 const SCHEMA_VERSION: i64 = 1;
+
+/// device_acks 设备被吊销后的保留天数（表内无时间列，只能按设备吊销时间推算）。
+const DEVICE_ACK_RETENTION_DAYS: i64 = 30;
 
 #[derive(Debug, Clone)]
 pub struct Store {
@@ -36,6 +41,14 @@ pub struct PendingApproval {
     pub resolved_by: Option<String>,
 }
 
+/// [`Store::prune_old_records`] 各表的删除行数。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PruneReport {
+    pub approvals: usize,
+    pub outbox_seen: usize,
+    pub device_acks: usize,
+}
+
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
@@ -45,6 +58,9 @@ impl Store {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        // 桌面 UI 轮询等第二进程会同一时间写同一个库文件，没有 busy_timeout
+        // 时并发写直接返回 SQLITE_BUSY 而不是等待重试。
+        conn.pragma_update(None, "busy_timeout", 5_000)?;
         let store = Self {
             conn: Arc::new(Mutex::new(conn)),
         };
@@ -297,7 +313,10 @@ impl Store {
 
     pub fn append_event(&self, session_id: &str, ts: &str, event: &Value) -> Result<u64> {
         let mut conn = self.conn.lock().expect("db poisoned");
-        let tx = conn.transaction()?;
+        // 用 IMMEDIATE 抢先拿写锁：deferred 事务里先 SELECT MAX(seq) 再 INSERT，
+        // 两个进程（例如桌面壳重启时新旧 Bridge 短暂共存）会读到同一个 seq，
+        // 后提交者直接撞主键把事件丢掉。写锁一拿到就把「读+写」变成一个原子步。
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let next: i64 = tx.query_row(
             "SELECT COALESCE(MAX(seq),0)+1 FROM journal WHERE session_id=?1",
             params![session_id],
@@ -369,13 +388,16 @@ impl Store {
     }
 
     /// 保留最近 max_events 条；返回删除数。
+    /// max_events 为 0 时仍然保留最后一条：清空会让 MAX(seq) 归零，
+    /// 之后客户端已确认的水位会和新事件 seq 冲突。
     pub fn prune_journal(&self, session_id: &str, max_events: u32) -> Result<usize> {
+        let keep = max_events.max(1) as i64;
         let conn = self.conn.lock().expect("db poisoned");
         let n = conn.execute(
             "DELETE FROM journal WHERE session_id=?1 AND seq <= (
                 SELECT COALESCE(MAX(seq),0)-?2 FROM journal WHERE session_id=?1
              )",
-            params![session_id, max_events as i64],
+            params![session_id, keep],
         )?;
         Ok(n)
     }
@@ -425,7 +447,10 @@ impl Store {
                 v.state,
                 p.resolved_by
             ],
-        )?;
+        )
+        .map_err(|e| {
+            crate::error::CoreError::Internal(format!("写入审批 {} 失败: {e}", v.id))
+        })?;
         Ok(())
     }
 
@@ -528,6 +553,23 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// 每个会话当前的待审批数量（一次 SQL 取全部，避免逐会话查询的 N+1）。
+    pub fn pending_approval_counts(&self) -> Result<HashMap<String, u32>> {
+        let conn = self.conn.lock().expect("db poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT session_id, COUNT(*) FROM approvals WHERE state='pending' GROUP BY session_id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u32))
+        })?;
+        let mut out = HashMap::new();
+        for row in rows {
+            let (id, n) = row?;
+            out.insert(id, n);
+        }
+        Ok(out)
+    }
+
     pub fn expire_approvals(&self, now: &str) -> Result<usize> {
         let conn = self.conn.lock().expect("db poisoned");
         let n = conn.execute(
@@ -579,11 +621,15 @@ impl Store {
     }
 
     pub fn set_ack(&self, device_id: &str, session_id: &str, seq: u64) -> Result<()> {
+        // u64 超过 i64::MAX 时 `as i64` 会翻成负数，写进库后水位倒退。
+        let seq = i64::try_from(seq).map_err(|_| {
+            crate::error::CoreError::InvalidArgument(format!("ack seq {seq} 超出可存储范围"))
+        })?;
         let conn = self.conn.lock().expect("db poisoned");
         conn.execute(
             "INSERT INTO device_acks(device_id,session_id,seq) VALUES(?1,?2,?3)
              ON CONFLICT(device_id,session_id) DO UPDATE SET seq=MAX(seq,excluded.seq)",
-            params![device_id, session_id, seq as i64],
+            params![device_id, session_id, seq],
         )?;
         Ok(())
     }
@@ -657,6 +703,43 @@ impl Store {
         let n = conn.execute("DELETE FROM audit WHERE ts < ?1", params![cutoff])?;
         Ok(n)
     }
+
+    /// 清理审批/幂等/水位表中的终态旧记录（只删已失效数据，不影响 pending 审批）。
+    ///
+    /// - `approval_days`：已解决（非 pending）审批保留天数。
+    /// - `seen_days`：outbox_seen 幂等键保留天数。
+    /// - device_acks 无时间列，以其设备被吊销的时间为准，保留
+    ///   [`DEVICE_ACK_RETENTION_DAYS`] 天（吊销设备不会再发 ack）。
+    pub fn prune_old_records(
+        &self,
+        now: DateTime<Utc>,
+        approval_days: i64,
+        seen_days: i64,
+    ) -> Result<PruneReport> {
+        let approval_cutoff = crate::rfc3339(now - Duration::days(approval_days));
+        let seen_cutoff = crate::rfc3339(now - Duration::days(seen_days));
+        let ack_cutoff = crate::rfc3339(now - Duration::days(DEVICE_ACK_RETENTION_DAYS));
+        let conn = self.conn.lock().expect("db poisoned");
+        let approvals = conn.execute(
+            "DELETE FROM approvals WHERE state <> 'pending' AND COALESCE(resolved_at, requested_at) < ?1",
+            params![approval_cutoff],
+        )?;
+        let outbox_seen = conn.execute(
+            "DELETE FROM outbox_seen WHERE created_at < ?1",
+            params![seen_cutoff],
+        )?;
+        let device_acks = conn.execute(
+            "DELETE FROM device_acks WHERE device_id IN (
+                SELECT id FROM devices WHERE revoked_at IS NOT NULL AND revoked_at < ?1
+             )",
+            params![ack_cutoff],
+        )?;
+        Ok(PruneReport {
+            approvals,
+            outbox_seen,
+            device_acks,
+        })
+    }
 }
 
 fn row_to_device(r: &rusqlite::Row<'_>) -> rusqlite::Result<DeviceRecord> {
@@ -728,6 +811,79 @@ mod tests {
         let rows = s.events_after("s1", 0, 10).unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].0, 4);
+    }
+
+    #[test]
+    fn journal_prune_never_empties_session() {
+        let s = store();
+        for i in 0..3 {
+            s.append_event("s1", "t", &json!({"n": i})).unwrap();
+        }
+        // journal_max_events 配成 0 时也不能删光：否则 seq 归零，
+        // 客户端记录的已确认水位会让后续事件被当成重复。
+        assert_eq!(s.prune_journal("s1", 0).unwrap(), 2);
+        let rows = s.events_after("s1", 0, 10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, 3);
+        assert_eq!(s.append_event("s1", "t", &json!({"n": 3})).unwrap(), 4);
+    }
+
+    #[test]
+    fn set_ack_rejects_out_of_range_seq() {
+        let s = store();
+        assert!(s
+            .set_ack("d", "s", u64::MAX)
+            .unwrap_err()
+            .to_string()
+            .contains("seq"));
+        assert_eq!(s.get_ack("d", "s").unwrap(), 0);
+        s.set_ack("d", "s", 7).unwrap();
+        assert_eq!(s.get_ack("d", "s").unwrap(), 7);
+    }
+
+    #[test]
+    fn prune_old_records_only_drops_settled_rows() {
+        let s = store();
+        let now = chrono::Utc::now();
+        let old = crate::rfc3339(now - Duration::days(60));
+        let fresh = crate::rfc3339(now);
+        let approved = |id: &str, state: &str, at: &str| PendingApproval {
+            view: ApprovalView {
+                id: id.into(),
+                session_id: "s1".into(),
+                tool_name: "bash".into(),
+                category: "exec".into(),
+                risk: "high".into(),
+                summary: "x".into(),
+                command: None,
+                path: None,
+                args: json!({}),
+                requested_at: at.into(),
+                expires_at: at.into(),
+                remaining_seconds: 0,
+                state: state.into(),
+            },
+            tool_call_id: "tc".into(),
+            resolved_by: None,
+        };
+        s.insert_approval(&approved("old-done", "allowed", &old))
+            .unwrap();
+        s.insert_approval(&approved("old-pending", "pending", &old))
+            .unwrap();
+        s.insert_approval(&approved("new-done", "allowed", &fresh))
+            .unwrap();
+        s.claim_client_id("d1", "old", "s1", &old).unwrap();
+        s.claim_client_id("d1", "new", "s1", &fresh).unwrap();
+
+        let report = s.prune_old_records(now, 7, 7).unwrap();
+        assert_eq!(report.approvals, 1);
+        assert_eq!(report.outbox_seen, 1);
+        assert!(s.get_approval("old-pending").unwrap().is_some());
+        assert!(s.get_approval("new-done").unwrap().is_some());
+        // 未吊销设备的 ack 水位不能丢，否则客户端会重拉已看过的历史。
+        s.set_ack("d1", "s1", 9).unwrap();
+        assert_eq!(s.prune_old_records(now, 7, 7).unwrap().device_acks, 0);
+        assert_eq!(s.get_ack("d1", "s1").unwrap(), 9);
     }
 
     #[test]

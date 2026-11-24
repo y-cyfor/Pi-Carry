@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -22,7 +23,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.ContentPaste
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.QrCodeScanner
@@ -32,6 +33,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -71,8 +73,9 @@ import dev.picarry.app.ui.theme.TextMuted
 import dev.picarry.app.ui.theme.TextPrimary
 import dev.picarry.app.ui.theme.TextSecondary
 import dev.picarry.app.ui.theme.Violet
+import kotlinx.coroutines.delay
 
-private data class PairInfo(
+internal data class PairInfo(
     val endpointId: String = "",
     val token: String = "",
     val relay: String? = null,
@@ -99,9 +102,12 @@ fun PairingScreen(repo: CarryRepository, initialUri: String, onBack: () -> Unit,
     val scanner = rememberLauncherForActivityResult(ScanContract()) { result ->
         val content = result.contents
         if (!content.isNullOrBlank()) {
-            uriText = content
+            // 先解析再写：扫到无效内容时不能把之前已扫到的有效链接/令牌冲掉。
             val info = parsePairUri(content)
-            if (info == null) error = "二维码不是有效的 pi-carry 配对链接" else {
+            if (info == null) {
+                error = "二维码不是有效的 pi-carry 配对链接"
+            } else {
+                uriText = content
                 endpoint = info.endpointId
                 error = null
             }
@@ -116,13 +122,27 @@ fun PairingScreen(repo: CarryRepository, initialUri: String, onBack: () -> Unit,
             else -> Unit
         }
     }
+    // 没有超时兜底时，连接既不成功也不失败就会一直停在“正在建立加密连接”。
+    LaunchedEffect(waitingId) {
+        if (waitingId == null) return@LaunchedEffect
+        delay(PAIR_TIMEOUT_MS)
+        if (waitingId != null) {
+            waitingId = null
+            error = "等待连接超时（30 秒），请确认电脑端已启动并与手机在同一网络后重试"
+        }
+    }
 
     Column(
-        Modifier.fillMaxSize().statusBarsPadding().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 6.dp),
+        Modifier
+            .fillMaxSize()
+            .imePadding()
+            .statusBarsPadding()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 20.dp, vertical = 6.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(40.dp).clip(CircleShape).clickable(onClick = onBack), contentAlignment = Alignment.Center) {
-                Icon(Icons.Outlined.ArrowBack, "返回", tint = TextSecondary)
+                Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回", tint = TextSecondary)
             }
             Spacer(Modifier.weight(1f))
             MonoLabel("配对 · PAIRING")
@@ -151,7 +171,7 @@ fun PairingScreen(repo: CarryRepository, initialUri: String, onBack: () -> Unit,
                 Box(
                     Modifier.size(78.dp).clip(RoundedCornerShape(20.dp)).background(Violet.copy(alpha = 0.12f)),
                     contentAlignment = Alignment.Center,
-                ) { Icon(Icons.Outlined.QrCodeScanner, null, tint = Violet, modifier = Modifier.size(40.dp)) }
+                ) { Icon(Icons.Outlined.QrCodeScanner, "扫描二维码", tint = Violet, modifier = Modifier.size(40.dp)) }
                 Spacer(Modifier.height(12.dp))
                 Text("扫描电脑上的二维码", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
                 Spacer(Modifier.height(4.dp))
@@ -180,17 +200,20 @@ fun PairingScreen(repo: CarryRepository, initialUri: String, onBack: () -> Unit,
                 .border(0.7.dp, Line, RoundedCornerShape(13.dp))
                 .clickable {
                     val text = clipboard.getText()?.text.orEmpty()
-                    uriText = text
                     val info = parsePairUri(text)
-                    if (info == null) error = "剪贴板不是 pi-carry 配对链接" else {
-                        endpoint = info.endpointId; error = null
+                    if (info == null) {
+                        error = "剪贴板不是 pi-carry 配对链接"
+                    } else {
+                        uriText = text
+                        endpoint = info.endpointId
+                        error = null
                     }
                 }
                 .padding(horizontal = 12.dp, vertical = 11.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Icon(Icons.Outlined.ContentPaste, null, tint = Cyan, modifier = Modifier.size(17.dp))
+            Icon(Icons.Outlined.ContentPaste, "粘贴配对链接", tint = Cyan, modifier = Modifier.size(17.dp))
             Text("从剪贴板粘贴配对链接", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
             Spacer(Modifier.weight(1f))
             MonoLabel("paste")
@@ -236,7 +259,8 @@ fun PairingScreen(repo: CarryRepository, initialUri: String, onBack: () -> Unit,
                 error = null
                 val node = Node(
                     id = id,
-                    name = id.take(8),
+                    // 二维码里的 name 是电脑端配置的节点名：用它代替 id 前 8 位，多台机器才分得清。
+                    name = info?.name?.trim()?.takeIf { it.isNotEmpty() } ?: id.take(8),
                     endpointId = id,
                     token = token,
                     code = c.ifBlank { null },
@@ -260,6 +284,19 @@ fun PairingScreen(repo: CarryRepository, initialUri: String, onBack: () -> Unit,
             } else {
                 Text("完成配对", style = MaterialTheme.typography.titleMedium)
             }
+        }
+        if (waitingId != null) {
+            Spacer(Modifier.height(4.dp))
+            TextButton(
+                onClick = {
+                    val id = waitingId
+                    waitingId = null
+                    error = null
+                    // 取消后停掉这次连接尝试，否则后台继续连上而界面已经放弃。
+                    if (id != null && link[id] != LinkState.Online) repo.disconnect(id)
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("取消等待", style = MaterialTheme.typography.bodyMedium, color = TextSecondary) }
         }
         Spacer(Modifier.height(30.dp))
     }
@@ -300,12 +337,17 @@ private fun Field(
     }
 }
 
-private fun parsePairUri(raw: String): PairInfo? {
+/** Manual 配对等待的上限：超时后释放按钮并提示，避免一直卡在连接中。 */
+private const val PAIR_TIMEOUT_MS = 30_000L
+
+internal fun parsePairUri(raw: String): PairInfo? {
     val text = raw.trim()
     if (text.isBlank()) return null
     return runCatching {
         val uri = Uri.parse(text)
         if (uri.scheme != "pi-carry" && uri.scheme != "picarry") return null
+        // 深链只允许 pair 这个 host：其它 host 的链接不是配对链接。
+        if (uri.host != "pair") return null
         val endpoint = (uri.getQueryParameter("endpoint") ?: uri.getQueryParameter("id") ?: return null).lowercase()
         if (!ENDPOINT_ID.matches(endpoint)) return null
         PairInfo(

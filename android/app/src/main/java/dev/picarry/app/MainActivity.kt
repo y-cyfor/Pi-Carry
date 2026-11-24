@@ -154,12 +154,18 @@ fun PiCarryAppRoot(
     val nav = rememberNavController()
     val backStack by nav.currentBackStackEntryAsState()
     // 从相机/浏览器扫描二维码冷启动或热启动时，直接进入配对页；消费后置空，避免旋转重新导航。
+    // 热启动时 launchSingleTop 会复用已有的 pairing entry，arguments 仍是上一次的二维码，
+    // 用户再扫新码会静默失效（M26）。先在入栈时把旧 destination 出栈，强制新建 entry。
     LaunchedEffect(initialPairUri) {
         if (!initialPairUri.isNullOrBlank()) {
-            nav.navigate(Routes.pairing(initialPairUri)) { launchSingleTop = true }
+            nav.navigate(Routes.pairing(initialPairUri)) {
+                popUpTo(Routes.Pairing) { inclusive = true }
+                launchSingleTop = true
+            }
             onPairUriConsumed()
         }
     }
+
     val route = backStack?.destination?.route ?: Routes.Nodes
     val showBar = route in setOf(Routes.Nodes, Routes.Sessions, Routes.SessionsByNode, Routes.Settings)
     CarryBackground {
@@ -218,7 +224,9 @@ fun PiCarryAppRoot(
                     ) { entry ->
                         PairingScreen(
                             repo = repo,
-                            initialUri = entry.arguments?.getString("uri").orEmpty().ifBlank { initialPairUri.orEmpty() },
+                            // 只认本次 nav entry 写进去的参数：这样热启动重建 entry 后
+                            // 拿到的是新二维码，而不是内存里上一次的 uri（M26）。
+                            initialUri = entry.arguments?.getString("uri").orEmpty(),
                             onBack = { nav.popBackStack() },
                             onDone = {
                                 nav.navigate(Routes.Nodes) {
@@ -283,7 +291,7 @@ private fun BarItem(label: String, icon: ImageVector, active: Boolean, onClick: 
             .padding(horizontal = 18.dp, vertical = 6.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Icon(icon, null, tint = if (active) Violet else TextMuted, modifier = Modifier.size(21.dp))
+        Icon(icon, label, tint = if (active) Violet else TextMuted, modifier = Modifier.size(21.dp))
         Spacer(Modifier.height(3.dp))
         Text(
             label,

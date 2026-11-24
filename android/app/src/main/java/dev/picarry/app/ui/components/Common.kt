@@ -127,6 +127,7 @@ fun IconBadge(icon: ImageVector, tint: Color = Violet, size: Int = 38) {
             .background(tint.copy(alpha = 0.14f)),
         contentAlignment = Alignment.Center,
     ) {
+        // 徽标均与文字成对出现，属于装饰性图标；TalkBack 读文字即可，不重复播报。
         Icon(icon, null, tint = tint, modifier = Modifier.size((size * 0.5).dp))
     }
 }

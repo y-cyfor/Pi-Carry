@@ -12,6 +12,10 @@ pub const APPROVAL_REQUESTED: &str = "approval.requested";
 pub const APPROVAL_UPDATED: &str = "approval.updated";
 pub const APPROVAL_RESOLVED: &str = "approval.resolved";
 pub const RUN_STATE: &str = "run.state";
+/// 一轮运行结束后的消耗总结（`agent_settled` 时发，先于 idle 的 run.state）。
+pub const RUN_SUMMARY: &str = "run.summary";
+/// 本条连接实测的连接方式（不经全局广播，只发给该连接）。
+pub const CONNECTION_UPDATED: &str = "connection.updated";
 pub const QUEUE_UPDATED: &str = "queue.updated";
 pub const SESSION_UPDATED: &str = "session.updated";
 pub const SESSION_CONFLICT: &str = "session.conflict";
@@ -111,7 +115,17 @@ pub fn approval_resolved(
 pub fn run_state(run_id: &str, state: &str, extra: Value) -> Value {
     let mut out = json!({"type": RUN_STATE, "runId": run_id, "state": state});
     if let (Some(obj), Value::Object(more)) = (out.as_object_mut(), extra) {
-        obj.extend(more);
+        extend_event(obj, more, &["runId", "state"]);
+    }
+    out
+}
+
+/// 一轮运行的消耗总结。`fields` 由服务端按实际统计拼装，这里只负责补 `type`，
+/// 并保证 `runId`/`type` 不会被 payload 覆盖（信封字段完整性）。
+pub fn run_summary(run_id: &str, fields: Value) -> Value {
+    let mut out = json!({"type": RUN_SUMMARY, "runId": run_id});
+    if let (Some(obj), Value::Object(more)) = (out.as_object_mut(), fields) {
+        extend_event(obj, more, &["type", "runId"]);
     }
     out
 }
@@ -145,7 +159,7 @@ pub fn ui_requested(request_id: &str, method: &str, title: &str, extra: Value) -
         "title": title,
     });
     if let (Some(obj), Value::Object(more)) = (out.as_object_mut(), extra) {
-        obj.extend(more);
+        extend_event(obj, more, &["requestId", "method", "title"]);
     }
     out
 }
@@ -154,8 +168,16 @@ pub fn ui_resolved(request_id: &str, cancelled: bool, value: Value) -> Value {
     json!({"type": UI_RESOLVED, "requestId": request_id, "cancelled": cancelled, "value": value})
 }
 
+/// notification 同时带 `title`/`body` 与遗留的 `message`（旧发射端只用 message），
+/// 保持向后兼容：新客户端读 title/body，老客户端读 message。
 pub fn notification(level: &str, title: &str, body: &str) -> Value {
-    json!({"type": NOTIFICATION, "level": level, "title": title, "body": body})
+    json!({
+        "type": NOTIFICATION,
+        "level": level,
+        "title": title,
+        "body": body,
+        "message": body,
+    })
 }
 
 pub fn node_status(node: Value) -> Value {
@@ -168,6 +190,23 @@ pub fn device_revoked(device_id: &str, reason: &str) -> Value {
 
 pub fn error_event(code: &str, message: &str) -> Value {
     json!({"type": ERROR, "code": code, "message": message})
+}
+
+/// 信封保留键：`extra` 里的同名键会覆盖外层事件类型/会话/序号，必须丢弃。
+const RESERVED_EVENT_KEYS: [&str; 4] = ["type", "sessionId", "seq", "event"];
+
+/// 把 `extra` 合并进事件主体，但剔除信封保留键与本构造器自身的固定字段。
+fn extend_event(
+    obj: &mut serde_json::Map<String, Value>,
+    more: serde_json::Map<String, Value>,
+    own_keys: &[&str],
+) {
+    for (k, v) in more {
+        let reserved = RESERVED_EVENT_KEYS.contains(&k.as_str()) || own_keys.contains(&k.as_str());
+        if !reserved {
+            obj.insert(k, v);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -192,5 +231,35 @@ mod tests {
         let v = run_state("r1", "streaming", json!({"startedAt": "t"}));
         assert_eq!(v["state"], "streaming");
         assert_eq!(v["startedAt"], "t");
+    }
+
+    #[test]
+    fn extra_cannot_overwrite_envelope() {
+        let v = run_state(
+            "r1",
+            "streaming",
+            json!({"type": "evil", "sessionId": "s", "seq": 9, "event": {}, "runId": "x"}),
+        );
+        assert_eq!(v["type"], "run.state");
+        assert_eq!(v["runId"], "r1");
+        assert!(v.get("sessionId").is_none());
+        assert!(v.get("seq").is_none());
+        assert!(v.get("event").is_none());
+
+        let u = ui_requested(
+            "q1",
+            "select",
+            "pick",
+            json!({"type": "evil", "requestId": "z"}),
+        );
+        assert_eq!(u["type"], "ui.requested");
+        assert_eq!(u["requestId"], "q1");
+    }
+
+    #[test]
+    fn notification_keeps_legacy_message_field() {
+        let v = notification("info", "t", "b");
+        assert_eq!(v["body"], "b");
+        assert_eq!(v["message"], "b");
     }
 }

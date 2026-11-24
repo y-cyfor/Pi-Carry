@@ -71,7 +71,25 @@ class WireTest {
 
     @Test(expected = IllegalArgumentException::class)
     fun frameRejectsOversizePayload() {
-        Wire.frame("x".repeat(Wire.MAX_EVENT + 1))
+        // 服务端读客户端帧统一按 1MiB 控制帧上限，超过就是必被拒的一帧。
+        Wire.frame("x".repeat(Wire.MAX_CONTROL + 1))
+    }
+
+    @Test
+    fun eventFrameLimitIsLargerThanControlLimit() {
+        // 读侧要能收 4MiB 事件帧，写侧不能超 1MiB：两个上限不能混用。
+        assertTrue(Wire.MAX_EVENT > Wire.MAX_CONTROL)
+        assertTrue(Wire.PROMPT_FRAME_BUDGET < Wire.MAX_CONTROL)
+    }
+
+    @Test
+    fun parseKeepsSeqOfEventWithoutPayload() {
+        // 载荷损坏但 seq 还在的事件必须能识别出 seq，否则无法 ACK、服务端会永久重放。
+        val parsed = Wire.parse("""{"type":"event","sessionId":"s1","seq":17,"event":"oops"}""")
+        assertEquals("event", parsed.type)
+        assertEquals(17L, parsed.seq)
+        assertEquals("s1", parsed.sessionId)
+        assertNull(parsed.event)
     }
 
     @Test(expected = IllegalArgumentException::class)
