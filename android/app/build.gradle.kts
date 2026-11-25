@@ -32,8 +32,8 @@ android {
         applicationId = "dev.picarry.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 8
-        versionName = "0.3.1"
+        versionCode = 9
+        versionName = "0.3.2"
     }
     splits {
         abi {
