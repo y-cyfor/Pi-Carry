@@ -1,5 +1,5 @@
 ﻿# 重新打包 dist 产物并生成 SHA256 校验和（PowerShell 5.1 兼容）。
-# Windows：NSIS 安装器（target/release/bundle/nsis/*setup.exe）+ 便携 zip（exe、WebView2Loader.dll、README、LICENSE）。
+# Windows：NSIS 安装器（target/release/bundle/nsis/*setup.exe）+ 便携 zip（exe、README、LICENSE，存在 WebView2Loader.dll 时一并带上）。
 # Android：每个 ABI 一个正式签名 APK，直接作为独立资产，不压缩。
 # 版本号唯一来源是 Cargo.toml 的 [workspace.package] version，并与 crates/desktop/tauri.conf.json 交叉校验。
 param(
@@ -71,12 +71,13 @@ $artifacts = New-Object System.Collections.Generic.List[string]
 
 if (-not $SkipDesktop) {
     $exePath = 'target/release/pi-carry-desktop.exe'
+    # Tauri 2 在 MSVC 上静态链接 WebView2LoaderStatic.lib，构建产物里不再有 WebView2Loader.dll；
+    # 仅当该 DLL 确实存在（旧工具链 / 动态加载场景）时才一起打进便携包与签名。
     $dllPath = 'target/release/WebView2Loader.dll'
-    foreach ($required in @($exePath, $dllPath)) {
-        if (-not (Test-Path $required)) {
-            throw "缺少 $required，请先在 crates/desktop 下运行 cargo tauri build --bundles nsis 构建 Windows 产物。"
-        }
+    if (-not (Test-Path $exePath)) {
+        throw "缺少 $exePath，请先在 crates/desktop 下运行 cargo tauri build --bundles nsis 构建 Windows 产物。"
     }
+    $hasDll = Test-Path $dllPath
 
     $setups = @(Get-ChildItem 'target/release/bundle/nsis' -Filter '*setup.exe' -File -ErrorAction SilentlyContinue)
     if ($setups.Count -eq 0) {
@@ -92,7 +93,9 @@ if (-not $SkipDesktop) {
     # 先签名主程序与 DLL，便携 zip 才会包含已签名二进制；安装器内部的副本由 tauri 打包时带入。
     if ($Sign) {
         Invoke-AuthenticodeSign $exePath
-        Invoke-AuthenticodeSign $dllPath
+        if ($hasDll) {
+            Invoke-AuthenticodeSign $dllPath
+        }
     }
 
     $desktopDir = 'dist/pi-carry-windows-10-x64'
@@ -103,7 +106,11 @@ if (-not $SkipDesktop) {
     Get-ChildItem $desktopDir -File -ErrorAction SilentlyContinue | Remove-Item -Force
 
     Copy-Item $exePath $desktopDir/ -Force
-    Copy-Item $dllPath $desktopDir/ -Force
+    if ($hasDll) {
+        Copy-Item $dllPath $desktopDir/ -Force
+    } else {
+        Write-Host "未找到 WebView2Loader.dll：Tauri 2 已静态链接 WebView2 加载器，便携包只带 exe。"
+    }
     Copy-Item packaging/desktop-README.txt $desktopDir/README.txt -Force
     Copy-Item LICENSE $desktopDir/LICENSE -Force
 

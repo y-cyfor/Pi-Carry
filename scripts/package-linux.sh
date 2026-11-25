@@ -192,12 +192,26 @@ else
 fi
 
 if command -v rpm >/dev/null 2>&1; then
-    rpm_info="$(rpm -qip "$rpm_out" || true)"
-    for dep in webkit2gtk4.1 gtk3; do
-        if ! grep -qF -- "$dep" <<<"$rpm_info"; then
-            missing+=("rpm 缺少依赖声明：$dep")
-        fi
-    done
+    rpm_info="$(rpm -qp --requires "$rpm_out" 2>/dev/null || true)"
+    # 依赖可能写成发行版包名（webkit2gtk4.1 / gtk3），也可能是 RPM 的 soname 自动依赖
+    # （libwebkit2gtk-4.1.so.0()(64bit) / libgtk-3.so.0()(64bit)），两种都代表依赖已声明。
+    rpm_dep_declared() {
+        local cand
+        for cand in "$@"; do
+            grep -qF -- "$cand" <<<"$rpm_info" && return 0
+        done
+        return 1
+    }
+    rpm_dep_declared "webkit2gtk4.1" "libwebkit2gtk-4.1.so" ||
+        missing+=("rpm 缺少依赖声明：webkit2gtk4.1")
+    rpm_dep_declared "gtk3" "libgtk-3.so" ||
+        missing+=("rpm 缺少依赖声明：gtk3")
+    rpm_dep_declared "libayatana-appindicator-gtk3" "libayatana-appindicator3.so" ||
+        missing+=("rpm 缺少依赖声明：libayatana-appindicator-gtk3")
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        echo "== rpm 实际 Requires（rpm -qp --requires $rpm_out）==" >&2
+        printf '%s\n' "$rpm_info" >&2
+    fi
 else
     echo "提示：未找到 rpm 命令，跳过 rpm 依赖检查（安装 rpm 包后再复核）" >&2
 fi

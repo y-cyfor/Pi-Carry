@@ -6,7 +6,7 @@ pi carry 0.3.1（Windows x64 便携版）
 - 本机已安装并可使用 pi
 
 启动
-- 保持 pi-carry-desktop.exe 与 WebView2Loader.dll 在同一目录，双击 exe。
+- 双击 pi-carry-desktop.exe 启动（Tauri 2 已静态链接 WebView2 加载器，包内通常不含 WebView2Loader.dll；若你的包里带有该 DLL，请与 exe 放在同一目录）。
 - 程序常驻系统托盘，关闭窗口不会退出。
 - 托盘菜单可重新打开窗口、开始配对或退出。
 
