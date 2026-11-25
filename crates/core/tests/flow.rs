@@ -340,10 +340,10 @@ fn find_image(v: &Value) -> Option<&Value> {
 fn find_blob_image(v: &Value) -> Option<&Value> {
     match v {
         Value::Object(map) => {
-            if map.get("type").and_then(Value::as_str) == Some("image") {
-                if map.contains_key("blobId") {
-                    return Some(v);
-                }
+            if map.get("type").and_then(Value::as_str) == Some("image")
+                && map.contains_key("blobId")
+            {
+                return Some(v);
             }
             map.values().find_map(find_blob_image)
         }
@@ -545,7 +545,7 @@ async fn blob_image_is_forwarded_and_projected_back_to_blob_id() {
             "image/png",
             bytes.len() as u64,
             0,
-            &base64::engine::general_purpose::STANDARD.encode(&bytes),
+            &base64::engine::general_purpose::STANDARD.encode(bytes),
         )
         .unwrap();
 

@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "pi carry",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "identifier": "dev.picarry.desktop",
   "build": {
     "frontendDist": "../../design/desktop-ui"
@@ -28,11 +28,30 @@
     }
   },
   "bundle": {
-    "active": false,
+    "active": true,
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["pi-carry"]
+      }
+    },
+    "updater": {
+      "endpoints": [
+        "https://github.com/y-cyfor/Pi-Carry/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDUxNzMyQjA4Njg3RDAyNDUKUldSRkFuMW9DQ3R6VVoyaDN3KzZpdUxIQ0h4aVFSaW1KMk5leVNETnMwbFdlY3Btc2VtM3krK1EK",
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

@@ -7,6 +7,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -26,12 +27,13 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.ChevronRight
-import androidx.compose.material.icons.outlined.Computer
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Devices
-import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.Forum
+import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.SearchOff
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -51,46 +53,47 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.picarry.app.data.CarryRepository
-import dev.picarry.app.data.CwdGroup
 import dev.picarry.app.data.FsListing
 import dev.picarry.app.data.FsRoots
 import dev.picarry.app.data.LinkState
 import dev.picarry.app.data.Node
 import dev.picarry.app.data.Session
 import dev.picarry.app.data.breadcrumbs
-import dev.picarry.app.data.decodeCollapsed
 import dev.picarry.app.data.displayName
-import dev.picarry.app.data.encodeCollapsed
-import dev.picarry.app.data.groupSessionsByCwd
-import dev.picarry.app.data.isGroupCollapsed
-import dev.picarry.app.data.toggleCollapsed
 import dev.picarry.app.net.CarryException
-import dev.picarry.app.ui.components.CarryCard
+import dev.picarry.app.ui.components.CarryActionButton
+import dev.picarry.app.ui.components.CarryIconButton
+import dev.picarry.app.ui.components.CarrySheetGrabber
+import dev.picarry.app.ui.components.CarrySheetHeader
 import dev.picarry.app.ui.components.EmptyState
 import dev.picarry.app.ui.components.MonoLabel
 import dev.picarry.app.ui.components.NullableStringSaver
 import dev.picarry.app.ui.components.ScreenHeader
 import dev.picarry.app.ui.components.StatusDot
+import dev.picarry.app.ui.components.Tag
+import dev.picarry.app.ui.components.pressClickable
 import dev.picarry.app.ui.components.statusColor
 import dev.picarry.app.ui.theme.Amber
 import dev.picarry.app.ui.theme.Cyan
+import dev.picarry.app.ui.theme.Inter
 import dev.picarry.app.ui.theme.Line
+import dev.picarry.app.ui.theme.LineStrong
 import dev.picarry.app.ui.theme.Mint
 import dev.picarry.app.ui.theme.Panel
-import dev.picarry.app.ui.theme.PanelHigh
 import dev.picarry.app.ui.theme.Rose
+import dev.picarry.app.ui.theme.Surface2
 import dev.picarry.app.ui.theme.TextMuted
 import dev.picarry.app.ui.theme.TextPrimary
 import dev.picarry.app.ui.theme.TextSecondary
 import dev.picarry.app.ui.theme.Violet
+import dev.picarry.app.ui.theme.VioletSoft
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -110,28 +113,28 @@ fun SessionsScreen(
     val link by repo.link.collectAsState()
     var query by rememberSaveable { mutableStateOf("") }
     var filter by rememberSaveable { mutableStateOf("all") }
-    // createSession 是 fire-and-forget：用进行中标记防双击建出两个会话。
     var isCreating by rememberSaveable { mutableStateOf(false) }
+    var createSlow by rememberSaveable { mutableStateOf(false) }
     var createHint by rememberSaveable(stateSaver = NullableStringSaver) { mutableStateOf<String?>(null) }
-    // 创建会话的失败只进日志，没有回调可等：最长 8 秒后自动解除禁用，避免永久卡在 loading。
-    LaunchedEffect(isCreating) {
-        if (isCreating) {
-            delay(8_000)
-            isCreating = false
-        }
-    }
-
-    // 折叠集改动后立即持久化（forceExpand 时不写回，见下方组头点击）。
-    var collapsed by remember { mutableStateOf(decodeCollapsed(repo.settingString("collapsed_cwd_groups", ""))) }
-    // 目录选择：先定节点（多节点才需要选），再开目录 sheet。
-    var showNodePicker by remember { mutableStateOf(false) }
+    // 只存 sessionId：Session 本身不可保存，旋转后按 id 回查即可保持面板打开（BUG-023）。
+    var renameSessionId by rememberSaveable(stateSaver = NullableStringSaver) { mutableStateOf<String?>(null) }
+    var showNodePicker by rememberSaveable { mutableStateOf(false) }
     var pickerNodeId by rememberSaveable(stateSaver = NullableStringSaver) { mutableStateOf<String?>(null) }
     var createError by remember { mutableStateOf<String?>(null) }
-    // 节点选择与目录选择是两个连续的 sheet：分开启状态，避免共用状态时第二个 sheet 一进入就处在 hidden。
     val nodeSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val dirSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    // 8 秒只是「慢」的提示阈值，绝不能复位 isCreating：复位会让「在此目录新建」
+    // 重新可点，用户再点一次就会再发一次 session.create，产生两个新会话（BUG-010）。
+    LaunchedEffect(isCreating) {
+        if (!isCreating) {
+            createSlow = false
+            return@LaunchedEffect
+        }
+        delay(8_000)
+        createSlow = true
+    }
+    val renameTarget = renameSessionId?.let { id -> sessions.firstOrNull { it.id == id } }
 
-    // 从节点卡片进来时只看该节点的会话；底部 tab 不传 nodeId，保持全量。
     val scoped = if (filterNodeId == null) sessions else sessions.filter { it.nodeId == filterNodeId }
     val filtered = scoped.filter { s ->
         val matchQuery = query.isBlank() ||
@@ -145,95 +148,51 @@ fun SessionsScreen(
         }
         matchQuery && matchFilter
     }
-    // 搜索/筛选激活时强制展开，且组头点击不写回持久化状态。
-    val forceExpand = query.isNotBlank() || filter != "all"
-    val cwdGroups = groupSessionsByCwd(filtered, collapsed, forceExpand)
-    val groupsByNode = cwdGroups.groupBy { it.nodeId }
-    // 节点顺序沿用会话语料顺序（与改造前一致），不因组排序变化而乱跳。
     val nodeOrder = filtered.map { it.nodeId }.distinct()
     val onlineNodes = nodes.filter { link[it.id] == LinkState.Online }
-    val scopedNodeName = filterNodeId?.let { id ->
-        nodes.firstOrNull { it.id == id }?.name ?: id.take(8)
-    }
+    val scopedNodeName = filterNodeId?.let { id -> nodes.firstOrNull { it.id == id }?.name ?: id.take(8) }
 
     LazyColumn(
         Modifier.fillMaxSize().statusBarsPadding(),
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(start = 18.dp, end = 18.dp, top = 6.dp, bottom = 28.dp),
+        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 28.dp, bottom = 26.dp),
     ) {
         item {
             ScreenHeader(
                 title = scopedNodeName ?: "会话",
-                subtitle = if (filterNodeId == null) "按节点分组 · 共 ${sessions.size} 个会话"
-                else "节点会话 · ${scoped.size} 个会话",
-                actions = {
-                    Box(
-                        // 热区至少 44dp（U-11）：38dp 热区在异形屏边缘很难点中，图标仍 20dp。
-                        Modifier
-                            .sizeIn(minWidth = 44.dp, minHeight = 44.dp)
-                            .clip(CircleShape)
-                            .background(Violet.copy(alpha = if (isCreating) 0.07f else 0.16f))
-                            .border(0.7.dp, Violet.copy(alpha = if (isCreating) 0.2f else 0.45f), CircleShape)
-                            .clickable(enabled = !isCreating) {
-                                createHint = null
-                                createError = null
-                                when (onlineNodes.size) {
-                                    0 -> createHint = "没有在线的节点，请先配对或等待连接恢复"
-                                    1 -> pickerNodeId = onlineNodes.first().id
-                                    else -> showNodePicker = true
-                                }
-                            },
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        if (isCreating) {
-                            CircularProgressIndicator(Modifier.size(18.dp), color = Violet, strokeWidth = 2.dp)
-                        } else {
-                            Icon(Icons.Outlined.Add, "新建会话", tint = Violet, modifier = Modifier.size(20.dp))
-                        }
-                    }
-                },
-            )
-            if (createHint != null) {
-                Spacer(Modifier.height(6.dp))
-                Text(createHint!!, style = MaterialTheme.typography.bodySmall, color = Rose)
-            }
-        }
-        item {
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(13.dp))
-                    .background(Panel.copy(alpha = 0.7f))
-                    .border(0.7.dp, Line.copy(alpha = 0.8f), RoundedCornerShape(13.dp))
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
+                subtitle = if (filterNodeId == null) "按节点分组 · ${sessions.size} 个会话" else "节点会话 · ${scoped.size} 个会话",
+                count = scoped.size.toString().padStart(2, '0'),
             ) {
-                Icon(Icons.Outlined.Search, "搜索会话", tint = TextMuted, modifier = Modifier.size(17.dp))
-                Spacer(Modifier.size(8.dp))
-                BasicTextField(
-                    value = query,
-                    onValueChange = { query = it },
-                    singleLine = true,
-                    textStyle = TextStyle(color = TextPrimary, fontSize = MaterialTheme.typography.bodyMedium.fontSize, fontFamily = FontFamily.SansSerif),
-                    cursorBrush = SolidColor(Violet),
-                    modifier = Modifier.weight(1f),
-                    decorationBox = { inner ->
-                        if (query.isBlank()) Text("搜索会话、路径或消息…", style = MaterialTheme.typography.bodyMedium, color = TextMuted)
-                        inner()
-                    },
-                )
-                if (query.isNotBlank()) {
-                    Box(
-                        // 热区至少 44dp（U-11）：小号文字按钮不能只靠文字尺寸。
-                        Modifier.sizeIn(minWidth = 44.dp, minHeight = 44.dp).clickable { query = "" },
-                        contentAlignment = Alignment.CenterEnd,
-                    ) { Text("清除", style = MaterialTheme.typography.labelSmall, color = Violet) }
+                if (isCreating) {
+                    Box(Modifier.size(38.dp), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(Modifier.size(18.dp), color = Violet, strokeWidth = 2.dp)
+                    }
+                } else {
+                    CarryIconButton(Icons.Outlined.Add, "新建会话", onClick = {
+                        createHint = null
+                        createError = null
+                        when (onlineNodes.size) {
+                            0 -> createHint = "没有在线的节点，请先配对或等待连接恢复"
+                            1 -> pickerNodeId = onlineNodes.first().id
+                            else -> showNodePicker = true
+                        }
+                    })
                 }
             }
+            if (createHint != null) {
+                Spacer(Modifier.height(4.dp))
+                Text(createHint!!, style = MaterialTheme.typography.bodySmall, color = Rose)
+            }
+            if (isCreating && createSlow) {
+                Spacer(Modifier.height(4.dp))
+                // 只提示慢，不解锁按钮：重复提交会真的建出两个会话（BUG-010）。
+                Text("节点响应较慢，仍在等待创建结果…", style = MaterialTheme.typography.bodySmall, color = TextMuted)
+            }
         }
+        item { SearchField(query) { query = it } }
         item {
             Row(
-                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(vertical = 12.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 12.dp, bottom = 14.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 filters.forEach { (label, id) ->
                     val active = filter == id
@@ -242,85 +201,75 @@ fun SessionsScreen(
                         "approval" -> scoped.count { it.pendingApprovals > 0 }
                         else -> scoped.size
                     }
-                    // 热区 44dp 包在外面，胶囊本身维持 0.1.3 的紧凑高度：
-                    // 把 44dp 加在背景/边框上会让筛选条视觉上突然变胖。
-                    Box(
+                    Row(
                         Modifier
-                            .sizeIn(minWidth = 44.dp, minHeight = 44.dp)
-                            .clickable { filter = id },
-                        contentAlignment = Alignment.Center,
+                            .height(29.dp)
+                            .clip(CircleShape)
+                            .background(if (active) Violet.copy(alpha = 0.16f) else Color.Transparent)
+                            .border(0.8.dp, if (active) Violet.copy(alpha = 0.30f) else LineStrong, CircleShape)
+                            .pressClickable(onClick = { filter = id }, scale = 0.96f)
+                            .padding(horizontal = 11.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp),
                     ) {
-                        Row(
-                            Modifier
-                                .clip(RoundedCornerShape(50))
-                                .background(if (active) Violet.copy(alpha = 0.18f) else Color.Transparent)
-                                .border(0.7.dp, if (active) Violet.copy(alpha = 0.6f) else Line, RoundedCornerShape(50))
-                                .padding(horizontal = 11.dp, vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(5.dp),
-                        ) {
-                            Text(label, style = MaterialTheme.typography.bodySmall, color = if (active) TextPrimary else TextSecondary)
-                            Text("$count", style = MaterialTheme.typography.labelSmall, color = if (active) Violet else TextMuted)
-                        }
+                        Text(
+                            label,
+                            style = MaterialTheme.typography.labelLarge,
+                            color = if (active) VioletSoft else TextSecondary,
+                        )
+                        Text(
+                            "$count",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (active) VioletSoft else TextMuted,
+                        )
                     }
                 }
             }
         }
         if (filtered.isEmpty()) {
             item {
-                // 一个节点都没配对时，“点击右上角新建”是做不到的操作，直接引导去配对。
                 if (nodes.isEmpty()) {
                     EmptyState(Icons.Outlined.Devices, "还没有配对设备", "会话来自已配对的电脑，请先扫描电脑上的二维码配对")
-                } else {
+                } else if (scoped.isEmpty()) {
                     EmptyState(Icons.Outlined.Forum, "还没有会话", "在电脑上的 pi 会话会自动出现在这里，也可以点击右上角新建")
+                } else {
+                    // 有会话但被搜索词/筛选筛空了：不能说“还没有会话”，那会让用户以为会话丢了（BUG-018）。
+                    EmptyState(Icons.Outlined.SearchOff, "没有匹配的会话", "换个关键词，或把筛选切回「全部」")
                 }
             }
         }
         nodeOrder.forEach { nodeId ->
-            val nodeGroups = groupsByNode[nodeId].orEmpty()
             val node = nodes.firstOrNull { it.id == nodeId }
-            item(key = "head-$nodeId") {
-                Row(Modifier.fillMaxWidth().padding(top = 10.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    StatusDot(if (link[nodeId] == LinkState.Online) Mint else TextMuted, 6)
-                    Spacer(Modifier.size(7.dp))
-                    Text(node?.name ?: nodeId.take(8), style = MaterialTheme.typography.titleMedium, color = TextSecondary)
-                    Spacer(Modifier.weight(1f))
-                    MonoLabel("${nodeGroups.sumOf { it.count }}", color = TextMuted)
-                }
-            }
-            nodeGroups.forEach { group ->
-                val groupCollapsed = isGroupCollapsed(collapsed, group, forceExpand)
-                item(key = "cwd-${group.nodeId}-${group.key}") {
-                    CwdGroupHeader(group, groupCollapsed) {
-                        val next = toggleCollapsed(collapsed, group, forceExpand)
-                        // forceExpand 下 toggleCollapsed 原样返回，不写回持久化（搜索清空后恢复原折叠集）。
-                        if (!forceExpand) {
-                            collapsed = next
-                            repo.setSettingString("collapsed_cwd_groups", encodeCollapsed(next))
-                        }
-                    }
-                }
-                // 折叠时完全不渲染会话行，不靠高度动画隐藏。
-                if (!groupCollapsed) {
-                    items(group.sessions, key = { it.nodeId + it.id }) { session ->
-                        SessionRow(
-                            session,
-                            migrated = "${session.nodeId}::${session.id}" in migrations,
-                        ) {
-                            onOpenChat(session.nodeId, session.id)
-                        }
-                        Spacer(Modifier.height(8.dp))
-                    }
-                }
+            val nodeSessions = filtered.filter { it.nodeId == nodeId }
+            item(key = "head-$nodeId") { NodeGroupHeader(node, nodeId, nodeSessions.size, link[nodeId]) }
+            items(nodeSessions, key = { it.nodeId + it.id }) { session ->
+                SessionRow(
+                    session = session,
+                    migrated = "${session.nodeId}::${session.id}" in migrations,
+                    onClick = { onOpenChat(session.nodeId, session.id) },
+                    onMore = { renameSessionId = session.id },
+                )
             }
         }
         if (nodes.isEmpty()) {
             item {
-                CarryCard(Modifier.fillMaxWidth(), onClick = onPair) {
-                    Text("先配对一个节点 →", style = MaterialTheme.typography.titleMedium, color = Violet)
-                }
+                Spacer(Modifier.height(12.dp))
+                CarryActionButton("先配对一个节点", onPair, Modifier.fillMaxWidth(), kind = dev.picarry.app.ui.components.ButtonKind.Ghost)
             }
         }
+    }
+
+    if (renameTarget != null) {
+        RenameSessionSheet(
+            session = renameTarget,
+            onDismiss = { renameSessionId = null },
+            onSave = { name, done ->
+                repo.renameSession(renameTarget.nodeId, renameTarget.id, name) { error ->
+                    if (error == null) renameSessionId = null
+                    done(error)
+                }
+            },
+        )
     }
 
     if (showNodePicker) {
@@ -328,8 +277,11 @@ fun SessionsScreen(
             onDismissRequest = { showNodePicker = false },
             sheetState = nodeSheetState,
             containerColor = Panel,
+            shape = RoundedCornerShape(topStart = 26.dp, topEnd = 26.dp),
+            dragHandle = { CarrySheetGrabber() },
+            scrimColor = Color.Black.copy(alpha = 0.66f),
         ) {
-            NodePickerSheet(onlineNodes) { id ->
+            NodePickerSheet(onlineNodes, onDismiss = { showNodePicker = false }) { id ->
                 showNodePicker = false
                 createError = null
                 pickerNodeId = id
@@ -339,19 +291,22 @@ fun SessionsScreen(
     val pickerNode = pickerNodeId?.let { id -> nodes.firstOrNull { it.id == id } }
     if (pickerNodeId != null) {
         if (pickerNode == null) {
-            // 节点在选目录期间被解绑：直接收掉 sheet，避免停在空白页。
             LaunchedEffect(pickerNodeId) { pickerNodeId = null }
         } else {
             ModalBottomSheet(
-                onDismissRequest = { pickerNodeId = null },
+                onDismissRequest = { pickerNodeId = null; createError = null },
                 sheetState = dirSheetState,
                 containerColor = Panel,
+                shape = RoundedCornerShape(topStart = 26.dp, topEnd = 26.dp),
+                dragHandle = { CarrySheetGrabber() },
+                scrimColor = Color.Black.copy(alpha = 0.66f),
             ) {
                 DirectoryPickerSheet(
                     repo = repo,
                     node = pickerNode,
                     isCreating = isCreating,
                     createError = createError,
+                    onDismiss = { pickerNodeId = null; createError = null },
                     onCreate = { cwd ->
                         createError = null
                         isCreating = true
@@ -361,7 +316,6 @@ fun SessionsScreen(
                             onCreated = { session ->
                                 isCreating = false
                                 pickerNodeId = null
-                                // 目录选定后直接进会话，省掉“列表刷新后再找一遍新会话”。
                                 onOpenChat(pickerNode.id, session.id)
                             },
                             onFailed = { message ->
@@ -376,87 +330,230 @@ fun SessionsScreen(
     }
 }
 
-/** cwd 组头：目录名 + 完整路径 + 会话数，点击折叠/展开。 */
 @Composable
-private fun CwdGroupHeader(group: CwdGroup, collapsedGroup: Boolean, onToggle: () -> Unit) {
+private fun SearchField(query: String, onQuery: (String) -> Unit) {
     Row(
         Modifier
             .fillMaxWidth()
-            // 热区至少 44dp：组头是折叠开关，不能只靠 15sp 文字的行高。
-            .sizeIn(minHeight = 44.dp)
-            .clip(RoundedCornerShape(13.dp))
-            .background(Panel.copy(alpha = 0.45f))
-            .border(0.7.dp, Line.copy(alpha = 0.6f), RoundedCornerShape(13.dp))
-            .clickable(onClick = onToggle)
-            .padding(horizontal = 10.dp, vertical = 6.dp),
+            .height(40.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(Surface2.copy(alpha = 0.52f))
+            .border(0.8.dp, Line, RoundedCornerShape(12.dp))
+            .padding(horizontal = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(Icons.Outlined.Folder, null, tint = Amber, modifier = Modifier.size(16.dp))
+        Icon(Icons.Outlined.Search, "搜索会话", tint = TextMuted, modifier = Modifier.size(15.dp))
         Spacer(Modifier.size(8.dp))
+        BasicTextField(
+            value = query,
+            onValueChange = onQuery,
+            singleLine = true,
+            textStyle = TextStyle(color = TextPrimary, fontSize = MaterialTheme.typography.bodyMedium.fontSize, fontFamily = Inter),
+            cursorBrush = SolidColor(Violet),
+            modifier = Modifier.weight(1f),
+            decorationBox = { inner ->
+                if (query.isBlank()) Text("搜索会话、路径或消息…", style = MaterialTheme.typography.bodySmall, color = TextMuted)
+                inner()
+            },
+        )
+        if (query.isNotBlank()) {
+            Box(Modifier.size(28.dp).clip(CircleShape).clickable { onQuery("") }, contentAlignment = Alignment.Center) {
+                Icon(Icons.Outlined.Close, "清除搜索", tint = TextMuted, modifier = Modifier.size(14.dp))
+            }
+        }
+    }
+}
+
+@Composable
+private fun NodeGroupHeader(node: Node?, nodeId: String, count: Int, state: LinkState?) {
+    Row(
+        Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(7.dp),
+    ) {
+        StatusDot(if (state == LinkState.Online) Mint else TextMuted, 5)
+        Text(
+            node?.name ?: nodeId.take(8),
+            style = MaterialTheme.typography.labelMedium,
+            color = TextSecondary,
+            maxLines = 1,
+        )
+        Box(Modifier.weight(1f).height(0.7.dp).background(Line))
+        MonoLabel("$count", color = TextMuted)
+    }
+}
+
+@Composable
+private fun SessionRow(session: Session, migrated: Boolean, onClick: () -> Unit, onMore: () -> Unit) {
+    val dot = when {
+        session.pendingApprovals > 0 -> Rose
+        session.isRunning -> Amber
+        session.status == "error" -> Rose
+        else -> TextMuted
+    }
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(13.dp))
+            .pressClickable(onClick = onClick, scale = 0.985f)
+            .padding(horizontal = 10.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Box(Modifier.padding(top = 6.dp)) { StatusDot(dot, 6) }
+        Spacer(Modifier.size(11.dp))
         Column(Modifier.weight(1f)) {
-            Text(group.label, style = MaterialTheme.typography.titleMedium, color = TextPrimary, maxLines = 1)
-            if (group.cwd.isNotBlank()) {
-                // 用 labelSmall 而不是 MonoLabel：MonoLabel 会 uppercase，路径不该被改大小写。
+            Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    group.cwd,
+                    session.title,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = TextPrimary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                Spacer(Modifier.size(8.dp))
+                MonoLabel(timeAgo(session.updatedAt), color = TextMuted)
+            }
+            Spacer(Modifier.height(3.dp))
+            Text(
+                session.preview.ifBlank { session.cwd },
+                style = MaterialTheme.typography.labelLarge,
+                color = TextSecondary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.height(8.dp))
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    session.cwd.ifBlank { "~" },
                     style = MaterialTheme.typography.labelSmall,
                     color = TextMuted,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                if (session.pendingApprovals > 0) {
+                    Tag("等待审批", Rose)
+                } else if (session.isRunning) {
+                    Tag(statusText(session.status), statusColor(session.status))
+                }
+                if (migrated) Tag("已迁移", Amber)
+                if (!session.writable) Tag("只读", Cyan)
+            }
+        }
+        // 24dp 的图标按钮点起来容易打偏：可点区域撑到 48dp，图标与底色仍按原尺寸绘制（BUG-020）。
+        Box(
+            Modifier
+                .padding(start = 4.dp)
+                .size(48.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .clickable(onClick = onMore),
+            contentAlignment = Alignment.Center,
+        ) {
+            Box(
+                Modifier.size(24.dp).clip(RoundedCornerShape(7.dp)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(Icons.Outlined.MoreHoriz, "管理会话", tint = TextMuted, modifier = Modifier.size(16.dp))
+            }
+        }
+    }
+    Box(Modifier.fillMaxWidth().padding(start = 27.dp).height(0.7.dp).background(Line.copy(alpha = 0.7f)))
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun RenameSessionSheet(session: Session, onDismiss: () -> Unit, onSave: (String, (String?) -> Unit) -> Unit) {
+    var name by remember(session.id) { mutableStateOf(session.name) }
+    var error by remember(session.id) { mutableStateOf<String?>(null) }
+    var saving by remember(session.id) { mutableStateOf(false) }
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = Panel,
+        shape = RoundedCornerShape(topStart = 26.dp, topEnd = 26.dp),
+        dragHandle = { CarrySheetGrabber() },
+        scrimColor = Color.Black.copy(alpha = 0.66f),
+    ) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp).padding(bottom = 26.dp)) {
+            CarrySheetHeader(
+                title = "重命名会话",
+                subtitle = "只影响列表与对话标题 · 不改变 .jsonl 路径",
+                onClose = onDismiss,
+            )
+            Text("会话名称", style = MaterialTheme.typography.labelSmall, color = TextMuted)
+            Spacer(Modifier.height(5.dp))
+            BasicTextField(
+                value = name,
+                onValueChange = { if (it.length <= 60) name = it },
+                singleLine = true,
+                textStyle = MaterialTheme.typography.bodyMedium.copy(color = TextPrimary),
+                cursorBrush = SolidColor(Violet),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(44.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Surface2.copy(alpha = 0.55f))
+                    .border(0.8.dp, LineStrong, RoundedCornerShape(10.dp))
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+            )
+            Spacer(Modifier.height(1.dp))
+            Text(
+                "名称可以随时修改；并发重命名以服务端最后写入为准。",
+                style = MaterialTheme.typography.labelSmall,
+                color = TextMuted,
+                modifier = Modifier.padding(top = 7.dp),
+            )
+            if (error != null) {
+                Text(error!!, style = MaterialTheme.typography.bodySmall, color = Rose, modifier = Modifier.padding(top = 8.dp))
+            }
+            Row(Modifier.fillMaxWidth().padding(top = 16.dp), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                CarryActionButton("取消", onDismiss, Modifier.weight(1f), kind = dev.picarry.app.ui.components.ButtonKind.Ghost)
+                CarryActionButton(
+                    if (saving) "保存中…" else "保存",
+                    onClick = {
+                        if (!saving && name.isNotBlank()) {
+                            saving = true
+                            error = null
+                            onSave(name.trim()) { message -> saving = false; error = message }
+                        }
+                    },
+                    Modifier.weight(1.45f),
+                    enabled = name.isNotBlank() && !saving,
                 )
             }
         }
-        MonoLabel("${group.count}", color = TextMuted)
-        Spacer(Modifier.size(4.dp))
-        Icon(
-            Icons.Outlined.ExpandMore,
-            if (collapsedGroup) "展开该目录" else "折叠该目录",
-            tint = TextMuted,
-            modifier = Modifier.size(16.dp).rotate(if (collapsedGroup) -90f else 0f),
-        )
     }
-    // 折叠与展开都补一段间距：展开时下方是会话卡，折叠时直接接下个组头。
-    Spacer(Modifier.height(8.dp))
 }
 
-/** 多节点时的节点选择：先选在哪台电脑上建会话。 */
 @Composable
-private fun NodePickerSheet(onlineNodes: List<Node>, onPick: (String) -> Unit) {
+private fun NodePickerSheet(onlineNodes: List<Node>, onDismiss: () -> Unit, onPick: (String) -> Unit) {
     Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp).padding(bottom = 28.dp)) {
-        Text("选择节点", style = MaterialTheme.typography.headlineMedium, color = TextPrimary)
-        Spacer(Modifier.height(4.dp))
-        Text("新会话建在所选节点上。", style = MaterialTheme.typography.bodySmall, color = TextMuted)
-        Spacer(Modifier.height(12.dp))
+        CarrySheetHeader("选择节点", "新会话建在所选节点上。", onClose = onDismiss)
         onlineNodes.forEach { node ->
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .sizeIn(minHeight = 44.dp)
-                    .clip(RoundedCornerShape(13.dp))
-                    .background(PanelHigh.copy(alpha = 0.5f))
-                    .border(0.7.dp, Line, RoundedCornerShape(13.dp))
+                    .height(48.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Surface2.copy(alpha = 0.45f))
+                    .border(0.8.dp, Line, RoundedCornerShape(12.dp))
                     .clickable { onPick(node.id) }
-                    .padding(12.dp),
+                    .padding(horizontal = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Icon(Icons.Outlined.Computer, null, tint = Violet, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.size(10.dp))
-                Text(node.name, style = MaterialTheme.typography.titleMedium, color = TextPrimary, maxLines = 1, modifier = Modifier.weight(1f))
                 StatusDot(Mint, 6)
+                Spacer(Modifier.size(10.dp))
+                Text(node.name, style = MaterialTheme.typography.titleSmall, color = TextPrimary, maxLines = 1, modifier = Modifier.weight(1f))
+                Tag("在线", Mint)
                 Spacer(Modifier.size(8.dp))
-                Icon(Icons.Outlined.ChevronRight, null, tint = TextMuted, modifier = Modifier.size(16.dp))
+                Icon(Icons.Outlined.ChevronRight, null, tint = TextMuted, modifier = Modifier.size(15.dp))
             }
             Spacer(Modifier.height(7.dp))
         }
     }
 }
 
-/**
- * 目录选择 sheet。
- *
- * 缺 `fs-browse` 能力的节点不发 `fs.roots`/`fs.list`（老节点会直接回错误），
- * 只给一项「使用节点默认目录」（`cwd = ""`）。
- */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun DirectoryPickerSheet(
@@ -464,6 +561,7 @@ private fun DirectoryPickerSheet(
     node: Node,
     isCreating: Boolean,
     createError: String?,
+    onDismiss: () -> Unit,
     onCreate: (String) -> Unit,
 ) {
     val scope = rememberCoroutineScope()
@@ -493,7 +591,6 @@ private fun DirectoryPickerSheet(
         runCatching { repo.fsRoots(node.id) }
             .onSuccess { result ->
                 roots = result
-                // `fs.list` 的 path 留空会由服务端回退到默认目录，所以根列表为空也能开。
                 load(result.roots.firstOrNull()?.path ?: "")
             }
             .onFailure {
@@ -505,15 +602,11 @@ private fun DirectoryPickerSheet(
     Column(
         Modifier
             .fillMaxWidth()
-            .fillMaxHeight(0.85f)
+            .fillMaxHeight(0.88f)
             .padding(horizontal = 18.dp)
             .padding(bottom = 20.dp),
     ) {
-        Text("选择目录", style = MaterialTheme.typography.headlineMedium, color = TextPrimary)
-        Spacer(Modifier.height(4.dp))
-        Text("在 ${node.name} 上的工作目录新建会话。", style = MaterialTheme.typography.bodySmall, color = TextMuted)
-        Spacer(Modifier.height(12.dp))
-
+        CarrySheetHeader("选择目录", "在 ${node.name} 上的工作目录新建会话。", onClose = onDismiss)
         if (!canBrowse) {
             Text("节点版本较旧，升级后可选择目录", style = MaterialTheme.typography.bodySmall, color = Amber)
             Spacer(Modifier.height(10.dp))
@@ -524,82 +617,44 @@ private fun DirectoryPickerSheet(
         if (error != null) {
             Text(error!!, style = MaterialTheme.typography.bodySmall, color = Rose)
             Spacer(Modifier.height(8.dp))
-            Row(
-                Modifier
-                    // 热区至少 44dp（U-11）：加载失败后的重试是唯一出口，不能只靠胶囊本身的高度。
-                    .sizeIn(minWidth = 44.dp, minHeight = 44.dp)
-                    .clip(RoundedCornerShape(50))
-                    .background(Violet.copy(alpha = 0.16f))
-                    .border(0.7.dp, Violet.copy(alpha = 0.5f), RoundedCornerShape(50))
-                    .clickable {
-                        // 根目录都没拿到时只能重拉 roots；已在某个目录里失败就重试该目录，不退回根。
-                        if (roots == null) {
-                            reloadTick += 1
-                        } else {
-                            scope.launch { load(listing?.path ?: "") }
-                        }
-                    },
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.Center,
-            ) { Text("重试", style = MaterialTheme.typography.bodySmall, color = Violet) }
+            CarryActionButton("重试", onClick = {
+                if (roots == null) reloadTick += 1 else scope.launch { load(listing?.path ?: "") }
+            }, kind = dev.picarry.app.ui.components.ButtonKind.Ghost)
             Spacer(Modifier.height(8.dp))
         }
 
-        // 面包屑：每级都能点，点击即 fs.list 该级（服务端只给 parent，逐级回退会多几次往返）。
         val crumbs = listing?.let { breadcrumbs(it.path, roots?.roots.orEmpty()) }.orEmpty()
         if (crumbs.isNotEmpty()) {
-            Row(
-                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), verticalAlignment = Alignment.CenterVertically) {
                 crumbs.forEachIndexed { index, crumb ->
                     val last = index == crumbs.lastIndex
                     Box(
-                        Modifier
-                            .sizeIn(minHeight = 44.dp)
-                            .clickable(enabled = !last) { scope.launch { load(crumb) } }
-                            .padding(horizontal = 4.dp),
+                        Modifier.sizeIn(minHeight = 40.dp).clickable(enabled = !last) { scope.launch { load(crumb) } }.padding(horizontal = 4.dp),
                         contentAlignment = Alignment.Center,
                     ) {
-                        Text(
-                            displayName(crumb),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = if (last) TextPrimary else Violet,
-                            maxLines = 1,
-                        )
+                        Text(displayName(crumb), style = MaterialTheme.typography.labelSmall, color = if (last) TextPrimary else Violet, maxLines = 1)
                     }
                     if (!last) Text("/", style = MaterialTheme.typography.labelSmall, color = TextMuted)
                 }
             }
-            Spacer(Modifier.height(6.dp))
         }
 
-        val quickPaths = remember(roots) {
-            (roots?.roots.orEmpty().map { it.path } + roots?.recent.orEmpty()).distinct()
-        }
+        val quickPaths = remember(roots) { (roots?.roots.orEmpty().map { it.path } + roots?.recent.orEmpty()).distinct() }
         if (quickPaths.isNotEmpty()) {
-            Row(
-                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 quickPaths.forEach { path ->
                     val active = listing?.path == path
                     Box(
                         Modifier
-                            .sizeIn(minHeight = 44.dp)
-                            .clip(RoundedCornerShape(50))
-                            .background(if (active) Violet.copy(alpha = 0.18f) else Color.Transparent)
-                            .border(0.7.dp, if (active) Violet.copy(alpha = 0.55f) else Line, RoundedCornerShape(50))
+                            .height(29.dp)
+                            .clip(CircleShape)
+                            .background(if (active) Violet.copy(alpha = 0.16f) else Color.Transparent)
+                            .border(0.8.dp, if (active) Violet.copy(alpha = 0.30f) else LineStrong, CircleShape)
                             .clickable { scope.launch { load(path) } }
-                            .padding(horizontal = 11.dp, vertical = 6.dp),
+                            .padding(horizontal = 11.dp),
                         contentAlignment = Alignment.Center,
                     ) {
-                        Text(
-                            displayName(path),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = if (active) TextPrimary else TextSecondary,
-                            maxLines = 1,
-                        )
+                        Text(displayName(path), style = MaterialTheme.typography.labelLarge, color = if (active) VioletSoft else TextSecondary, maxLines = 1)
                     }
                 }
             }
@@ -617,44 +672,32 @@ private fun DirectoryPickerSheet(
                 }
                 else -> LazyColumn(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(7.dp)) {
                     if (current.entries.isEmpty()) {
-                        item {
-                            Text("这个目录下没有子目录", style = MaterialTheme.typography.bodySmall, color = TextMuted)
-                        }
+                        item { Text("这个目录下没有子目录", style = MaterialTheme.typography.bodySmall, color = TextMuted) }
                     }
                     items(current.entries, key = { it.path }) { entry ->
                         Row(
                             Modifier
                                 .fillMaxWidth()
                                 .sizeIn(minHeight = 44.dp)
-                                .clip(RoundedCornerShape(13.dp))
-                                .background(PanelHigh.copy(alpha = 0.45f))
-                                .border(0.7.dp, Line, RoundedCornerShape(13.dp))
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(Surface2.copy(alpha = 0.42f))
+                                .border(0.8.dp, Line, RoundedCornerShape(12.dp))
                                 .clickable { scope.launch { load(entry.path) } }
                                 .padding(horizontal = 12.dp, vertical = 10.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Icon(Icons.Outlined.Folder, null, tint = Amber, modifier = Modifier.size(16.dp))
                             Spacer(Modifier.size(8.dp))
-                            Text(
-                                entry.name,
-                                style = MaterialTheme.typography.titleMedium,
-                                color = TextPrimary,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f),
-                            )
+                            Text(entry.name, style = MaterialTheme.typography.titleSmall, color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
                             if (entry.hasSessions) {
-                                // 已有会话的目录打个点，避免为了看一眼就点进去。
                                 StatusDot(Mint, 4)
                                 Spacer(Modifier.size(8.dp))
                             }
-                            Icon(Icons.Outlined.ChevronRight, null, tint = TextMuted, modifier = Modifier.size(16.dp))
+                            Icon(Icons.Outlined.ChevronRight, null, tint = TextMuted, modifier = Modifier.size(15.dp))
                         }
                     }
                     if (current.truncated) {
-                        item {
-                            Text("目录过多，仅显示前 500 项", style = MaterialTheme.typography.bodySmall, color = Amber)
-                        }
+                        item { Text("目录过多，仅显示前 500 项", style = MaterialTheme.typography.bodySmall, color = Amber) }
                     }
                 }
             }
@@ -666,108 +709,33 @@ private fun DirectoryPickerSheet(
             Spacer(Modifier.height(8.dp))
         }
         val target = listing?.path
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .sizeIn(minHeight = 44.dp)
-                .clip(RoundedCornerShape(14.dp))
-                .background(Violet.copy(alpha = if (target == null || isCreating) 0.09f else 0.9f))
-                .clickable(enabled = target != null && !isCreating) { onCreate(target ?: "") }
-                .padding(vertical = 13.dp),
-            contentAlignment = Alignment.Center,
-        ) {
-            if (isCreating) {
-                CircularProgressIndicator(Modifier.size(18.dp), color = Violet, strokeWidth = 2.dp)
-            } else {
-                Text(
-                    "在此目录新建",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = if (target == null) TextMuted else Color.White,
-                )
-            }
-        }
+        CarryActionButton(
+            if (isCreating) "创建中…" else "在此目录新建",
+            onClick = { onCreate(target ?: "") },
+            modifier = Modifier.fillMaxWidth(),
+            enabled = target != null && !isCreating,
+            height = 46.dp,
+        )
     }
 }
 
-/** 缺 `fs-browse` 时唯一可选项：不传 cwd，由节点自己决定目录。 */
 @Composable
 private fun DefaultCwdRow(isCreating: Boolean, onClick: () -> Unit) {
     Row(
         Modifier
             .fillMaxWidth()
-            .sizeIn(minHeight = 44.dp)
-            .clip(RoundedCornerShape(13.dp))
-            .background(PanelHigh.copy(alpha = 0.45f))
-            .border(0.7.dp, Line, RoundedCornerShape(13.dp))
+            .height(48.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(Surface2.copy(alpha = 0.45f))
+            .border(0.8.dp, Line, RoundedCornerShape(12.dp))
             .clickable(enabled = !isCreating, onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 10.dp),
+            .padding(horizontal = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(Icons.Outlined.Folder, null, tint = Violet, modifier = Modifier.size(16.dp))
         Spacer(Modifier.size(8.dp))
-        Text(
-            "使用节点默认目录",
-            style = MaterialTheme.typography.titleMedium,
-            color = TextPrimary,
-            modifier = Modifier.weight(1f),
-        )
-        Icon(Icons.Outlined.ChevronRight, null, tint = TextMuted, modifier = Modifier.size(16.dp))
-    }
-}
-
-@Composable
-private fun SessionRow(session: Session, migrated: Boolean, onClick: () -> Unit) {
-    CarryCard(Modifier.fillMaxWidth(), onClick = onClick) {
-        Column {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                StatusDot(if (session.isRunning) statusColor(session.status) else TextMuted, 6)
-                Spacer(Modifier.size(8.dp))
-                Text(
-                    session.title,
-                    style = MaterialTheme.typography.titleMedium,
-                    color = TextPrimary,
-                    maxLines = 1,
-                    modifier = Modifier.weight(1f),
-                )
-                if (session.pendingApprovals > 0) {
-                    Box(
-                        Modifier
-                            .clip(CircleShape)
-                            .background(Rose.copy(alpha = 0.2f))
-                            .padding(horizontal = 7.dp, vertical = 2.dp)
-                    ) { Text("${session.pendingApprovals} 待审", style = MaterialTheme.typography.labelSmall, color = Rose) }
-                } else {
-                    MonoLabel(timeAgo(session.updatedAt), color = TextMuted)
-                }
-                Icon(Icons.Outlined.ChevronRight, "打开会话", tint = TextMuted, modifier = Modifier.size(16.dp))
-            }
-            Spacer(Modifier.height(5.dp))
-            Text(
-                session.preview.ifBlank { session.cwd },
-                style = MaterialTheme.typography.bodySmall,
-                color = TextSecondary,
-                maxLines = 1,
-            )
-            Spacer(Modifier.height(9.dp))
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                // displayName 同时认 `/` 与 `\`：Windows 路径按 `/` 切分会整条返回，卡片上就会出现一整条路径。
-                // 这里不用 MonoLabel：它会 uppercase，把 `Documents` 变成 `DOCUMENTS`。
-                Text(
-                    displayName(session.cwd).ifBlank { "~" },
-                    style = MaterialTheme.typography.labelSmall,
-                    color = TextMuted,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                if (session.isRunning) {
-                    Text(statusText(session.status), style = MaterialTheme.typography.labelSmall, color = statusColor(session.status))
-                }
-                Spacer(Modifier.weight(1f))
-                if (migrated) Text("已迁移", style = MaterialTheme.typography.labelSmall, color = Amber)
-                if (!session.writable) Text("只读", style = MaterialTheme.typography.labelSmall, color = Cyan)
-                MonoLabel("${session.messageCount} 条", color = TextMuted)
-            }
-        }
+        Text("使用节点默认目录", style = MaterialTheme.typography.titleSmall, color = TextPrimary, modifier = Modifier.weight(1f))
+        Icon(Icons.Outlined.ChevronRight, null, tint = TextMuted, modifier = Modifier.size(15.dp))
     }
 }
 

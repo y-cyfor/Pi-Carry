@@ -57,6 +57,9 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .with_target(false)
+        // 日志一律走 stderr：`serve --json` 的 stdout 只留给那一行结果，
+        // 脚本要能直接 `head -1 | jq`（BUG-011）。tracing 默认写 stdout。
+        .with_writer(std::io::stderr)
         .init();
     match cli.command.unwrap_or(Command::Serve { json: false }) {
         Command::Serve { json } => serve(json).await,
@@ -175,9 +178,24 @@ fn doctor() -> anyhow::Result<()> {
 }
 
 async fn smoke() -> anyhow::Result<()> {
+    // 冒烟用的是临时数据目录，但系统钥匙串条目是全局的：不强制明文后端就会
+    // 把节点身份写进用户真实的凭据库，删掉临时目录也删不掉凭据（BUG-003）。
+    if std::env::var_os(pi_carry_core::secretstore::BACKEND_ENV).is_none() {
+        std::env::set_var(pi_carry_core::secretstore::BACKEND_ENV, "file");
+    }
     let root = std::env::temp_dir().join(format!("pi-carry-smoke-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("sessions"))?;
+    // 退出前必须删掉临时目录：里面有**明文** endpoint 密钥、`state.db`、`guard.ts` 与会话文件，
+    // 留在 %TEMP% 等于把节点身份副本散落在磁盘上，多次运行还会持续累积（BUG-030）。
+    // 守卫声明在 Bridge 之前：析构顺序反过来，SQLite 连接先关闭，再删目录。
+    struct SmokeDirGuard(std::path::PathBuf);
+    impl Drop for SmokeDirGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _smoke_dir = SmokeDirGuard(root.clone());
     let fake = fake_pi_path()?;
     let session_id = "smoke-session";
     let session_file = root
@@ -245,6 +263,8 @@ async fn smoke() -> anyhow::Result<()> {
     }
     bridge.smoke_ping().await?;
     bridge.shutdown().await;
+    // 显式释放 Bridge：SQLite/WAL 句柄关闭后守卫才能把目录删干净（Windows 上不允许删打开的文件）。
+    drop(bridge);
     let Some(final_message) = final_message else {
         anyhow::bail!("冒烟失败：未收到 message.final");
     };

@@ -1,0 +1,73 @@
+/* 0.3.0 新增组件样式：更新横幅、更新对话框、首启自检卡、密钥降级横幅、深链预填。
+   设计 token 与既有卡片/横幅样式仍在 index.html 的 <style> 里，这里只补差异，
+   避免两套视觉各自演化。 */
+
+/* hidden 必须压过 .banner{display:flex} / .card 等自带 display 的规则，
+   否则 hidden 属性对横幅完全无效。 */
+[hidden] { display: none !important; }
+
+/* 横幅内的「图标 + 内容 + 右侧按钮」三段结构 */
+.banner svg.ico { flex: 0 0 auto; }
+.banner .grow { flex: 1; min-width: 0; }
+.banner .grow b { font-weight: 550; }
+.banner .actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; flex: 0 0 auto; }
+.banner .actions .btn { padding: 5px 10px; font-size: 11.5px; }
+
+/* 更新横幅里的下载进度 */
+.progress { height: 6px; border-radius: 6px; background: var(--line); overflow: hidden; margin-top: 9px; }
+.progress > i {
+  display: block; height: 100%; width: 0; border-radius: inherit;
+  background: linear-gradient(90deg, #8b7cff, #45d9d0); transition: width .2s ease;
+}
+.update-meta {
+  margin-top: 6px; color: var(--text-2); word-break: break-word;
+  font: 10.5px/1.65 "Cascadia Code", Consolas, monospace;
+}
+
+/* 更新详情对话框：复用 .confirm-overlay / .confirm-box 的背板与体量 */
+#update-overlay .confirm-box { width: min(540px, calc(100vw - 48px)); }
+#update-sub { margin-top: 6px; color: var(--muted); font-size: 11.5px; }
+#update-date { margin-top: 4px; color: var(--muted); font-size: 11px; }
+#update-notes {
+  margin-top: 14px; max-height: 260px; overflow: auto;
+  color: var(--text-2); font-size: 12.5px; line-height: 1.75; white-space: pre-wrap; word-break: break-word;
+}
+
+/* 首启自检卡 */
+.sc-head { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 12px; }
+.sc-list { display: flex; flex-direction: column; gap: 8px; }
+.sc-row {
+  display: flex; align-items: flex-start; gap: 11px; padding: 11px 12px;
+  border: 1px solid var(--line-soft); border-radius: 11px; background: rgba(16,16,27,.4);
+}
+.sc-row .ico { width: 16px; height: 16px; flex: 0 0 16px; margin-top: 1px; }
+.sc-row.rose .ico { color: var(--rose); }
+.sc-row.amber .ico { color: var(--amber); }
+.sc-row .btn { flex: 0 0 auto; }
+.sc-main { flex: 1; min-width: 0; }
+.sc-main b { display: block; font-size: 12px; font-weight: 550; }
+.sc-main span { display: block; margin-top: 3px; color: var(--muted); font-size: 11px; line-height: 1.6; word-break: break-word; }
+
+/* 密钥降级横幅与页面同宽，页内每页都能看到 */
+#secret-banner { max-width: 1080px; margin: 0 auto 15px; }
+
+/* 设置页「更新」卡里的失败版本提示 */
+#update-last-failed { color: var(--amber); }
+
+/* 深链预填：endpoint 与完整 URI 都是长串，必须能断行 */
+#pair-prefill .prefill-row { display: flex; gap: 8px; margin-top: 6px; font-size: 11.5px; }
+#pair-prefill .prefill-row .k { flex: 0 0 auto; color: var(--muted); }
+#pair-prefill .prefill-row .v {
+  min-width: 0; color: var(--text-2); word-break: break-all;
+  font: 10.5px/1.6 "Cascadia Code", Consolas, monospace;
+}
+#pair-prefill details summary { margin-top: 8px; color: var(--text-2); font-size: 11px; cursor: pointer; }
+#pair-prefill .prefill-uri {
+  margin-top: 8px; padding: 8px; border: 1px solid var(--line-soft); border-radius: 8px;
+  background: rgba(0,0,0,.25); color: var(--text-2); word-break: break-all;
+  font: 10.5px/1.6 "Cascadia Code", Consolas, monospace;
+}
+#pair-prefill .prefill-note { margin-top: 8px; color: var(--muted); font-size: 10.5px; line-height: 1.6; }
+
+html[data-theme="light"] .sc-row { background: #fbfaff; border-color: rgba(27,24,38,.07); }
+html[data-theme="light"] #pair-prefill .prefill-uri { background: #fbfaff; }

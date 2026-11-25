@@ -29,7 +29,9 @@ data class Turn(
     val displayTokens: Long get() = inputTokens + outputTokens
 
     /** `46分钟25秒 · 4.6k` 的右侧部分。 */
-    val tokenText: String get() = formatTokens(displayTokens)
+    // 没有 usage 时不能显示 `0`：会被读成「本轮没花 token」，而实际情况是数据缺失。
+    // 与左侧的时长 `—` 对齐，缺失一律显示 `—`（BUG-008）。
+    val tokenText: String get() = if (displayTokens == 0L) "—" else formatTokens(displayTokens)
 
     /** `0分钟8秒` 形式，永不为空（时长未知时显示 `—`）。 */
     val durationText: String get() = durationMs?.let(::formatDuration) ?: "—"

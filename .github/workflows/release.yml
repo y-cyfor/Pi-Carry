@@ -1,0 +1,511 @@
+# 发布流水线：测试门禁 → Windows/macOS/Linux/Android 构建 → 汇总草稿 Release。
+# 触发：push tag v*（发布）、workflow_dispatch（可 dry_run）、pull_request（只构建与测试，不签名、不发布）。
+# 权限：默认 contents: read；只有 publish job 申请 contents: write。
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "只构建不发布（不创建 Release）"
+        type: boolean
+        default: true
+
+# 同一 ref 只允许一条流水线；tag 发布不取消进行中的任务，避免半成品。
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  RUST_TOOLCHAIN: "1.91"
+
+jobs:
+  test:
+    name: 测试门禁（ubuntu-22.04）
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - name: 检出
+        uses: actions/checkout@v4 # 可替换为 commit SHA
+      - name: 安装 Linux 构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
+            libxdo-dev libssl-dev libfuse2
+      - name: 安装 Node
+        uses: actions/setup-node@v4 # 可替换为 commit SHA
+        with:
+          node-version: "22"
+      - name: 安装 Rust ${{ env.RUST_TOOLCHAIN }}
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt,clippy
+          rustup override set "$RUST_TOOLCHAIN"
+          cargo --version
+      - name: 缓存 Cargo
+        uses: actions/cache@v4 # 可替换为 commit SHA
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-test-
+      - name: 格式检查
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: 工作区测试
+        run: cargo test --workspace --locked
+      - name: 版本号一致性
+        run: node scripts/set-version.mjs --check
+
+  android-unit:
+    name: Android 单元测试
+    needs: test
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: 检出
+        uses: actions/checkout@v4 # 可替换为 commit SHA
+      - name: 安装 JDK 17
+        uses: actions/setup-java@v4 # 可替换为 commit SHA
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: 安装 Android SDK
+        uses: android-actions/setup-android@v3 # 可替换为 commit SHA
+      - name: 安装 SDK 平台与构建工具
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-36" "build-tools;36.0.0"
+      - name: 缓存 Gradle
+        uses: actions/cache@v4 # 可替换为 commit SHA
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('android/**/*.gradle*', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+      - name: Android 单元测试
+        run: ./gradlew testDebugUnitTest --no-daemon
+        working-directory: android
+
+  runtime-gate:
+    name: 冒烟 + 端到端门禁
+    needs: test
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - name: 检出
+        uses: actions/checkout@v4 # 可替换为 commit SHA
+      - name: 安装 Linux 构建与运行依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
+            libxdo-dev libssl-dev libfuse2 xvfb
+      - name: 安装 Node
+        uses: actions/setup-node@v4 # 可替换为 commit SHA
+        with:
+          node-version: "22"
+      - name: 安装 Rust ${{ env.RUST_TOOLCHAIN }}
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup override set "$RUST_TOOLCHAIN"
+          cargo --version
+      - name: 缓存 Cargo
+        uses: actions/cache@v4 # 可替换为 commit SHA
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-runtime-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-runtime-
+      - name: 冒烟测试
+        run: xvfb-run -a bash scripts/smoke.sh
+      - name: 端到端门禁
+        run: bash scripts/e2e.sh
+
+  build-android:
+    name: 构建 Android 正式签名 APK（arm64-v8a + x86_64）
+    needs: test
+    # PR 不产正式包（没有签名材料）；tag 与 workflow_dispatch 才构建。
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - name: 检出
+        uses: actions/checkout@v4 # 可替换为 commit SHA
+      - name: 安装 JDK 17
+        uses: actions/setup-java@v4 # 可替换为 commit SHA
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: 安装 Android SDK
+        uses: android-actions/setup-android@v3 # 可替换为 commit SHA
+      - name: 安装 SDK 平台与构建工具
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-36" "build-tools;36.0.0"
+      - name: 缓存 Gradle
+        uses: actions/cache@v4 # 可替换为 commit SHA
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-release-${{ hashFiles('android/**/*.gradle*', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+      # app/build.gradle.kts 只从仓库外的 android/keystore.properties 读取签名配置；
+      # 没有 keystore 时 assembleRelease 产出的是未签名包，绝不能当正式资产上传。
+      - name: 写入 Release 签名配置
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
+            if [ -z "${!name:-}" ]; then
+              echo "缺少 secrets.$name" >&2
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "没有 Android 正式签名材料：拒绝在没有正式签名的前提下产出 APK。" >&2
+            exit 1
+          fi
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > android/release.keystore
+          {
+            echo "storeFile=release.keystore"
+            echo "storePassword=$ANDROID_KEYSTORE_PASSWORD"
+            echo "keyAlias=$ANDROID_KEY_ALIAS"
+            echo "keyPassword=$ANDROID_KEY_PASSWORD"
+          } > android/keystore.properties
+          chmod 600 android/release.keystore android/keystore.properties
+      - name: 构建两个 ABI 的 release APK
+        run: ./gradlew assembleRelease --no-daemon
+        working-directory: android
+      # 复用桌面打包脚本的命名与校验和逻辑（AGENTS.md §2：每架构独立 APK，不压缩）。
+      - name: 打包进 dist
+        run: ./scripts/package.ps1 -SkipDesktop
+        shell: pwsh
+      - name: 上传 Android 产物
+        uses: actions/upload-artifact@v4 # 可替换为 commit SHA
+        with:
+          name: android
+          if-no-files-found: error
+          path: |
+            dist/pi-carry-android-8.0-*.apk
+            dist/SHA256SUMS.txt
+      - name: 清理签名材料
+        if: always()
+        run: rm -f android/release.keystore android/keystore.properties
+
+  build-windows:
+    name: 构建 Windows（NSIS 安装器 + 便携 zip）
+    needs: test
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - name: 检出
+        uses: actions/checkout@v4 # 可替换为 commit SHA
+      - name: 安装 Node
+        uses: actions/setup-node@v4 # 可替换为 commit SHA
+        with:
+          node-version: "22"
+      - name: 安装 Rust ${{ env.RUST_TOOLCHAIN }}
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup override set "$RUST_TOOLCHAIN"
+          cargo --version
+      - name: 缓存 Cargo
+        uses: actions/cache@v4 # 可替换为 commit SHA
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-nsis-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-nsis-
+      - name: 安装 tauri-cli
+        run: cargo install tauri-cli --version "^2" --locked
+      - name: 构建 NSIS 安装器
+        env:
+          # PR 不注入签名私钥，产物不带 .sig；tag/dispatch 才走签名链。
+          TAURI_SIGNING_PRIVATE_KEY: ${{ github.event_name != 'pull_request' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrEmpty($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            Write-Host "未注入签名私钥：关闭 updater 签名产物（PR / 本地构建）"
+            cargo tauri build --bundles nsis --config '{"bundle":{"createUpdaterArtifacts":false}}'
+          } else {
+            cargo tauri build --bundles nsis
+          }
+      - name: 打包 dist（跳过 Android）
+        run: ./scripts/package.ps1 -SkipAndroid
+        shell: pwsh
+      - name: 上传 Windows 产物
+        uses: actions/upload-artifact@v4 # 可替换为 commit SHA
+        with:
+          name: windows
+          if-no-files-found: error
+          path: |
+            dist/pi-carry-windows-10-x64-*-setup.exe
+            dist/pi-carry-windows-10-x64-*-setup.exe.sig
+            dist/pi-carry-windows-10-x64-*.zip
+            dist/SHA256SUMS.txt
+            dist/SHA256SUMS.txt
+
+  build-macos:
+    name: 构建 macOS（Universal DMG）
+    needs: test
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - name: 检出
+        uses: actions/checkout@v4 # 可替换为 commit SHA
+      - name: 安装 Rust ${{ env.RUST_TOOLCHAIN }} 与 Universal target
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup target add --toolchain "$RUST_TOOLCHAIN" aarch64-apple-darwin x86_64-apple-darwin
+          rustup override set "$RUST_TOOLCHAIN"
+          cargo --version
+      - name: 缓存 Cargo
+        uses: actions/cache@v4 # 可替换为 commit SHA
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-universal-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-universal-
+      - name: 安装 tauri-cli
+        run: cargo install tauri-cli --version "^2" --locked
+      - name: 构建并打包 Universal DMG
+        env:
+          # 本版不做 Apple 签名与公证；只有注入了私钥才生成 updater 的 .sig。
+          TAURI_SIGNING_PRIVATE_KEY: ${{ github.event_name != 'pull_request' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+        run: bash scripts/package-macos.sh
+      - name: 上传 macOS 产物
+        uses: actions/upload-artifact@v4 # 可替换为 commit SHA
+        with:
+          name: macos
+          if-no-files-found: error
+          path: |
+            dist/pi-carry-macos-11-universal-*.dmg
+            dist/pi-carry-macos-11-universal-*.app.tar.gz
+            dist/pi-carry-macos-11-universal-*.app.tar.gz.sig
+            dist/SHA256SUMS.txt
+
+  build-linux-x64:
+    name: 构建 Linux x64（deb + rpm）
+    needs: test
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - name: 检出
+        uses: actions/checkout@v4 # 可替换为 commit SHA
+      - name: 安装 Linux 构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
+            libxdo-dev libssl-dev libfuse2 rpm
+      - name: 安装 Rust ${{ env.RUST_TOOLCHAIN }}
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup override set "$RUST_TOOLCHAIN"
+          cargo --version
+      - name: 缓存 Cargo
+        uses: actions/cache@v4 # 可替换为 commit SHA
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-deb-x64-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-deb-x64-
+      - name: 安装 tauri-cli
+        run: cargo install tauri-cli --version "^2" --locked
+      - name: 构建并打包 deb/rpm
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ github.event_name != 'pull_request' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+        run: bash scripts/package-linux.sh
+      - name: 上传 Linux x64 产物
+        uses: actions/upload-artifact@v4 # 可替换为 commit SHA
+        with:
+          name: linux-x64
+          if-no-files-found: error
+          path: |
+            dist/pi-carry-linux-22.04-x64-*.deb
+            dist/pi-carry-linux-22.04-x64-*.deb.sig
+            dist/pi-carry-linux-22.04-x64-*.rpm
+            dist/pi-carry-linux-22.04-x64-*.rpm.sig
+            dist/SHA256SUMS.txt
+
+  build-linux-arm64:
+    name: 构建 Linux arm64（deb + rpm）
+    needs: test
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - name: 检出
+        uses: actions/checkout@v4 # 可替换为 commit SHA
+      - name: 安装 Linux 构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
+            libxdo-dev libssl-dev libfuse2 rpm
+      - name: 安装 Rust ${{ env.RUST_TOOLCHAIN }}
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup override set "$RUST_TOOLCHAIN"
+          cargo --version
+      - name: 缓存 Cargo
+        uses: actions/cache@v4 # 可替换为 commit SHA
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-deb-arm64-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-cargo-deb-arm64-
+      - name: 安装 tauri-cli
+        run: cargo install tauri-cli --version "^2" --locked
+      - name: 构建并打包 deb/rpm
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ github.event_name != 'pull_request' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+        run: bash scripts/package-linux.sh
+      - name: 上传 Linux arm64 产物
+        uses: actions/upload-artifact@v4 # 可替换为 commit SHA
+        with:
+          name: linux-arm64
+          if-no-files-found: error
+          path: |
+            # runner 是 ubuntu-24.04-arm，产物名按构建机的真实 glibc 基线命名（BUG-012）。
+            dist/pi-carry-linux-24.04-arm64-*.deb
+            dist/pi-carry-linux-24.04-arm64-*.deb.sig
+            dist/pi-carry-linux-24.04-arm64-*.rpm
+            dist/pi-carry-linux-24.04-arm64-*.rpm.sig
+            dist/SHA256SUMS.txt
+
+  publish:
+    name: 汇总草稿 Release
+    needs:
+      - test
+      - android-unit
+      - build-android
+      - runtime-gate
+      - build-windows
+      - build-macos
+      - build-linux-x64
+      - build-linux-arm64
+    # 只有推 tag 且非 dry_run 才汇总发布；PR 与 dry_run 一律跳过。
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && inputs.dry_run != true
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - name: 检出
+        uses: actions/checkout@v4 # 可替换为 commit SHA
+      - name: 安装 Node
+        uses: actions/setup-node@v4 # 可替换为 commit SHA
+        with:
+          node-version: "22"
+      - name: 下载全部产物
+        uses: actions/download-artifact@v4 # 可替换为 commit SHA
+        with:
+          # 不合并：各 artifact 落在独立子目录，便于分别合并同名 SHA256SUMS。
+          path: artifacts
+      - name: 汇总产物与校验和
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          : > dist/SHA256SUMS.txt
+          for dir in artifacts/*/; do
+            find "$dir" -maxdepth 1 -type f ! -name 'SHA256SUMS*' -exec cp -f {} dist/ \;
+            if [ -f "$dir/SHA256SUMS.txt" ]; then cat "$dir/SHA256SUMS.txt" >> dist/SHA256SUMS.txt; fi
+          done
+          LC_ALL=C sort -s -k2,2 dist/SHA256SUMS.txt | awk '!seen[$2]++' > dist/SHA256SUMS.txt.merged
+          mv dist/SHA256SUMS.txt.merged dist/SHA256SUMS.txt
+          echo "== dist =="
+          ls -l dist
+      - name: 校验 tag 与包版本一致
+        run: |
+          set -euo pipefail
+          package_version="$(awk '
+            /^\[workspace\.package\]/ { in_pkg = 1; next }
+            /^\[/ { in_pkg = 0 }
+            in_pkg && /^version[[:space:]]*=/ { gsub(/[" ]/, "", $0); sub(/^version=/, "", $0); print; exit }
+          ' Cargo.toml)"
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [[ -z "$package_version" || "$package_version" != "$tag_version" ]]; then
+            echo "tag $GITHUB_REF_NAME 与 Cargo.toml 版本 $package_version 不一致，拒绝发布" >&2
+            exit 1
+          fi
+      - name: 生成 latest.json
+        run: |
+          set -euo pipefail
+          node scripts/gen-latest-json.mjs \
+            --dir dist \
+            --version "${GITHUB_REF_NAME#v}" \
+            --base-url "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}"
+          # 断言两架构 × deb/rpm 都在清单里：Linux 产物名带构建机发行版版本（x64=22.04、arm64=24.04），
+          # 少了任何一个用户就收不到更新，而脚本的 --allow-missing 会让它静默通过（BUG-029）。
+          node -e '
+            const m = require("./dist/latest.json")
+            const need = ["windows-x86_64-nsis","macos-universal","linux-x86_64-deb","linux-x86_64-rpm","linux-aarch64-deb","linux-aarch64-rpm"]
+            const miss = need.filter((k) => !(k in m.platforms))
+            if (miss.length) {
+              console.error(`latest.json 缺少平台：${miss.join(", ")}`)
+              process.exit(1)
+            }
+            console.log(`latest.json 平台齐全：${need.join(", ")}`)
+          '
+      - name: 创建草稿 Release 并上传资产
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            --draft \
+            --verify-tag \
+            --title "pi carry ${GITHUB_REF_NAME#v}" \
+            --generate-notes \
+            dist/*
+          echo "已创建草稿 Release（未发布，需人工核对后手动发布）："
+          gh release view "$GITHUB_REF_NAME" --json url,isDraft

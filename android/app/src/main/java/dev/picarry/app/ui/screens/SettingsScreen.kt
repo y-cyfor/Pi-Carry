@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -41,8 +42,6 @@ import androidx.compose.material.icons.outlined.Security
 import androidx.compose.material.icons.outlined.SettingsEthernet
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -55,37 +54,46 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.picarry.app.data.CarryRepository
 import dev.picarry.app.data.LinkState
+import dev.picarry.app.ui.components.CarryActionButton
 import dev.picarry.app.ui.components.CarryCard
+import dev.picarry.app.ui.components.CarrySwitch
+import dev.picarry.app.ui.components.CarryIconButton
 import dev.picarry.app.ui.components.DividerLine
 import dev.picarry.app.ui.components.IconBadge
 import dev.picarry.app.ui.components.MonoLabel
 import dev.picarry.app.ui.components.NullableStringSaver
 import dev.picarry.app.ui.components.Pill
 import dev.picarry.app.ui.components.ScreenHeader
-import dev.picarry.app.ui.components.SectionLabel
 import dev.picarry.app.ui.components.StatusDot
 import dev.picarry.app.ui.theme.Amber
 import dev.picarry.app.ui.theme.Cyan
 import dev.picarry.app.ui.theme.Line
+import dev.picarry.app.ui.theme.LineStrong
 import dev.picarry.app.ui.theme.Mint
 import dev.picarry.app.ui.theme.Panel
 import dev.picarry.app.ui.theme.PanelHigh
 import dev.picarry.app.ui.theme.Rose
+import dev.picarry.app.ui.theme.Surface2
 import dev.picarry.app.ui.theme.TextMuted
 import dev.picarry.app.ui.theme.TextPrimary
 import dev.picarry.app.ui.theme.TextSecondary
 import dev.picarry.app.ui.theme.Violet
+import dev.picarry.app.ui.theme.VioletSoft
 
 @Composable
 fun SettingsScreen(repo: CarryRepository, onPair: () -> Unit) {
     val context = LocalContext.current
+    // 兜底不能写死版本号：0.2.0 的硬编码在 0.3.0 包里会把版本显示成错的（BUG-021）。
     val appVersion = runCatching {
         context.packageManager.getPackageInfo(context.packageName, 0).versionName
-    }.getOrNull() ?: "0.2.0"
+    }.getOrNull() ?: "—"
     val nodes by repo.nodes.collectAsState()
     val link by repo.link.collectAsState()
     val themeMode by repo.themeMode.collectAsState()
@@ -102,44 +110,31 @@ fun SettingsScreen(repo: CarryRepository, onPair: () -> Unit) {
     var confirmingRemove by rememberSaveable(stateSaver = NullableStringSaver) { mutableStateOf<String?>(null) }
 
     Column(
-        Modifier.fillMaxSize().statusBarsPadding().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp),
+        Modifier.fillMaxSize().statusBarsPadding().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp),
     ) {
+        Spacer(Modifier.height(26.dp))
         ScreenHeader(
             title = "设置",
             subtitle = "传输、通知与安全边界",
             actions = { Pill(headerPill.first, headerPill.second, filled = headerPill.third) },
         )
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(2.dp))
 
-        SectionLabel("外观")
-        CarryCard(Modifier.fillMaxWidth()) {
+        GroupLabel("外观与连接")
+        CarryCard(Modifier.fillMaxWidth(), padding = 0.dp) {
             Column {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconBadge(Icons.Outlined.Palette, Violet, 32)
-                    Spacer(Modifier.size(11.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text("主题", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
-                        Spacer(Modifier.height(2.dp))
-                        Text(
-                            when (themeMode) {
-                                "dark" -> "始终使用黑色主题"
-                                "light" -> "始终使用白色主题"
-                                else -> "跟随系统当前的黑夜 / 白天模式"
-                            },
-                            style = MaterialTheme.typography.bodySmall,
-                            color = TextMuted,
-                        )
-                    }
-                }
-                Spacer(Modifier.height(12.dp))
+                SettingRow(
+                    icon = Icons.Outlined.Palette,
+                    title = "主题",
+                    subtitle = when (themeMode) {
+                        "dark" -> "始终使用黑色主题"
+                        "light" -> "始终使用白色主题"
+                        else -> "跟随系统黑 / 白模式"
+                    },
+                    trailing = {},
+                )
                 ThemeModeSelector(themeMode, onSelect = repo::setThemeMode)
-            }
-        }
-
-        Spacer(Modifier.height(16.dp))
-        SectionLabel("传输")
-        CarryCard(Modifier.fillMaxWidth()) {
-            Column {
+                DividerLine()
                 SettingRow(
                     icon = Icons.Outlined.Router,
                     title = "自托管 relay",
@@ -152,7 +147,9 @@ fun SettingsScreen(repo: CarryRepository, onPair: () -> Unit) {
                                     else -> "未配置 · $mode"
                                 }
                             }
-                        ?: "未配置 · 使用直连",
+                        // 没有节点时并不知道节点走哪种 relay，不能声称「使用直连」：
+                        // 桌面端默认就是 n0 公共 relay（BUG-022）。
+                        ?: "未配置 · 配对后显示",
                     trailing = { MonoLabel("n0 / custom", color = TextMuted) },
                 )
                 DividerLine()
@@ -168,8 +165,6 @@ fun SettingsScreen(repo: CarryRepository, onPair: () -> Unit) {
                     title = "协议版本",
                     subtitle = buildString {
                         append("carry.v1 · 4-byte framing")
-                        // 节点上报的 pi 版本：低于 1.5.0 时 prompt/get_state 可能不可用，
-                        // 以前这里写死“carry.v1”导致用户永远看不出实际版本。
                         val pi = nodes.map { it.piVersion }.firstOrNull { it.isNotBlank() }
                         if (pi != null) append(" · pi $pi")
                     },
@@ -178,9 +173,9 @@ fun SettingsScreen(repo: CarryRepository, onPair: () -> Unit) {
             }
         }
 
-        Spacer(Modifier.height(16.dp))
-        SectionLabel("通知")
-        CarryCard(Modifier.fillMaxWidth()) {
+        Spacer(Modifier.height(18.dp))
+        GroupLabel("通知与后台")
+        CarryCard(Modifier.fillMaxWidth(), padding = 0.dp) {
             Column {
                 SettingToggle(
                     icon = Icons.Outlined.Notifications,
@@ -189,13 +184,7 @@ fun SettingsScreen(repo: CarryRepository, onPair: () -> Unit) {
                     checked = approvalNotify,
                     onChange = { approvalNotify = it; repo.setSettingBool("notify_approval", it) },
                 )
-            }
-        }
-
-        Spacer(Modifier.height(16.dp))
-        SectionLabel("后台与电池")
-        CarryCard(Modifier.fillMaxWidth()) {
-            Column {
+                DividerLine()
                 SettingRow(
                     icon = Icons.Outlined.BatterySaver,
                     title = "前台服务",
@@ -217,7 +206,7 @@ fun SettingsScreen(repo: CarryRepository, onPair: () -> Unit) {
                             context.startActivity(Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
                         }
                     },
-                    trailing = { Icon(Icons.Outlined.ChevronRight, null, tint = TextMuted, modifier = Modifier.size(16.dp)) },
+                    trailing = { Chevron() },
                 )
                 if (Build.VERSION.SDK_INT >= 33) {
                     DividerLine()
@@ -232,27 +221,48 @@ fun SettingsScreen(repo: CarryRepository, onPair: () -> Unit) {
                                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                             )
                         },
-                        trailing = { Icon(Icons.Outlined.ChevronRight, null, tint = TextMuted, modifier = Modifier.size(16.dp)) },
+                        trailing = { Chevron() },
                     )
                 }
             }
         }
 
-        Spacer(Modifier.height(16.dp))
-        SectionLabel("安全", trailing = "${nodes.size} 个节点")
+        Spacer(Modifier.height(18.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            MonoLabel("安全 · ${nodes.size} 个节点", color = TextMuted)
+            Spacer(Modifier.weight(1f))
+            if (nodes.isNotEmpty()) {
+                // 热区撑到 44dp：仅靠 6dp padding 时这一行只有约 23dp 高（U-11 残项）。
+                Box(
+                    Modifier
+                        .sizeIn(minWidth = 44.dp, minHeight = 44.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable(onClick = onPair),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        "+ 配对",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = Violet,
+                        modifier = Modifier.padding(horizontal = 7.dp),
+                    )
+                }
+            }
+        }
+        Spacer(Modifier.height(8.dp))
         // 凭据实际未加密时必须让用户看见：Keystore 不可用时仍可配对（兜底），
         // 但用户有权知道 token/secret 只是 Base64 存在本机，不是加密的。
         if (credentialsPlaintext) {
-            CarryCard(Modifier.fillMaxWidth()) {
+            CarryCard(Modifier.fillMaxWidth(), padding = 12.dp) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconBadge(Icons.Outlined.Security, Amber, 32)
-                    Spacer(Modifier.size(11.dp))
+                    IconBadge(Icons.Outlined.Security, Amber, 28)
+                    Spacer(Modifier.size(10.dp))
                     Column(Modifier.weight(1f)) {
-                        Text("凭据未加密存储", style = MaterialTheme.typography.titleMedium, color = Amber)
+                        Text("凭据未加密存储", style = MaterialTheme.typography.titleSmall, color = Amber)
                         Spacer(Modifier.height(2.dp))
                         Text(
-                            "本机 Keystore 不可用，配对 token 与密钥只做了编码处理。请勿在不可信设备上保留本应用，必要时重新配对。",
-                            style = MaterialTheme.typography.bodySmall,
+                            "Keystore 不可用，token 与密钥只做编码处理。请勿在不可信设备上保留本应用。",
+                            style = MaterialTheme.typography.labelSmall,
                             color = TextMuted,
                         )
                     }
@@ -261,84 +271,104 @@ fun SettingsScreen(repo: CarryRepository, onPair: () -> Unit) {
             Spacer(Modifier.height(8.dp))
         }
         if (nodes.isEmpty()) {
-            CarryCard(Modifier.fillMaxWidth(), onClick = onPair) {
+            CarryCard(Modifier.fillMaxWidth(), onClick = onPair, padding = 13.dp) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconBadge(Icons.Outlined.Devices, Violet)
-                    Spacer(Modifier.size(12.dp))
+                    IconBadge(Icons.Outlined.Devices, Violet, 28)
+                    Spacer(Modifier.size(10.dp))
                     Column(Modifier.weight(1f)) {
-                        Text("还没有配对设备", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
-                        Text("扫描电脑上的二维码开始", style = MaterialTheme.typography.bodySmall, color = TextMuted)
+                        Text("还没有配对设备", style = MaterialTheme.typography.titleSmall, color = TextPrimary)
+                        Text("扫描电脑上的二维码开始", style = MaterialTheme.typography.labelSmall, color = TextMuted)
                     }
-                    Icon(Icons.Outlined.ChevronRight, null, tint = TextMuted)
+                    Icon(Icons.Outlined.ChevronRight, null, tint = TextMuted, modifier = Modifier.size(16.dp))
                 }
             }
         } else {
-            nodes.forEach { node ->
-                CarryCard(Modifier.fillMaxWidth()) {
-                    Column {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            IconBadge(if (node.platform.contains("mac", true)) Icons.Outlined.Devices else Icons.Outlined.Lock, Cyan)
-                            Spacer(Modifier.size(12.dp))
-                            Column(Modifier.weight(1f)) {
-                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    Text(node.name, style = MaterialTheme.typography.titleMedium, color = TextPrimary)
-                                    StatusDot(if (link[node.id] == LinkState.Online) Mint else TextMuted, 5)
+            CarryCard(Modifier.fillMaxWidth(), padding = 0.dp) {
+                Column {
+                    nodes.forEachIndexed { index, node ->
+                        if (index > 0) DividerLine()
+                        Column(Modifier.padding(horizontal = 13.dp, vertical = 11.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                IconBadge(
+                                    if (node.platform.contains("mac", true)) Icons.Outlined.Devices else Icons.Outlined.Lock,
+                                    Cyan,
+                                    28,
+                                )
+                                Spacer(Modifier.size(10.dp))
+                                Column(Modifier.weight(1f)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        Text(node.name, style = MaterialTheme.typography.titleSmall, color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        StatusDot(if (link[node.id] == LinkState.Online) Mint else TextMuted, 5)
+                                    }
+                                    Spacer(Modifier.height(2.dp))
+                                    MonoLabel("${node.capability} · ${node.endpointId.take(10)}", color = TextMuted)
                                 }
-                                Spacer(Modifier.height(2.dp))
-                                MonoLabel("${node.capability} · ${node.endpointId.take(10)}", color = TextMuted)
-                            }
-                            Box(
-                                // 触达目标至少 44dp：34dp 的圆形热区在单手操作时误触率很高，
-                                // 图标本身保持 18dp，视觉大小不变。
-                                Modifier.size(44.dp).clip(CircleShape).clickable {
-                                    confirmingRemove = if (confirmingRemove == node.id) null else node.id
-                                },
-                                contentAlignment = Alignment.Center,
-                            ) { Icon(Icons.Outlined.DeleteOutline, "移除", tint = if (confirmingRemove == node.id) Rose else TextMuted, modifier = Modifier.size(18.dp)) }
-                        }
-                        if (confirmingRemove == node.id) {
-                            Spacer(Modifier.height(10.dp))
-                            Row(
-                                Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(11.dp))
-                                    .background(Rose.copy(alpha = 0.08f))
-                                    .padding(10.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Text("移除后本机将无法连接该节点", style = MaterialTheme.typography.bodySmall, color = Rose, modifier = Modifier.weight(1f))
-                                // 热区至少 44dp（U-11）：文字视觉尺寸不变，只把可点区域撑大。
                                 Box(
-                                    Modifier.sizeIn(minWidth = 44.dp, minHeight = 44.dp).clickable { confirmingRemove = null },
-                                    contentAlignment = Alignment.Center,
-                                ) { Text("取消", style = MaterialTheme.typography.labelMedium, color = TextMuted) }
-                                Box(
-                                    Modifier.sizeIn(minWidth = 44.dp, minHeight = 44.dp).clickable {
-                                        repo.removeNode(node.id); confirmingRemove = null
+                                    Modifier.size(44.dp).clip(CircleShape).clickable {
+                                        confirmingRemove = if (confirmingRemove == node.id) null else node.id
                                     },
                                     contentAlignment = Alignment.Center,
-                                ) { Text("移除", style = MaterialTheme.typography.labelMedium, color = Rose) }
+                                ) {
+                                    Icon(
+                                        Icons.Outlined.DeleteOutline,
+                                        "移除 ${node.name}",
+                                        tint = if (confirmingRemove == node.id) Rose else TextMuted,
+                                        modifier = Modifier.size(17.dp),
+                                    )
+                                }
+                            }
+                            if (confirmingRemove == node.id) {
+                                Spacer(Modifier.height(9.dp))
+                                Row(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(Rose.copy(alpha = 0.08f))
+                                        .border(0.7.dp, Rose.copy(alpha = 0.22f), RoundedCornerShape(10.dp))
+                                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text("移除后无法连接该节点", style = MaterialTheme.typography.labelSmall, color = Rose, modifier = Modifier.weight(1f))
+                                    // 「取消 / 移除」原来只有 8dp padding（约 27dp 高），撑到 44dp（U-11 残项）。
+                                    Box(
+                                        Modifier
+                                            .sizeIn(minWidth = 44.dp, minHeight = 44.dp)
+                                            .clip(RoundedCornerShape(7.dp))
+                                            .clickable { confirmingRemove = null },
+                                        contentAlignment = Alignment.Center,
+                                    ) {
+                                        Text("取消", style = MaterialTheme.typography.labelMedium, color = TextMuted)
+                                    }
+                                    Box(
+                                        Modifier
+                                            .sizeIn(minWidth = 44.dp, minHeight = 44.dp)
+                                            .clip(RoundedCornerShape(7.dp))
+                                            .clickable {
+                                                repo.removeNode(node.id); confirmingRemove = null
+                                            },
+                                        contentAlignment = Alignment.Center,
+                                    ) {
+                                        Text("移除", style = MaterialTheme.typography.labelMedium, color = Rose)
+                                    }
+                                }
                             }
                         }
                     }
                 }
-                Spacer(Modifier.height(8.dp))
             }
-            Spacer(Modifier.height(4.dp))
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(13.dp))
-                    .border(0.7.dp, Line, RoundedCornerShape(13.dp))
-                    .clickable(onClick = onPair)
-                    .padding(13.dp),
-                horizontalArrangement = Arrangement.Center,
-            ) { Text("+ 配对新节点", style = MaterialTheme.typography.bodyMedium, color = Violet) }
+            Spacer(Modifier.height(8.dp))
+            CarryActionButton(
+                "配对新节点",
+                onClick = onPair,
+                modifier = Modifier.fillMaxWidth(),
+                kind = dev.picarry.app.ui.components.ButtonKind.Ghost,
+                height = 44.dp,
+            )
         }
 
-        Spacer(Modifier.height(16.dp))
-        SectionLabel("关于")
-        CarryCard(Modifier.fillMaxWidth()) {
+        Spacer(Modifier.height(18.dp))
+        GroupLabel("关于")
+        CarryCard(Modifier.fillMaxWidth(), padding = 0.dp) {
             Column {
                 SettingRow(icon = Icons.Outlined.Science, title = "pi carry", subtitle = "远程驾驶舱 · Android", trailing = { MonoLabel(appVersion, color = TextMuted) })
                 DividerLine()
@@ -351,12 +381,36 @@ fun SettingsScreen(repo: CarryRepository, onPair: () -> Unit) {
                     onClick = {
                         runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/y-cyfor/Pi-Carry/"))) }
                     },
-                    trailing = { Icon(Icons.Outlined.ChevronRight, null, tint = TextMuted, modifier = Modifier.size(16.dp)) },
+                    trailing = { Chevron() },
                 )
             }
         }
-        Spacer(Modifier.height(32.dp))
+        Spacer(Modifier.height(10.dp))
+        Text(
+            "pi carry $appVersion · 本地优先的远程驾驶舱",
+            style = MaterialTheme.typography.labelSmall,
+            color = TextMuted,
+            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+        )
+        Spacer(Modifier.height(30.dp))
     }
+}
+
+@Composable
+private fun GroupLabel(text: String) {
+    Row(
+        Modifier.fillMaxWidth().padding(bottom = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(7.dp),
+    ) {
+        MonoLabel(text, color = TextMuted)
+        Box(Modifier.weight(1f).height(0.7.dp).background(Line))
+    }
+}
+
+@Composable
+private fun Chevron() {
+    Icon(Icons.Outlined.ChevronRight, null, tint = TextMuted, modifier = Modifier.size(15.dp))
 }
 
 @Composable
@@ -369,33 +423,36 @@ private fun ThemeModeSelector(current: String, onSelect: (String) -> Unit) {
     Row(
         Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
-            .background(PanelHigh)
-            .padding(4.dp),
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
+            .padding(start = 13.dp, end = 13.dp, bottom = 12.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(PanelHigh.copy(alpha = 0.7f))
+            .padding(3.dp),
+        horizontalArrangement = Arrangement.spacedBy(3.dp),
     ) {
         options.forEach { (key, label, icon) ->
             val selected = current == key
             Row(
                 Modifier
                     .weight(1f)
-                    .clip(RoundedCornerShape(11.dp))
-                    .background(if (selected) Panel else Color.Transparent)
+                    // 30dp 高的分段低于 48dp 触屏下限：可视高度保持，靠外层撑到 44dp
+                    // （U-11/BUG-020）。3 段并排时再高会挤压整卡高度，44dp 是折中。
+                    .height(44.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(if (selected) Violet.copy(alpha = 0.16f) else Color.Transparent)
                     .then(
-                        if (selected) Modifier.border(0.7.dp, Violet.copy(alpha = 0.45f), RoundedCornerShape(11.dp))
+                        if (selected) Modifier.border(0.8.dp, Violet.copy(alpha = 0.34f), RoundedCornerShape(8.dp))
                         else Modifier
                     )
-                    .clickable { onSelect(key) }
-                    .padding(vertical = 9.dp),
+                    .clickable { onSelect(key) },
                 horizontalArrangement = Arrangement.Center,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Icon(icon, null, tint = if (selected) Violet else TextMuted, modifier = Modifier.size(15.dp))
-                Spacer(Modifier.size(5.dp))
+                Icon(icon, null, tint = if (selected) VioletSoft else TextMuted, modifier = Modifier.size(13.dp))
+                Spacer(Modifier.size(4.dp))
                 Text(
                     label,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (selected) TextPrimary else TextSecondary,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (selected) VioletSoft else TextSecondary,
                 )
             }
         }
@@ -414,16 +471,17 @@ private fun SettingRow(
         Modifier
             .fillMaxWidth()
             .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
-            .padding(vertical = 12.dp),
+            .padding(horizontal = 13.dp, vertical = 11.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        IconBadge(icon, TextSecondary, 32)
-        Spacer(Modifier.size(11.dp))
+        IconBadge(icon, TextSecondary, 28)
+        Spacer(Modifier.size(10.dp))
         Column(Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.titleMedium, color = TextPrimary)
-            Spacer(Modifier.height(2.dp))
-            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = TextMuted)
+            Text(title, style = MaterialTheme.typography.titleSmall, color = TextPrimary)
+            Spacer(Modifier.height(1.dp))
+            Text(subtitle, style = MaterialTheme.typography.labelSmall, color = TextMuted, maxLines = 2, overflow = TextOverflow.Ellipsis)
         }
+        Spacer(Modifier.size(8.dp))
         trailing()
     }
 }
@@ -436,24 +494,19 @@ private fun SettingToggle(
     checked: Boolean,
     onChange: (Boolean) -> Unit,
 ) {
-    Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-        IconBadge(icon, Violet, 32)
-        Spacer(Modifier.size(11.dp))
+    Row(
+        Modifier.fillMaxWidth()
+            .toggleable(value = checked, role = Role.Switch, onValueChange = onChange)
+            .padding(horizontal = 13.dp, vertical = 11.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        IconBadge(icon, Violet, 28)
+        Spacer(Modifier.size(10.dp))
         Column(Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.titleMedium, color = TextPrimary)
-            Spacer(Modifier.height(2.dp))
-            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = TextMuted)
+            Text(title, style = MaterialTheme.typography.titleSmall, color = TextPrimary)
+            Spacer(Modifier.height(1.dp))
+            Text(subtitle, style = MaterialTheme.typography.labelSmall, color = TextMuted)
         }
-        Switch(
-            checked = checked,
-            onCheckedChange = onChange,
-            colors = SwitchDefaults.colors(
-                checkedThumbColor = Color.White,
-                checkedTrackColor = Violet,
-                uncheckedThumbColor = TextMuted,
-                uncheckedTrackColor = Panel,
-                uncheckedBorderColor = Line,
-            ),
-        )
+        CarrySwitch(checked = checked, onCheckedChange = null)
     }
 }

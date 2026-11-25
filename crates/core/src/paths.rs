@@ -13,13 +13,22 @@ impl Paths {
                 home: PathBuf::from(v),
             };
         }
+        Self {
+            home: Self::default_home(),
+        }
+    }
+
+    /// 不带 `PI_CARRY_HOME` 时的默认数据目录。
+    ///
+    /// 钥匙串条目按数据目录隔离，需要区分「默认目录」与「隔离目录」：
+    /// 默认目录必须沿用旧条目名，隔离目录用各自的名字（否则 `PI_CARRY_HOME`
+    /// 并不能隔离节点身份）。
+    pub fn default_home() -> PathBuf {
         let home = std::env::var_os("USERPROFILE")
             .or_else(|| std::env::var_os("HOME"))
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."));
-        Self {
-            home: home.join(".pi-carry"),
-        }
+        home.join(".pi-carry")
     }
 
     pub fn at(home: impl Into<PathBuf>) -> Self {

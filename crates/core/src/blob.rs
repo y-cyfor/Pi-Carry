@@ -341,7 +341,6 @@ impl BlobStore {
 
         let mut file = OpenOptions::new()
             .create(true)
-            .write(true)
             .append(true)
             .open(&part_path)
             .map_err(Self::write_error)?;

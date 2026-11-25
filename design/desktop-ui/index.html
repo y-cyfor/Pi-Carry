@@ -380,6 +380,7 @@
   html[data-theme="light"] .qr-placeholder { color: #5a5870; }
   html[data-theme="light"] .qr-frame { border: 1px solid rgba(27,24,38,.06); }
 </style>
+<link rel="stylesheet" href="style.css" />
 <script src="theme-init.js"></script>
 </head>
 <body>
@@ -419,8 +420,19 @@
     </header>
 
     <div class="content">
+      <!-- 密钥降级横幅：所有页面共用，密钥后端落到明文文件时出现 -->
+      <div class="banner" id="secret-banner" hidden>
+        <span class="ico" data-icon="shield" style="width:17px;height:17px"></span>
+        <div class="grow"><b>密钥未加密：</b>系统钥匙串不可用，配对密钥以明文保存在本机。</div>
+        <div class="actions">
+          <button class="btn ghost" data-secret-act="settings">查看设置</button>
+          <button class="btn ghost" data-secret-act="risk">了解风险</button>
+        </div>
+      </div>
       <!-- 概览 -->
       <section class="page active" id="page-overview">
+        <!-- 更新横幅：可用 / 便携版 / 已抑制 / 下载中 / 安装中 / 已安装 / 失败，由 app.js 渲染 -->
+        <div class="banner violet" id="update-banner" hidden></div>
         <div class="card hero">
           <div class="hero-orb">π</div>
           <div class="hero-main">
@@ -433,6 +445,15 @@
             <div class="pill green" id="hero-state">● 启动中</div>
             <div class="caption" style="margin-top:9px" id="hero-version"></div>
           </div>
+        </div>
+
+        <!-- 首启自检：pi 未找到 / 托盘不可用 / 配置读取失败时才出现 -->
+        <div class="card" id="selfcheck-card" style="margin-top:14px" hidden>
+          <div class="sc-head">
+            <span class="ico" data-icon="alert" style="width:17px;height:17px;color:var(--amber)"></span>
+            <div><h3>运行前检查</h3><div class="caption">以下问题会影响 pi carry 的正常使用。</div></div>
+          </div>
+          <div class="sc-list" id="selfcheck-list"></div>
         </div>
 
         <div class="grid g4" style="margin-top:14px">
@@ -473,6 +494,12 @@
 
       <!-- 配对 -->
       <section class="page" id="page-pairing">
+        <!-- 深链预填：从 pi-carry://pair 链接带入的配对邀请，只预填不自动配对 -->
+        <div class="banner violet" id="pair-prefill" hidden>
+          <span class="ico" data-icon="link" style="width:17px;height:17px"></span>
+          <div class="grow" id="pair-prefill-body"></div>
+          <div class="actions" id="pair-prefill-actions"></div>
+        </div>
         <div class="banner violet"><span class="ico" data-icon="shield" style="width:17px;height:17px"></span><div>二维码包含 endpoint ID、一次性 token 和局域网直连地址。请只给信任的设备扫描；配对成功后 token 立即失效。</div></div>
         <div class="pair-grid">
           <div class="card qr-card">
@@ -565,15 +592,52 @@
             <div class="form" style="margin-top:14px">
               <div class="switch-row"><div class="main-col"><b>关闭窗口时最小化到托盘</b><span>桥接服务继续运行，手机仍可连接。</span></div><div class="switch" id="set-close-tray"></div></div>
               <div class="switch-row"><div class="main-col"><b>开机自动启动</b><span>登录 Windows 后在托盘启动 pi carry。</span></div><div class="switch" id="set-autostart"></div></div>
+              <div class="switch-row"><div class="main-col"><b>开机自启时静默启动（仅托盘）</b><span>自启时不弹主窗口，从托盘打开。托盘不可用时不生效，避免开机后没有任何入口。</span></div><div class="switch" id="set-start-minimized"></div></div>
+              <div class="field"><label>日志级别</label>
+                <select class="select" id="set-log-level">
+                  <option value="error">error</option>
+                  <option value="warn">warn</option>
+                  <option value="info">info</option>
+                  <option value="debug">debug</option>
+                  <option value="trace">trace</option>
+                </select>
+                <div class="hint">写入数据目录下的 desktop.log，默认 info。环境变量 PI_CARRY_LOG 优先；修改后需重启应用生效。</div>
+              </div>
             </div>
           </div>
           <div class="card">
             <h3>数据与诊断</h3>
             <div class="caption">配置、密钥、SQLite 状态库与日志都在本机数据目录。</div>
             <div class="addresses" style="margin-top:14px"><span class="address" id="data-dir">—</span></div>
-            <div style="display:flex;gap:8px;margin-top:16px">
+            <div style="display:flex;gap:8px;margin-top:16px;flex-wrap:wrap">
               <button class="btn" id="btn-open-data"><span class="ico" data-icon="folder"></span>打开数据目录</button>
+              <button class="btn" id="btn-open-logs"><span class="ico" data-icon="folder"></span>打开日志目录</button>
               <button class="btn" data-go="logs"><span class="ico" data-icon="terminal"></span>查看日志</button>
+            </div>
+          </div>
+        </div>
+        <div class="card" style="margin-top:14px">
+          <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+            <div style="flex:1;min-width:220px">
+              <h3>更新</h3>
+              <div class="caption">从 GitHub Releases 获取正式版本；安装前校验 minisign 签名。</div>
+            </div>
+            <span class="pill violet" id="update-current-version">当前版本 —</span>
+          </div>
+          <div class="divider"></div>
+          <div class="grid g2" style="gap:14px">
+            <div class="form">
+              <div class="switch-row"><div class="main-col"><b>启动时自动检查更新</b><span>启动 30 秒后静默检查；检查失败不打扰。</span></div><div class="switch" id="set-check-update"></div></div>
+              <div class="field"><label>更新通道</label>
+                <div class="segment" id="set-update-channel"><button data-value="stable">stable</button><button data-value="beta">beta</button></div>
+                <div class="hint">beta 会收到预发布版本，可能不稳定。切换立即保存。</div>
+              </div>
+            </div>
+            <div class="form">
+              <div class="field"><label>上次检查</label><div class="caption" id="update-last-checked">从未检查</div></div>
+              <div class="hint" id="update-last-failed" hidden></div>
+              <div class="hint" id="update-portable-hint" hidden>便携版不会自动安装更新，请下载新版本压缩包覆盖并保留 %LOCALAPPDATA% 里的数据。</div>
+              <div><button class="btn" id="btn-check-update"><span class="ico" data-icon="refresh"></span>立即检查</button></div>
             </div>
           </div>
         </div>
@@ -595,6 +659,19 @@
     <div class="confirm-actions">
       <button class="btn ghost" id="confirm-cancel">取消</button>
       <button class="btn danger" id="confirm-ok">确定</button>
+    </div>
+  </div>
+</div>
+<div class="confirm-overlay" id="update-overlay" hidden>
+  <div class="confirm-box" role="dialog" aria-modal="true" aria-labelledby="update-title">
+    <div class="confirm-title" id="update-title">发现新版本</div>
+    <div id="update-sub">当前 —</div>
+    <div id="update-date" hidden></div>
+    <div id="update-notes"></div>
+    <div class="confirm-actions">
+      <button class="btn ghost" id="update-cancel">取消</button>
+      <button class="btn ghost" id="update-download">手动下载</button>
+      <button class="btn primary" id="update-install">立即更新</button>
     </div>
   </div>
 </div>

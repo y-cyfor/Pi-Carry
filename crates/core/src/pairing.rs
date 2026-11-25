@@ -415,18 +415,6 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// RFC 3986 非保留字符之外的字节做 percent-encode。
-fn encode_component(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
-}
-
 fn build_uri(
     endpoint_id: &str,
     token: &str,
@@ -434,25 +422,9 @@ fn build_uri(
     relay: Option<&str>,
     addrs: &[String],
 ) -> String {
-    let mut uri = format!(
-        "pi-carry://pair?v=1&endpoint={}&token={}",
-        encode_component(endpoint_id),
-        encode_component(token)
-    );
-    // 手机配对页显示节点名：没有 name 时只能显示 Endpoint ID 前 8 位，多台机器分不清。
-    if let Some(name) = name.map(str::trim).filter(|s| !s.is_empty()) {
-        uri.push_str("&name=");
-        uri.push_str(&encode_component(name));
-    }
-    if let Some(relay) = relay {
-        uri.push_str("&relay=");
-        uri.push_str(&encode_component(relay));
-    }
-    for addr in addrs {
-        uri.push_str("&addr=");
-        uri.push_str(&encode_component(addr));
-    }
-    uri
+    // 生成与解析共用一份实现：两边语义漂移过一次（relay=n0 / 多 addr 被深链拒绝），
+    // 以后要改字段顺序或编码规则只改 pair_uri。
+    crate::pair_uri::build(endpoint_id, token, name, relay, addrs)
 }
 
 /// 二维码里的节点名。空名不写进 URI，避免手机端显示一个空白节点。
@@ -493,6 +465,35 @@ mod tests {
         assert!(s.uri.contains("token=deadbeef"));
         assert!(s.uri.contains("relay=https%3A%2F%2Frelay.example"));
         assert_eq!(s.expires_at, "2026-11-19T08:10:00.000Z");
+    }
+
+    /// BUG-001 回归：`begin_pairing` 的产物必须能被深链解析器接受。
+    ///
+    /// 生成侧默认写 `relay=n0` 和全部直连地址；旧解析器把两者都判为非法，
+    /// 于是「扫码能配对、点链接却说链接无效」。
+    #[test]
+    fn generated_uri_roundtrips_through_deeplink_parser() {
+        let (mgr, _) = setup();
+        let endpoint = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let session = mgr.begin_with_name(
+            endpoint,
+            Some("PROJECT-CHN-WIN"),
+            Some("n0".into()),
+            vec![
+                "127.0.0.1:55277".into(),
+                "172.27.88.72:55277".into(),
+                "[::1]:55279".into(),
+            ],
+            "0123456789abcdef0123456789abcdef".into(),
+            "042916".into(),
+        );
+        let parsed = crate::pair_uri::parse(&session.uri)
+            .unwrap_or_else(|e| panic!("产品自己生成的链接必须可解析: {e}\n{}", session.uri));
+        assert_eq!(parsed.endpoint, endpoint);
+        assert_eq!(parsed.token, "0123456789abcdef0123456789abcdef");
+        assert_eq!(parsed.name.as_deref(), Some("PROJECT-CHN-WIN"));
+        assert_eq!(parsed.relay.as_deref(), Some("n0"));
+        assert_eq!(parsed.addrs, session.addrs);
     }
 
     /// 二维码不带 name 时，手机只能显示 endpoint id 前缀，多台机器分不清。

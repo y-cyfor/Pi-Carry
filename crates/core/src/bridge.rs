@@ -3,11 +3,13 @@
 use crate::approval::{ApprovalEvent, ApprovalManager};
 use crate::clock::{Clock, IdGen, SystemClock, UlidGen};
 use crate::config::{Config, Secrets};
+use crate::dirlock::DirLock;
 use crate::error::{CoreError, Result};
 use crate::guard;
 use crate::pairing::PairingSession;
 use crate::paths::Paths;
 use crate::pi::resolve_pi;
+use crate::secretstore::{SecretBackend, SecretStore};
 use crate::server::Server;
 use crate::sessions::SessionManager;
 use crate::store::Store;
@@ -48,11 +50,25 @@ pub struct Bridge {
     pub paths: Paths,
     pub store: Store,
     pub secrets: Secrets,
+    /// 密钥实际存放位置；桌面据此显示降级提示。
+    pub secret_backend: SecretBackend,
+    /// 数据目录独占锁：进程退出时自动释放；`shutdown` 里还会显式 `take()` 掉。
+    ///
+    /// 不能只靠「Bridge 最后一个 Arc 析构」来释放：桌面端重启服务时，`get_status`
+    /// 之类的轮询可能正好持有克隆，新 Bridge 就会撞上旧锁（BUG-035）。
+    dir_lock: std::sync::Mutex<Option<DirLock>>,
     pub pairing: crate::pairing::PairingManager,
     pub approvals: ApprovalManager,
     pub sessions: Arc<SessionManager>,
     pub server: Arc<Server>,
     pub clock: Arc<dyn Clock>,
+    /// 后台常驻任务（审批转发、过期/保留扫描）。
+    ///
+    /// 这些任务里有一次 `Arc<Bridge>` 升级/克隆：只要它们不退出，Bridge 就永不归零，
+    /// 数据目录锁也就永不释放 —— 桌面端点「重启服务」时新 Bridge 会撞上旧锁
+    /// （`DirLock::acquire` 报「已有一个 pi-carry 进程在使用…」），而且旧 Bridge
+    /// 已经被 `take` 掉，最终一个桥都没了。`shutdown` 必须显式中止并等待它们退出。
+    background: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
 impl Bridge {
@@ -69,11 +85,18 @@ impl Bridge {
         std::fs::create_dir_all(&config.sessions.dir).map_err(|e| {
             CoreError::Config(format!("创建会话目录 {} 失败: {e}", config.sessions.dir))
         })?;
+        // 先拿目录锁：第二个进程必须立刻失败，而不是把状态库写坏。
+        let dir_lock = DirLock::acquire(&paths)?;
+        // 预热登录环境 PATH（GUI 启动时进程 PATH 可能缺 nvm 等目录）。
+        // 放在启动阶段而非首次握手，避免首帧被 1.2s 的探测卡住。
+        crate::shellpath::prewarm(&paths);
         let guard_path = guard::ensure(&paths)?;
         let store = Store::open(&paths.db())?;
         // 上一次进程退出时遗留的 online=1 不能带到本次运行。
         store.mark_all_devices_offline()?;
-        let secrets = Secrets::load_or_create(&paths)?;
+        let secret_store = SecretStore::load_or_create(&paths)?;
+        let secret_backend = secret_store.backend;
+        let secrets = secret_store.secrets;
         let clock: Arc<dyn Clock> = clock.unwrap_or_else(|| Arc::new(SystemClock));
         let ids: Arc<dyn IdGen> = Arc::new(UlidGen);
         let pairing = crate::pairing::PairingManager::with_policy(
@@ -118,21 +141,31 @@ impl Bridge {
             paths,
             store,
             secrets,
+            secret_backend,
+            dir_lock: std::sync::Mutex::new(Some(dir_lock)),
             pairing,
             approvals,
             sessions,
             server,
             clock,
+            background: std::sync::Mutex::new(Vec::new()),
         });
         bridge.start_approval_forwarder();
         bridge.start_expiry_ticker();
         Ok(bridge)
     }
 
+    /// 记录一个后台任务，供 `shutdown` 中止。
+    fn track_background(&self, handle: tokio::task::JoinHandle<()>) {
+        if let Ok(mut tasks) = self.background.lock() {
+            tasks.push(handle);
+        }
+    }
+
     fn start_approval_forwarder(self: &Arc<Self>) {
         let approvals = self.approvals.clone();
         let sessions = self.sessions.clone();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut rx = approvals.subscribe();
             loop {
                 match rx.recv().await {
@@ -152,12 +185,13 @@ impl Bridge {
                 }
             }
         });
+        self.track_background(handle);
     }
 
     fn start_expiry_ticker(self: &Arc<Self>) {
         // 审批过期要秒级响应（手机上等审批），但会话列表要扫盘，不能每 5s 做一次。
         let approvals = self.approvals.clone();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(1));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
@@ -167,10 +201,13 @@ impl Bridge {
                 }
             }
         });
+        self.track_background(handle);
 
         let sessions = self.sessions.clone();
-        let bridge = self.clone();
-        tokio::spawn(async move {
+        // 只持 Weak：这一轮扫描用的 Bridge 必须能在 Bridge drop 后立刻释放，
+        // 否则同进程重启会一直撞数据目录锁（BUG-002）。
+        let bridge = Arc::downgrade(self);
+        let handle = tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(30));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut ticks: u64 = 0;
@@ -180,13 +217,17 @@ impl Bridge {
                 let _ = sessions.list();
                 ticks += 1;
                 // 保留策略只需每 10 分钟（30s × 20）跑一次。
-                if ticks % 20 == 0 {
+                if ticks.is_multiple_of(20) {
+                    let Some(bridge) = bridge.upgrade() else {
+                        break;
+                    };
                     if let Err(e) = bridge.retention_sweep() {
                         tracing::warn!(error = %e, "journal/audit 清理失败");
                     }
                 }
             }
         });
+        self.track_background(handle);
     }
 
     /// 按配置的保留天数与每会话事件上限清理 journal，清理已结束的审批、
@@ -297,8 +338,24 @@ impl Bridge {
     }
 
     pub async fn shutdown(&self) {
+        // 先中止后台任务并等它们真正结束：它们持有的 Arc 不释放，
+        // 数据目录锁就不会析构，同进程重启必定撞锁（BUG-002）。
+        let handles: Vec<_> = self
+            .background
+            .lock()
+            .map(|mut tasks| tasks.drain(..).collect())
+            .unwrap_or_default();
+        for handle in handles {
+            handle.abort();
+            let _ = handle.await;
+        }
         self.server.shutdown().await;
         self.sessions.shutdown().await;
+        // 关完再放锁：`shutdown` 返回后锁一定已释放，不再依赖「Arc 计数归零」。
+        // 重启瞬间即使还有 status 轮询持有克隆，新 Bridge 也能拿到锁（BUG-035）。
+        if let Ok(mut lock) = self.dir_lock.lock() {
+            lock.take();
+        }
     }
 
     /// 阻塞运行，直到 Ctrl+C。启动时按人类可读格式打印配对信息。

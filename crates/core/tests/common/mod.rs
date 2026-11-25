@@ -2,7 +2,17 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Once;
+use std::sync::{Once, OnceLock};
+
+/// 集成测试固定使用明文密钥后端。
+///
+/// 钥匙串条目按「服务名 + 用户名」全局唯一，并行测试会互相覆盖，还会在开发者
+/// 机器上留下垃圾凭据；测试只需要验证启动路径，不需要验证系统钥匙串本身。
+/// `OnceLock` 保证只写一次环境变量，避免并行 `set_var` 的竞态。
+pub fn use_file_secret_backend() {
+    static ONCE: OnceLock<()> = OnceLock::new();
+    ONCE.get_or_init(|| std::env::set_var("PI_CARRY_SECRET_BACKEND", "file"));
+}
 
 fn find_in(dir: &Path) -> Option<PathBuf> {
     for name in ["fake-pi.exe", "fake-pi"] {
@@ -26,6 +36,7 @@ fn repo_root() -> PathBuf {
 /// 优先使用 `PI_CARRY_FAKE_PI`，其次在 target/debug 中查找；
 /// 都没有时用独立 target 目录构建一次，避免与当前 cargo 进程争锁。
 pub fn fake_pi() -> PathBuf {
+    use_file_secret_backend();
     if let Ok(p) = std::env::var("PI_CARRY_FAKE_PI") {
         return PathBuf::from(p);
     }

@@ -1,0 +1,1188 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>pi carry · 0.3.0 桌面原型</title>
+<style>
+  :root {
+    --ink: #05050a;
+    --ink-2: #0a0a13;
+    --panel: #10101b;
+    --panel-2: #151522;
+    --line: #232333;
+    --line-soft: rgba(255,255,255,.055);
+    --text: #f2f1fa;
+    --text-2: #9c9aae;
+    --muted: #858296;
+    --violet: #7c6bff;
+    --violet-soft: rgba(124,107,255,.14);
+    --cyan: #45d9d0;
+    --rose: #ff6b85;
+    --amber: #ffb86b;
+    --mint: #5be7a9;
+    --radius: 18px;
+    --mono: "Cascadia Code", Consolas, "SF Mono", monospace;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--ink);
+    color: var(--text);
+    font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+    font-size: 14px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  body::before {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 0;
+    background:
+      radial-gradient(900px 520px at 82% -8%, rgba(124,107,255,.12), transparent 62%),
+      radial-gradient(760px 460px at 2% 104%, rgba(69,217,208,.05), transparent 66%);
+  }
+  .doc { position: relative; z-index: 1; max-width: 1200px; margin: 0 auto; padding: 0 32px 140px; }
+
+  /* 文档头 */
+  .doc-head {
+    position: sticky; top: 0; z-index: 30; margin: 0 -32px; padding: 22px 32px 14px;
+    background: linear-gradient(180deg, rgba(5,5,10,.94) 62%, rgba(5,5,10,0));
+    backdrop-filter: blur(14px);
+  }
+  .doc-title { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .doc-title h1 { font-size: 21px; font-weight: 650; letter-spacing: -.4px; margin: 0; }
+  .doc-title .tag {
+    font: 10px/1 var(--mono); letter-spacing: .1em; text-transform: uppercase; color: #bdb4ff;
+    border: 1px solid rgba(124,107,255,.34); background: var(--violet-soft); padding: 5px 8px; border-radius: 20px;
+  }
+  .doc-sub { margin: 6px 0 12px; color: var(--muted); font-size: 12px; }
+  .doc-sub code { font-family: var(--mono); color: var(--text-2); font-size: 11px; }
+  .doc-nav { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 4px; scrollbar-width: none; }
+  .doc-nav::-webkit-scrollbar { display: none; }
+  .doc-nav a {
+    flex: 0 0 auto; font-size: 11.5px; color: var(--muted); text-decoration: none;
+    padding: 6px 11px; border-radius: 20px; border: 1px solid transparent; white-space: nowrap;
+  }
+  .doc-nav a:hover { color: var(--text); background: rgba(255,255,255,.04); }
+  .doc-nav a.on { color: #bdb4ff; border-color: rgba(124,107,255,.32); background: var(--violet-soft); }
+
+  /* 画板 */
+  .board { margin-top: 54px; scroll-margin-top: 132px; }
+  .board-head { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 14px; }
+  .board-idx {
+    flex: 0 0 auto; font: 600 11px/1 var(--mono); color: #bdb4ff; letter-spacing: .06em;
+    border: 1px solid rgba(124,107,255,.30); background: var(--violet-soft);
+    padding: 7px 9px; border-radius: 9px; margin-top: 2px;
+  }
+  .board-head h2 { margin: 0; font-size: 16px; font-weight: 620; letter-spacing: -.2px; }
+  .board-head p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
+  .board-head .badge {
+    margin-left: auto; flex: 0 0 auto; font: 10px/1 var(--mono); color: var(--muted);
+    border: 1px solid var(--line); border-radius: 20px; padding: 5px 9px;
+  }
+  .frame {
+    position: relative; border: 1px solid var(--line); border-radius: 20px; overflow: hidden;
+    background: var(--ink); box-shadow: 0 28px 70px rgba(0,0,0,.46), 0 1px 0 rgba(255,255,255,.04) inset;
+  }
+  .frame.tall { min-height: 540px; }
+  .frame.center { display: grid; place-items: center; padding: 30px; min-height: 460px; }
+  .frame.pad { padding: 24px; }
+  .spec { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 26px; margin: 14px 2px 0; }
+  .spec div { font-size: 11.5px; color: var(--text-2); line-height: 1.6; padding-left: 13px; position: relative; }
+  .spec div::before {
+    content: ""; position: absolute; left: 0; top: 8px; width: 5px; height: 5px;
+    border-radius: 50%; background: rgba(124,107,255,.6);
+  }
+  .spec b { color: var(--text); font-weight: 550; }
+  .spec code { font-family: var(--mono); font-size: 10.5px; color: #c9c3e8; }
+
+  /* 应用窗口骨架 */
+  .win { display: flex; min-height: 540px; }
+  .side {
+    width: 212px; flex: 0 0 212px; border-right: 1px solid var(--line-soft);
+    background: rgba(8,8,15,.7); display: flex; flex-direction: column; padding: 20px 12px 14px;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; padding: 0 8px 20px; }
+  .brand-mark {
+    width: 34px; height: 34px; border-radius: 11px; display: grid; place-items: center;
+    background: linear-gradient(145deg, #8c7dff, #5a47e8); box-shadow: 0 8px 22px rgba(124,107,255,.28);
+    font: 600 18px/1 var(--mono);
+  }
+  .brand-name { font-size: 15px; font-weight: 650; letter-spacing: -.2px; }
+  .brand-sub { font-size: 9.5px; color: var(--muted); letter-spacing: .16em; text-transform: uppercase; }
+  .nav-label { font: 9.5px/1 var(--mono); letter-spacing: .16em; color: var(--muted); padding: 8px 10px; text-transform: uppercase; }
+  .nav { display: flex; flex-direction: column; gap: 3px; }
+  .nav i {
+    display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 10px;
+    font-size: 12.5px; font-style: normal; color: var(--text-2);
+  }
+  .nav i.on { background: var(--violet-soft); color: #bdb4ff; }
+  .nav i .g { width: 15px; height: 15px; opacity: .9; }
+  .nav i .n { margin-left: auto; font: 10px var(--mono); color: var(--muted); }
+  .side-foot { margin-top: auto; border-top: 1px solid var(--line-soft); padding: 12px 8px 2px; font-size: 11px; color: var(--muted); }
+  .side-foot .st { display: flex; align-items: center; gap: 8px; color: var(--text-2); }
+  .main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .top {
+    height: 58px; flex: 0 0 58px; border-bottom: 1px solid var(--line-soft); display: flex;
+    align-items: center; gap: 12px; padding: 0 24px; background: rgba(5,5,10,.5);
+  }
+  .top h3 { margin: 0; font-size: 14px; font-weight: 600; }
+  .top .sub { color: var(--muted); font-size: 11px; }
+  .top .right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+  .body { padding: 22px 24px; flex: 1; }
+
+  /* 通用元素 */
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: 0 0 auto; }
+  .dot.on { background: var(--mint); box-shadow: 0 0 9px rgba(91,231,169,.7); }
+  .dot.warn { background: var(--amber); }
+  .dot.err { background: var(--rose); }
+  .pill {
+    display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; border-radius: 30px;
+    border: 1px solid var(--line); background: rgba(255,255,255,.025); font: 10px/1.5 var(--mono); color: var(--text-2);
+  }
+  .pill.violet { color: #bdb4ff; border-color: rgba(124,107,255,.34); background: var(--violet-soft); }
+  .pill.green { color: var(--mint); border-color: rgba(91,231,169,.26); background: rgba(91,231,169,.07); }
+  .pill.rose { color: var(--rose); border-color: rgba(255,107,133,.28); background: rgba(255,107,133,.07); }
+  .pill.amber { color: var(--amber); border-color: rgba(255,184,107,.26); background: rgba(255,184,107,.06); }
+  .btn {
+    border: 1px solid var(--line); background: rgba(255,255,255,.035); color: var(--text-2);
+    padding: 7px 12px; border-radius: 9px; display: inline-flex; align-items: center; gap: 6px;
+    font-size: 12px; white-space: nowrap;
+  }
+  .btn.primary { background: linear-gradient(145deg, #8b7cff, #6350ee); border-color: transparent; color: #fff; box-shadow: 0 8px 20px rgba(124,107,255,.22); }
+  .btn.danger { color: var(--rose); border-color: rgba(255,107,133,.24); background: rgba(255,107,133,.06); }
+  .btn.ghost { border-color: transparent; background: transparent; color: var(--muted); }
+  .btn.lg { padding: 9px 15px; font-size: 12.5px; }
+  .card {
+    background: linear-gradient(165deg, rgba(19,19,32,.86), rgba(12,12,22,.9));
+    border: 1px solid var(--line-soft); border-radius: var(--radius); padding: 18px;
+  }
+  .card h4 { margin: 0; font-size: 12.5px; font-weight: 600; }
+  .card .cap { color: var(--muted); font-size: 11px; margin-top: 4px; line-height: 1.55; }
+  .mono { font-family: var(--mono); }
+  .muted { color: var(--muted); }
+  .secondary { color: var(--text-2); }
+  .eyebrow { font: 9.5px/1 var(--mono); letter-spacing: .15em; text-transform: uppercase; color: var(--muted); }
+  .row {
+    display: flex; align-items: center; gap: 11px; padding: 11px 13px; border: 1px solid var(--line-soft);
+    border-radius: 12px; background: rgba(16,16,27,.55);
+  }
+  .row .grow { min-width: 0; flex: 1; }
+  .row .t { font-size: 12px; font-weight: 550; }
+  .row .m { font: 10.5px/1.5 var(--mono); color: var(--muted); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .banner {
+    display: flex; align-items: center; gap: 11px; padding: 11px 13px; border-radius: 12px;
+    border: 1px solid rgba(124,107,255,.26); background: rgba(124,107,255,.07); font-size: 12px; color: #c8c2f5;
+  }
+  .banner.amber { border-color: rgba(255,184,107,.22); background: rgba(255,184,107,.055); color: #e8c69e; }
+  .banner.rose { border-color: rgba(255,107,133,.24); background: rgba(255,107,133,.06); color: #f3adb9; }
+  .banner .grow { flex: 1; min-width: 0; }
+  .banner b { color: var(--text); font-weight: 600; }
+  .banner .actions { display: flex; gap: 7px; flex: 0 0 auto; }
+  .divider { height: 1px; background: var(--line-soft); margin: 15px 0; }
+  .switch { width: 34px; height: 20px; border-radius: 20px; background: #2b2a3b; border: 1px solid var(--line); position: relative; flex: 0 0 34px; }
+  .switch::after { content: ""; position: absolute; width: 14px; height: 14px; border-radius: 50%; background: #a5a2b8; top: 2px; left: 2px; }
+  .switch.on { background: rgba(124,107,255,.44); border-color: rgba(124,107,255,.6); }
+  .switch.on::after { left: 16px; background: #fff; }
+  .segment { display: inline-flex; gap: 3px; padding: 3px; border-radius: 9px; border: 1px solid var(--line); background: rgba(5,5,10,.4); }
+  .segment span { padding: 5px 11px; border-radius: 6px; font-size: 11px; color: var(--muted); }
+  .segment span.on { background: var(--violet-soft); color: #c3bbff; }
+  .hero { display: flex; gap: 14px; align-items: center; }
+  .orb {
+    width: 46px; height: 46px; border-radius: 14px; flex: 0 0 46px; display: grid; place-items: center;
+    background: radial-gradient(circle at 32% 28%, rgba(124,107,255,.34), rgba(124,107,255,.04) 70%);
+    border: 1px solid rgba(124,107,255,.3); font: 22px/1 var(--mono); color: #c6beff;
+  }
+  .hero h2 { margin: 0; font-size: 20px; font-weight: 650; letter-spacing: -.5px; }
+  .hero .meta { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  .metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 16px; }
+  .metric { padding: 13px 14px; border: 1px solid var(--line-soft); border-radius: 13px; background: rgba(16,16,27,.5); }
+  .metric .num { font-size: 21px; font-weight: 600; letter-spacing: -.6px; margin-top: 6px; }
+  .metric .num small { font-size: 10.5px; color: var(--muted); font-weight: 400; margin-left: 4px; }
+
+  /* 弹窗 */
+  .overlay {
+    position: absolute; inset: 0; display: grid; place-items: center;
+    background: rgba(4,4,10,.64); backdrop-filter: blur(5px);
+  }
+  .dialog {
+    width: min(520px, calc(100% - 56px)); border-radius: var(--radius); padding: 22px;
+    border: 1px solid rgba(124,107,255,.26); background: linear-gradient(160deg, #16162a, #0d0d18);
+    box-shadow: 0 30px 80px rgba(0,0,0,.6);
+  }
+  .dialog.rose { border-color: rgba(255,107,133,.3); background: linear-gradient(160deg, #1d1420, #120d15); }
+  .dialog-head { display: flex; align-items: flex-start; gap: 12px; }
+  .dialog-head h3 { margin: 0; font-size: 16px; font-weight: 650; letter-spacing: -.3px; }
+  .dialog-head p { margin: 3px 0 0; color: var(--muted); font-size: 11.5px; }
+  .dialog-ico {
+    width: 38px; height: 38px; border-radius: 12px; flex: 0 0 38px; display: grid; place-items: center;
+    background: var(--violet-soft); border: 1px solid rgba(124,107,255,.3); font-size: 17px;
+  }
+  .dialog-ico.rose { background: rgba(255,107,133,.1); border-color: rgba(255,107,133,.3); }
+  .notes { margin: 14px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 7px; }
+  .notes li { position: relative; padding-left: 16px; font-size: 11.5px; color: var(--text-2); line-height: 1.6; }
+  .notes li::before { content: ""; position: absolute; left: 3px; top: 7px; width: 5px; height: 5px; border-radius: 50%; background: rgba(124,107,255,.65); }
+  .notes code { font-family: var(--mono); font-size: 10.5px; color: #c9c3e8; background: rgba(255,255,255,.045); padding: 1px 5px; border-radius: 4px; }
+  .dialog-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 18px; }
+  .kv { display: grid; grid-template-columns: 86px 1fr; gap: 6px 12px; margin-top: 14px; font-size: 11.5px; }
+  .kv .k { color: var(--muted); }
+  .kv .v { color: var(--text-2); font-family: var(--mono); font-size: 11px; }
+  .prog { height: 6px; border-radius: 4px; background: rgba(255,255,255,.07); overflow: hidden; margin-top: 14px; }
+  .prog i { display: block; height: 100%; border-radius: 4px; background: linear-gradient(90deg, #8b7cff, #45d9d0); }
+  .prog-legend { display: flex; justify-content: space-between; margin-top: 7px; font: 10.5px var(--mono); color: var(--muted); }
+  .tick { display: flex; gap: 7px; align-items: center; font-size: 11.5px; color: var(--text-2); margin-top: 10px; }
+  .code-digit {
+    width: 34px; height: 42px; display: grid; place-items: center; border-radius: 9px;
+    border: 1px solid rgba(124,107,255,.34); background: rgba(124,107,255,.09);
+    font: 600 18px/1 var(--mono); color: #d8d3ff;
+  }
+  .steps { display: flex; flex-direction: column; gap: 9px; }
+  .box { width: 15px; height: 15px; border-radius: 4px; border: 1px solid var(--line); flex: 0 0 15px; }
+  .box.on { background: var(--violet); border-color: transparent; position: relative; }
+  .box.on::after { content: "✓"; position: absolute; inset: 0; display: grid; place-items: center; font-size: 10px; color: #fff; }
+
+  /* 首启自检 / 设置片段 */
+  .cards3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .diag { border-radius: 14px; padding: 15px; border: 1px solid rgba(255,107,133,.22); background: rgba(255,107,133,.045); }
+  .diag.warn { border-color: rgba(255,184,107,.22); background: rgba(255,184,107,.04); }
+  .diag .hd { display: flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 600; color: #f3adb9; }
+  .diag.warn .hd { color: #e8c69e; }
+  .diag p { margin: 7px 0 0; font-size: 11px; color: var(--text-2); line-height: 1.6; }
+  .diag code { font-family: var(--mono); font-size: 10px; color: #c9c3e8; }
+  .diag .fix { margin-top: 11px; display: flex; gap: 6px; flex-wrap: wrap; }
+
+  /* 托盘 */
+  .desktop-strip {
+    position: relative; min-height: 380px; border-radius: 16px; overflow: hidden;
+    background:
+      radial-gradient(700px 300px at 70% 20%, rgba(124,107,255,.16), transparent 60%),
+      linear-gradient(160deg, #0b0f1c, #060812 60%, #080611);
+    border: 1px solid var(--line-soft);
+  }
+  .desktop-strip::after {
+    content: ""; position: absolute; inset: 0;
+    background-image: linear-gradient(rgba(255,255,255,.028) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.028) 1px, transparent 1px);
+    background-size: 38px 38px;
+  }
+  .taskbar {
+    position: absolute; left: 0; right: 0; bottom: 0; height: 44px; z-index: 2;
+    background: rgba(12,14,24,.92); border-top: 1px solid rgba(255,255,255,.07);
+    display: flex; align-items: center; gap: 8px; padding: 0 12px;
+  }
+  .tb-app {
+    width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center;
+    background: linear-gradient(145deg, #8c7dff, #5a47e8); font: 600 15px/1 var(--mono); color: #fff;
+  }
+  .tb-tray { margin-left: auto; display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 10.5px; }
+  .tray {
+    position: absolute; right: 14px; bottom: 52px; z-index: 3; width: 252px; padding: 7px;
+    border-radius: 11px; border: 1px solid rgba(255,255,255,.09); background: #0c0c17;
+    box-shadow: 0 22px 54px rgba(0,0,0,.55);
+  }
+  .tray .head { padding: 7px 9px 9px; border-bottom: 1px solid var(--line-soft); margin-bottom: 5px; }
+  .tray .head b { display: block; font-size: 11.5px; font-weight: 600; }
+  .tray .head span { display: block; font: 10px var(--mono); color: var(--muted); margin-top: 2px; }
+  .tray .it { display: flex; align-items: center; gap: 9px; padding: 7px 9px; border-radius: 7px; font-size: 11.5px; color: var(--text-2); }
+  .tray .it.hover { background: rgba(124,107,255,.14); color: #d7d2ff; }
+  .tray .it .k { margin-left: auto; font: 9.5px var(--mono); color: var(--muted); }
+  .tray .sep { height: 1px; background: var(--line-soft); margin: 5px 0; }
+  .tray .it .check { width: 12px; text-align: center; color: var(--mint); }
+  .mini-menu {
+    width: 214px; padding: 6px; border-radius: 9px; border: 1px solid rgba(255,255,255,.09);
+    background: #12121c; box-shadow: 0 16px 40px rgba(0,0,0,.45);
+  }
+  .mini-menu .it { display: flex; align-items: center; gap: 8px; padding: 6px 9px; border-radius: 6px; font-size: 11px; color: #d7d5e2; }
+  .mini-menu .it.mut { color: #8c8999; }
+  .mini-menu .sep { height: 1px; background: rgba(255,255,255,.07); margin: 4px 0; }
+
+  /* 安装向导 */
+  .wizard {
+    width: 100%; display: flex; flex-direction: column; justify-content: space-between;
+    border: 1px solid var(--line); border-radius: 12px; background: #0b0b14; padding: 16px;
+    min-height: 300px;
+  }
+  .wizard h4 { margin: 0; font-size: 13px; font-weight: 650; }
+  .wizard p { margin: 6px 0 0; font-size: 11px; color: var(--text-2); line-height: 1.6; }
+  .wizard .field {
+    display: flex; align-items: center; gap: 8px; margin-top: 12px; padding: 7px 9px;
+    border: 1px solid var(--line); border-radius: 8px; background: rgba(0,0,0,.28);
+    font: 10.5px var(--mono); color: #c9c3e8; overflow: hidden;
+  }
+  .wizard .foot { display: flex; gap: 7px; justify-content: flex-end; margin-top: 16px; }
+  .wizard .note { margin-top: 12px; padding: 9px 10px; border-radius: 8px; background: rgba(255,184,107,.06); border: 1px solid rgba(255,184,107,.2); font-size: 10.5px; color: #e8c69e; line-height: 1.6; }
+  .win-chrome {
+    display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-radius: 12px 12px 0 0;
+    background: #14141f; border: 1px solid var(--line); border-bottom: 0;
+  }
+  .win-chrome .d { width: 10px; height: 10px; border-radius: 50%; background: #ff6b85; }
+  .win-chrome .d:nth-child(2) { background: #ffb86b; }
+  .win-chrome .d:nth-child(3) { background: #5be7a9; }
+  .win-chrome span { margin-left: auto; font: 10px var(--mono); color: var(--muted); }
+
+  /* DMG */
+  .dmg {
+    position: relative; height: 250px; border-radius: 12px; overflow: hidden;
+    background: radial-gradient(520px 260px at 50% 34%, rgba(124,107,255,.2), transparent 66%), linear-gradient(170deg, #0d1020, #07070f);
+    border: 1px solid var(--line);
+  }
+  .dmg::before {
+    content: ""; position: absolute; inset: 0;
+    background-image: radial-gradient(rgba(255,255,255,.055) 1px, transparent 1px);
+    background-size: 22px 22px;
+  }
+  .dmg-inner { position: relative; z-index: 1; height: 100%; display: flex; flex-direction: column; }
+  .dmg-bar { height: 26px; display: flex; align-items: center; gap: 6px; padding: 0 10px; background: rgba(255,255,255,.045); border-bottom: 1px solid rgba(255,255,255,.06); }
+  .dmg-bar .d { width: 9px; height: 9px; border-radius: 50%; background: #ff6b85; }
+  .dmg-bar .d:nth-child(2) { background: #ffb86b; }
+  .dmg-bar .d:nth-child(3) { background: #5be7a9; }
+  .dmg-bar b { margin-left: 8px; font-size: 10.5px; font-weight: 550; color: var(--text-2); }
+  .dmg-body { flex: 1; display: flex; align-items: center; justify-content: center; gap: 54px; position: relative; }
+  .dmg-ico { text-align: center; }
+  .dmg-ico .sq {
+    width: 74px; height: 74px; border-radius: 18px; margin: 0 auto 8px; display: grid; place-items: center;
+    background: linear-gradient(145deg, #8c7dff, #5542e6); box-shadow: 0 14px 34px rgba(124,107,255,.32);
+    font: 600 32px/1 var(--mono); color: #fff;
+  }
+  .dmg-ico.folder .sq { background: rgba(255,255,255,.07); border: 1px solid rgba(255,255,255,.14); box-shadow: none; font-size: 26px; color: #c8c6d6; }
+  .dmg-ico span { font-size: 10.5px; color: var(--text-2); }
+  .dmg-arrow { position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%); color: rgba(189,180,255,.5); font-size: 22px; }
+
+  /* 表格 / 代码 */
+  .code {
+    background: #07070d; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px;
+    font: 10.5px/1.85 var(--mono); color: #b9b5cc; white-space: pre-wrap; word-break: break-all;
+  }
+  .code b { color: var(--mint); font-weight: 500; }
+  .code .c { color: #6f6b85; }
+  .assets { width: 100%; border-collapse: collapse; font-size: 11px; }
+  .assets th { text-align: left; font-weight: 500; color: var(--muted); font-size: 10px; letter-spacing: .06em; text-transform: uppercase; padding: 6px 9px; border-bottom: 1px solid var(--line); }
+  .assets td { padding: 7px 9px; border-bottom: 1px solid var(--line-soft); color: var(--text-2); }
+  .assets td.m { font-family: var(--mono); font-size: 10.5px; }
+  .assets tr:last-child td { border-bottom: 0; }
+  .tickcell { color: var(--mint); }
+  .misscell { color: var(--rose); }
+
+  /* 结尾 */
+  .end-card { margin-top: 56px; padding: 22px; border-radius: var(--radius); border: 1px solid var(--line-soft); background: linear-gradient(165deg, rgba(19,19,32,.7), rgba(12,12,22,.8)); }
+  .end-card h3 { margin: 0 0 8px; font-size: 14px; font-weight: 620; }
+  .end-card p { margin: 0 0 6px; font-size: 12px; color: var(--text-2); line-height: 1.75; }
+  .end-card code { font-family: var(--mono); font-size: 11px; color: #c9c3e8; }
+
+  @media (max-width: 980px) {
+    .doc { padding: 0 18px 100px; }
+    .doc-head { margin: 0 -18px; padding: 16px 18px 10px; }
+    .win { min-height: 0; }
+    .side { display: none; }
+    .spec { grid-template-columns: 1fr; }
+    .cards3 { grid-template-columns: 1fr; }
+    .metrics { grid-template-columns: 1fr; }
+    .board-head .badge { display: none; }
+  }
+</style>
+</head>
+<body>
+<div class="doc">
+  <header class="doc-head">
+    <div class="doc-title">
+      <h1>pi carry · 0.3.0 桌面原型</h1>
+      <span class="tag">design spec</span>
+    </div>
+    <p class="doc-sub">
+      覆盖 0.3.0 全部桌面端新增界面：更新中心、首启自检、密钥降级、深链预填、三平台托盘、Windows NSIS 安装器、macOS DMG、Linux 安装说明、发布清单。
+      配色与圆角直接取生产 token（<code>design/desktop-ui/index.html</code>），实现时不要另建一套变量。
+    </p>
+    <nav class="doc-nav" id="nav"></nav>
+  </header>
+
+  <!-- 01 -->
+  <section class="board" id="b01">
+    <div class="board-head">
+      <span class="board-idx">01</span>
+      <div>
+        <h2>总览 · 发现新版本</h2>
+        <p>启动检查命中新版本时，唯一的主动提示位是内容区顶部横幅；不打断当前操作，不弹模态框。</p>
+      </div>
+      <span class="badge">Windows / macOS / Linux 通用</span>
+    </div>
+    <div class="frame">
+      <div class="win">
+        <aside class="side">
+          <div class="brand">
+            <div class="brand-mark">π</div>
+            <div>
+              <div class="brand-name">pi carry</div>
+              <div class="brand-sub">bridge console</div>
+            </div>
+          </div>
+          <div class="nav">
+            <i class="on"><span class="g">◈</span>概览<span class="n">0.3.0</span></i>
+            <i><span class="g">▤</span>设备<span class="n">2</span></i>
+            <i><span class="g">⌘</span>设置</i>
+            <i><span class="g">≣</span>诊断</i>
+          </div>
+          <div class="side-foot">
+            <div class="st"><span class="dot on"></span>桥接运行中</div>
+            <div class="mono" style="font-size:10px;margin-top:6px">endpoint · 6m4q…w2ja</div>
+          </div>
+        </aside>
+        <div class="main">
+          <div class="top">
+            <h3>概览</h3><span class="sub">本机 pi 运行环境</span>
+            <div class="right"><span class="pill amber">版本 0.3.0 可用</span></div>
+          </div>
+          <div class="body">
+            <div class="banner">
+              <div class="grow"><b>发现新版本 0.3.0</b> · 2026-11-24 发布 · 8.4 MB<br>
+                <span class="muted" style="font-size:11px">修复 Linux 托盘在 GNOME 上的显示问题，新增 Windows 安装器与就地更新。</span>
+              </div>
+              <div class="actions">
+                <button class="btn ghost">跳过此版本</button>
+                <button class="btn primary">查看详情</button>
+                <button class="btn ghost" aria-label="关闭">✕</button>
+              </div>
+            </div>
+            <div class="hero">
+              <div class="orb">π</div>
+              <div>
+                <h2>cyfor 的工作站</h2>
+                <div class="meta">Windows 11 · bridge 0.2.0 · pi 1.5.2</div>
+              </div>
+              <div style="margin-left:auto;display:flex;gap:7px">
+                <span class="pill green"><span class="dot on"></span>在线</span>
+                <span class="pill">relay · n0</span>
+              </div>
+            </div>
+            <div class="metrics">
+              <div class="metric"><div class="eyebrow">已配对设备</div><div class="num">2<small>台</small></div></div>
+              <div class="metric"><div class="eyebrow">本机会话</div><div class="num">3<small>个</small></div></div>
+              <div class="metric"><div class="eyebrow">进行中</div><div class="num" style="color:var(--cyan)">1<small>个</small></div></div>
+            </div>
+            <div style="margin-top:16px;display:flex;flex-direction:column;gap:8px">
+              <div class="row"><span class="dot on"></span><div class="grow"><div class="t">Pixel 8</div><div class="m">android · control · 2 分钟前</div></div><span class="pill">v6 直连</span></div>
+              <div class="row"><span class="dot on"></span><div class="grow"><div class="t">MacBook Pro</div><div class="m">desktop · full · 17 分钟前</div></div><span class="pill amber">relay</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="spec">
+      <div><b>触发</b>：启动 10s 后首次检查，之后每 24h 一次；`config.updates.checkOnStartup = true`。</div>
+      <div><b>不打断</b>：横幅位于页面顶部第一个元素，不遮内容、不夺焦点，可关闭并记住「本版本不再提示」。</div>
+      <div><b>跳过</b>：写入 `lastSkippedVersion`，同版本不再提示，但设置页仍可手动检查。</div>
+      <div><b>文案</b>：只写「发现新版本 x.y.z」，不写「立即升级」；版本号用等宽字体。</div>
+    </div>
+  </section>
+
+  <!-- 02 -->
+  <section class="board" id="b02">
+    <div class="board-head">
+      <span class="board-idx">02</span>
+      <div>
+        <h2>更新详情对话框</h2>
+        <p>点「查看详情」后出现。信息以「当前版本 → 新版本」为主轴，安装主按钮只有一个。</p>
+      </div>
+      <span class="badge">modal · 唯一主操作</span>
+    </div>
+    <div class="frame tall">
+      <div class="win" style="filter:blur(.4px);opacity:.6">
+        <aside class="side">
+          <div class="brand"><div class="brand-mark">π</div><div><div class="brand-name">pi carry</div><div class="brand-sub">bridge console</div></div></div>
+          <div class="nav"><i class="on"><span class="g">◈</span>概览</i><i><span class="g">▤</span>设备</i><i><span class="g">⌘</span>设置</i></div>
+        </aside>
+        <div class="main"><div class="top"><h3>概览</h3></div><div class="body"></div></div>
+      </div>
+      <div class="overlay">
+        <div class="dialog">
+          <div class="dialog-head">
+            <div class="dialog-ico">↑</div>
+            <div>
+              <h3>pi carry 0.3.0 可用</h3>
+              <p>当前 0.2.0 · 更新包 8.4 MB · 发布于 2026-11-24</p>
+            </div>
+          </div>
+          <ul class="notes">
+            <li>Windows 新增 NSIS 安装器；安装器与便携版同步更新。</li>
+            <li>Linux 新增 <code>.deb</code> / <code>.rpm</code> 包，支持 x64 与 arm64。</li>
+            <li>macOS 产物为 Universal DMG（未签名，需按指引放行）。</li>
+            <li>修复 GNOME 上托盘图标不显示、单实例偶发失效。</li>
+          </ul>
+          <div class="kv">
+            <div class="k">通道</div><div class="v">stable</div>
+            <div class="k">来源</div><div class="v">github.com/y-cyfor/Pi-Carry</div>
+            <div class="k">签名</div><div class="v">minisign · 2F9A…C41D</div>
+          </div>
+          <div class="divider"></div>
+          <label class="tick"><span class="box on"></span>下载后自动安装并重启 pi carry</label>
+          <div class="dialog-actions">
+            <button class="btn ghost">跳过此版本</button>
+            <button class="btn">稍后</button>
+            <button class="btn primary lg">立即安装</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="spec">
+      <div><b>主操作只能是「立即安装」</b>；「跳过此版本」放左侧次要位置，避免误点成永久忽略。</div>
+      <div><b>签名行</b>：显示 minisign 公钥指纹前缀，便于用户与 Release 页核对。</div>
+      <div><b>可访问性</b>：Esc = 稍后，焦点默认在「立即安装」，对话框 `role="dialog" aria-modal="true"`。</div>
+      <div><b>不显示</b>：不显示原始 JSON、不显示下载直链（避免绕过校验）。</div>
+    </div>
+  </section>
+
+  <!-- 03 -->
+  <section class="board" id="b03">
+    <div class="board-head">
+      <span class="board-idx">03</span>
+      <div>
+        <h2>下载与校验</h2>
+        <p>进度必须带「阶段」而不是只有百分比：下载 → 校验签名 → 安装。</p>
+      </div>
+      <span class="badge">进行中 · 可取消</span>
+    </div>
+    <div class="frame tall">
+      <div class="overlay" style="background:rgba(4,4,10,.72)">
+        <div class="dialog">
+          <div class="dialog-head">
+            <div class="dialog-ico">⇣</div>
+            <div>
+              <h3>正在准备 0.3.0</h3>
+              <p>下载中 · 5.2 / 8.4 MB</p>
+            </div>
+          </div>
+          <div class="prog"><i style="width:62%"></i></div>
+          <div class="prog-legend"><span>62% · 3.1 MB/s</span><span>剩余约 1 秒</span></div>
+          <div class="tick" style="color:var(--mint)">✓ 已验证 Release 资产清单</div>
+          <div class="tick muted">○ 等待签名校验（minisign）</div>
+          <div class="tick muted">○ 等待安装</div>
+          <div class="dialog-actions">
+            <button class="btn">取消</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="spec">
+      <div><b>阶段可见</b>：三段式勾选，任一阶段失败就地变红并给出原因，不退回起点。</div>
+      <div><b>取消语义</b>：取消只中止下载，已下载的临时文件立即删除，不残留半包。</div>
+      <div><b>无进度回退</b>：总大小未知时显示「已下载 x MB」而不是假百分比。</div>
+      <div><b>限速/断网</b>：连续 3 次失败后提示「检查网络或手动下载」，并给出 Release 链接。</div>
+    </div>
+  </section>
+
+  <!-- 04 -->
+  <section class="board" id="b04">
+    <div class="board-head">
+      <span class="board-idx">04</span>
+      <div>
+        <h2>验签失败（阻断态）</h2>
+        <p>这是安全底线：校验不通过必须阻断、删除临时文件，并说明当前版本未受影响。</p>
+      </div>
+      <span class="badge">终止态 · 不可重试安装</span>
+    </div>
+    <div class="frame tall">
+      <div class="overlay" style="background:rgba(6,3,8,.76)">
+        <div class="dialog rose">
+          <div class="dialog-head">
+            <div class="dialog-ico rose">!</div>
+            <div>
+              <h3 style="color:#ffc4cf">安装已阻止</h3>
+              <p>签名校验失败，已删除下载的安装包</p>
+            </div>
+          </div>
+          <div class="banner rose" style="margin-top:14px">
+            <div class="grow">签名与内置公钥不匹配。可能是下载被篡改，或发布方更换了签名密钥。</div>
+          </div>
+          <div class="kv">
+            <div class="k">期望公钥</div><div class="v">2F9A…C41D</div>
+            <div class="k">实际签名</div><div class="v">未通过 / 文件缺失</div>
+            <div class="k">当前版本</div><div class="v">0.2.0（未受影响）</div>
+          </div>
+          <div class="dialog-actions">
+            <button class="btn ghost">查看日志</button>
+            <button class="btn">手动下载</button>
+            <button class="btn primary">重新检查</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="spec">
+      <div><b>不可绕过</b>：不提供「仍要安装」；这是与系统安装器签名提示的本质区别。</div>
+      <div><b>证据保留</b>：只保留日志（含 URL、HTTP 状态、sha256），不保留二进制。</div>
+      <div><b>重复抑制</b>：写入 `lastFailedVersion`，同一版本启动时不重复弹窗，但设置页显示失败原因。</div>
+      <div><b>文案边界</b>：不猜测原因（不说「你被攻击了」），只陈述「签名不匹配」。</div>
+    </div>
+  </section>
+
+  <!-- 05 -->
+  <section class="board" id="b05">
+    <div class="board-head">
+      <span class="board-idx">05</span>
+      <div>
+        <h2>设置 · 更新卡片</h2>
+        <p>常规入口：自动检查、渠道、上次检查时间、立即检查；失败原因就地展开，不弹窗。</p>
+      </div>
+      <span class="badge">设置页内嵌</span>
+    </div>
+    <div class="frame">
+      <div class="win">
+        <aside class="side">
+          <div class="brand"><div class="brand-mark">π</div><div><div class="brand-name">pi carry</div><div class="brand-sub">bridge console</div></div></div>
+          <div class="nav"><i><span class="g">◈</span>概览</i><i><span class="g">▤</span>设备</i><i class="on"><span class="g">⌘</span>设置</i><i><span class="g">≣</span>诊断</i></div>
+          <div class="side-foot"><div class="st"><span class="dot on"></span>桥接运行中</div></div>
+        </aside>
+        <div class="main">
+          <div class="top"><h3>设置</h3><span class="sub">修改后需重启桥接服务</span></div>
+          <div class="body">
+            <div class="card">
+              <div style="display:flex;align-items:center;gap:12px">
+                <div>
+                  <h4>更新</h4>
+                  <div class="cap">从 GitHub Releases 获取正式版本；安装前会校验 minisign 签名。</div>
+                </div>
+                <span class="pill violet" style="margin-left:auto">当前 0.2.0</span>
+              </div>
+              <div class="divider"></div>
+              <div class="row" style="border:0;background:transparent;padding:0">
+                <div class="grow"><div class="t">启动时自动检查</div><div class="m">每 24 小时最多一次</div></div>
+                <span class="switch on"></span>
+              </div>
+              <div class="row" style="border:0;background:transparent;padding:10px 0 0">
+                <div class="grow"><div class="t">更新通道</div><div class="m">beta 会收到预发布版本，可能不稳定</div></div>
+                <span class="segment"><span class="on">stable</span><span>beta</span></span>
+              </div>
+              <div class="divider"></div>
+              <div style="display:flex;align-items:center;gap:10px">
+                <div class="muted" style="font-size:11px">上次检查：2 分钟前 · 未发现新版本（0.3.0 已跳过）</div>
+                <button class="btn" style="margin-left:auto">立即检查</button>
+              </div>
+              <div class="banner rose" style="margin-top:12px">
+                <div class="grow"><b>上次检查失败</b>：`latest.json` 返回 404（2026-11-24 17:40）。<br>
+                  <span class="muted" style="font-size:10.5px">已自动重试 2 次，间隔 30s / 120s。</span>
+                </div>
+                <button class="btn ghost">收起</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="spec">
+      <div><b>与横幅同源</b>：横幅与设置卡片读同一个状态对象，避免两处说法不一致。</div>
+      <div><b>渠道切换</b>：切换后立即重新检查一次，切回 stable 时清除 beta 的 `lastSkippedVersion`。</div>
+      <div><b>失败展示</b>：错误就地展开，包含 HTTP 状态与时序，不弹 toast。</div>
+      <div><b>禁用态</b>：「立即检查」进行中禁用并显示「检查中…」，60s 后自动恢复。</div>
+    </div>
+  </section>
+
+  <!-- 06 -->
+  <section class="board" id="b06">
+    <div class="board-head">
+      <span class="board-idx">06</span>
+      <div>
+        <h2>首启自检</h2>
+        <p>首次启动且环境不完整时不进入主界面，直接给三张可执行的诊断卡。</p>
+      </div>
+      <span class="badge">首启 · 阻断主界面</span>
+    </div>
+    <div class="frame pad">
+      <div class="hero" style="margin-bottom:16px">
+        <div class="orb" style="background:rgba(255,184,107,.08);border-color:rgba(255,184,107,.3);color:var(--amber)">!</div>
+        <div>
+          <h2 style="font-size:18px">需要先处理 2 个问题</h2>
+          <div class="meta">pi carry 还无法连接 pi。修复后点「重新检测」，不需要重启应用。</div>
+        </div>
+      </div>
+      <div class="cards3">
+        <div class="diag">
+          <div class="hd">✕ pi 未找到</div>
+          <p>GUI 启动时 PATH 不含 Node 全局目录，找不到 <code>pi.cmd</code>。</p>
+          <p class="muted" style="font-size:10px">搜索路径：C:\Users\cyfor\AppData\Roaming\npm</p>
+          <div class="fix"><button class="btn">选择 pi 路径</button><button class="btn ghost">重新检测</button></div>
+        </div>
+        <div class="diag warn">
+          <div class="hd">⚠ 系统托盘不可用</div>
+          <p>当前桌面未提供 AppIndicator / KSNI，关闭窗口后将退出应用。</p>
+          <p class="muted" style="font-size:10px">建议安装 gnome-shell-extension-appindicator</p>
+          <div class="fix"><button class="btn">了解详情</button></div>
+        </div>
+        <div class="diag" style="border-color:rgba(91,231,169,.22);background:rgba(91,231,169,.04)">
+          <div class="hd" style="color:var(--mint)">✓ WebView2 正常</div>
+          <p>版本 157.0.4341.60，满足最低要求。</p>
+          <p class="muted" style="font-size:10px">无需操作</p>
+        </div>
+      </div>
+      <div class="banner amber" style="margin-top:14px">
+        <div class="grow">固定 runtime 用户可跳过在线安装：把 <code>webviewInstallMode</code> 指向本地目录，或在安装器里选择离线包。</div>
+        <button class="btn ghost">查看 README</button>
+      </div>
+    </div>
+    <div class="spec">
+      <div><b>只在首启</b>：自检结果写入 `state.db`；后续启动只在诊断页显示，不再拦主界面。</div>
+      <div><b>可执行</b>：每个失败项至少给一个动作（选择路径 / 安装依赖 / 查看文档），不给死胡同。</div>
+      <div><b>不误报</b>：托盘检测失败只降级为警告（应用仍可用），pi 缺失才是致命错误。</div>
+      <div><b>不改系统</b>：不自动改 PATH、不自动装扩展、不提权。</div>
+    </div>
+  </section>
+
+  <!-- 07 -->
+  <section class="board" id="b07">
+    <div class="board-head">
+      <span class="board-idx">07</span>
+      <div>
+        <h2>密钥明文降级横幅</h2>
+        <p>钥匙串不可用（常见于未签名 macOS、headless Linux）时必须显式告知，而不是静默写明文。</p>
+      </div>
+      <span class="badge">常驻 · 可关闭一次</span>
+    </div>
+    <div class="frame">
+      <div class="win">
+        <aside class="side">
+          <div class="brand"><div class="brand-mark">π</div><div><div class="brand-name">pi carry</div><div class="brand-sub">bridge console</div></div></div>
+          <div class="nav"><i class="on"><span class="g">◈</span>概览</i><i><span class="g">▤</span>设备</i><i><span class="g">⌘</span>设置</i><i><span class="g">≣</span>诊断</i></div>
+          <div class="side-foot"><div class="st"><span class="dot warn"></span>运行中（降级）</div></div>
+        </aside>
+        <div class="main">
+          <div class="top"><h3>概览</h3><span class="sub">本机 pi 运行环境</span>
+            <div class="right"><span class="pill rose">密钥未加密</span></div>
+          </div>
+          <div class="body">
+            <div class="banner amber">
+              <div class="grow"><b>密钥以明文保存</b> · 系统钥匙串不可用，endpoint 私钥写在 <code>~/.pi-carry/secrets.json</code>（权限 0600）。<br>
+                <span class="muted" style="font-size:10.5px">原因：macOS 应用未签名，Keychain 拒绝访问。这不影响连接，但同机其他用户/备份工具可能读到私钥。</span>
+              </div>
+              <div class="actions"><button class="btn">去设置</button><button class="btn ghost">✕</button></div>
+            </div>
+            <div class="card" style="margin-top:14px">
+              <h4>安全状态</h4>
+              <div class="kv" style="grid-template-columns:110px 1fr">
+                <div class="k">密钥后端</div><div class="v">file-plaintext（降级）</div>
+                <div class="k">钥匙串</div><div class="v">unavailable · errSecInteractionNotAllowed</div>
+                <div class="k">文件权限</div><div class="v">0600 · cyfor:staff</div>
+                <div class="k">建议</div><div class="v">签名后重新迁移，或设置 PI_CARRY_SECRET_BACKEND=keyring</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="spec">
+      <div><b>三重可见</b>：顶栏 pill「密钥未加密」+ 横幅 + 设置页安全卡，任一被关掉仍有其他入口。</div>
+      <div><b>不阻断</b>：降级不阻止使用，但 `doctor` 输出与日志首行都要带 `secret_backend=file-plaintext`。</div>
+      <div><b>可恢复</b>：钥匙串恢复后提供「迁移到钥匙串」按钮，先写后删，失败保留原文件。</div>
+      <div><b>措辞</b>：说清「谁能读到」与「怎么改」，不用「危险/严重」等制造恐慌的词。</div>
+    </div>
+  </section>
+
+  <!-- 08 -->
+  <section class="board" id="b08">
+    <div class="board-head">
+      <span class="board-idx">08</span>
+      <div>
+        <h2>深链配对预填</h2>
+        <p><code>pi-carry://pair</code> 只做预填与来源标记，绝不在用户点击「完成配对」前生效。</p>
+      </div>
+      <span class="badge">已预填 · 待确认</span>
+    </div>
+    <div class="frame">
+      <div class="win">
+        <aside class="side">
+          <div class="brand"><div class="brand-mark">π</div><div><div class="brand-name">pi carry</div><div class="brand-sub">bridge console</div></div></div>
+          <div class="nav"><i class="on"><span class="g">◈</span>概览</i><i><span class="g">▤</span>设备</i><i><span class="g">⌘</span>设置</i></div>
+        </aside>
+        <div class="main">
+          <div class="top"><h3>配对新设备</h3><span class="sub">从链接预填，仍需本机确认</span></div>
+          <div class="body">
+            <div class="banner violet">
+              <div class="grow"><b>来自外部链接</b><br>
+                <span class="mono" style="font-size:10px;color:#b7aef6">pi-carry://pair?v=1&amp;endpoint=6m4q…w2ja&amp;token=9f2c…</span>
+              </div>
+              <span class="pill violet">未确认</span>
+            </div>
+            <div style="display:grid;grid-template-columns:200px 1fr;gap:18px;margin-top:16px;align-items:start">
+              <div class="card" style="padding:12px">
+                <div style="aspect-ratio:1;border-radius:12px;background:#fff;display:grid;place-items:center;color:#20202c;font:10px var(--mono)">QR</div>
+                <div class="cap" style="text-align:center">或用手机扫码</div>
+              </div>
+              <div>
+                <div class="card">
+                  <h4>确认配对码</h4>
+                  <div class="cap">与手机上显示的后 4 位一致再继续。</div>
+                  <div style="display:flex;gap:6px;margin-top:12px">
+                    <span class="code-digit">4</span><span class="code-digit">8</span><span class="code-digit">2</span>
+                    <span class="code-digit">9</span><span class="code-digit">1</span><span class="code-digit">6</span>
+                  </div>
+                  <div class="tick muted" style="margin-top:12px">有效期 09:42（原 10 分钟，已用 18 秒）</div>
+                  <div class="dialog-actions" style="margin-top:14px">
+                    <button class="btn ghost">取消</button>
+                    <button class="btn primary">完成配对</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="spec">
+      <div><b>不自动配对</b>：链接只填充 endpoint/token 与展示来源，必须人工点「完成配对」。</div>
+      <div><b>来源可见</b>：显示完整 URI（可折叠），提示「来自外部应用」，降低钓鱼成功率。</div>
+      <div><b>限次</b>：同一链接重复打开不重置尝试次数；失败 5 次锁定 10 分钟。</div>
+      <div><b>跨平台</b>：macOS 必须在打包配置里声明 scheme；Windows/Linux 运行期注册并在启动时解析 argv。</div>
+    </div>
+  </section>
+
+  <!-- 09 -->
+  <section class="board" id="b09">
+    <div class="board-head">
+      <span class="board-idx">09</span>
+      <div>
+        <h2>托盘菜单 · Windows</h2>
+        <p>常驻入口。菜单只放「打开 / 更新 / 日志 / 自启 / 退出」，不在这里做聊天或审批。</p>
+      </div>
+      <span class="badge">Windows 11 · 通知区域</span>
+    </div>
+    <div class="frame pad">
+      <div class="desktop-strip">
+        <div class="taskbar">
+          <div class="tb-app">π</div>
+          <span class="muted" style="font-size:10.5px">pi carry · 已固定</span>
+          <div class="tb-tray"><span>17:42</span><span>🔊</span><span>📶</span><span class="pill rose" style="padding:1px 6px">↑</span></div>
+        </div>
+        <div class="tray">
+          <div class="head"><b>pi carry</b><span>桥接运行中 · 2 台设备在线</span></div>
+          <div class="it"><span>▢</span>打开主界面<span class="k">Ctrl+O</span></div>
+          <div class="it hover"><span>↑</span>检查更新<span class="k">0.3.0</span></div>
+          <div class="it"><span>≣</span>打开日志</div>
+          <div class="sep"></div>
+          <div class="it"><span class="check">✓</span>开机自启<span class="k">已启用</span></div>
+          <div class="it"><span>⏸</span>暂停桥接</div>
+          <div class="sep"></div>
+          <div class="it"><span>⏻</span>退出 pi carry</div>
+        </div>
+      </div>
+    </div>
+    <div class="spec">
+      <div><b>状态行</b>：第一行永远是当前桥接状态 + 在线设备数，不发系统通知也能看到。</div>
+      <div><b>更新项</b>：有新版本时显示右侧型号徽章；无新版本时置灰，点击触发一次检查。</div>
+      <div><b>暂停</b>：暂停后图标变灰、顶部显示「已暂停」，恢复需要再点一次（不自动恢复）。</div>
+      <div><b>退出</b>：二次确认（托盘菜单内的确认条，不用系统弹窗），避免误杀会话。</div>
+    </div>
+  </section>
+
+  <!-- 10 -->
+  <section class="board" id="b10">
+    <div class="board-head">
+      <span class="board-idx">10</span>
+      <div>
+        <h2>托盘菜单 · macOS 与 Linux</h2>
+        <p>同一份菜单模型，三种外观：macOS 模板图标 + 系统菜单，Linux 走 AppIndicator，失败时降级为窗口。</p>
+      </div>
+      <span class="badge">两平台对照</span>
+    </div>
+    <div class="frame pad">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:18px">
+        <div>
+          <div class="eyebrow" style="margin-bottom:8px">macOS · 菜单栏模板图标</div>
+          <div style="border-radius:12px;overflow:hidden;border:1px solid var(--line)">
+            <div style="height:26px;background:#1b1d24;display:flex;align-items:center;gap:10px;padding:0 10px;color:#cfd2da;font-size:10px">
+              <b style="font-weight:600">Finder</b><span style="margin-left:auto">π</span><span>􀊫</span><span>17:42</span>
+            </div>
+            <div style="background:#0f1016;padding:12px;display:flex;justify-content:flex-end">
+              <div class="mini-menu">
+                <div class="it mut">桥接运行中 · 2 台设备在线</div>
+                <div class="sep"></div>
+                <div class="it">打开主界面</div>
+                <div class="it">检查更新…</div>
+                <div class="it">打开日志</div>
+                <div class="sep"></div>
+                <div class="it">开机自启 ✓</div>
+                <div class="it">暂停桥接</div>
+                <div class="sep"></div>
+                <div class="it">退出 pi carry ⌘Q</div>
+              </div>
+            </div>
+          </div>
+          <div class="spec" style="grid-template-columns:1fr;margin-top:10px">
+            <div>图标必须是 <b>template image</b>（纯黑 + alpha），系统自动适配深浅色菜单栏。</div>
+            <div>菜单用系统原生样式，不自绘；快捷键只做展示，不注册全局热键。</div>
+          </div>
+        </div>
+        <div>
+          <div class="eyebrow" style="margin-bottom:8px">Linux · AppIndicator / KSNI</div>
+          <div style="border-radius:12px;overflow:hidden;border:1px solid var(--line)">
+            <div style="height:26px;background:#20222b;display:flex;align-items:center;gap:8px;padding:0 10px;color:#c6c9d4;font-size:10px">
+              <b style="font-weight:600">活动</b><span style="margin-left:auto">π</span><span>17:42</span>
+            </div>
+            <div style="background:#12131a;padding:12px;display:flex;justify-content:flex-end">
+              <div class="mini-menu">
+                <div class="it mut">桥接运行中 · relay</div>
+                <div class="sep"></div>
+                <div class="it">打开主界面</div>
+                <div class="it">检查更新</div>
+                <div class="it">打开日志</div>
+                <div class="sep"></div>
+                <div class="it">开机自启</div>
+                <div class="it">退出</div>
+              </div>
+            </div>
+          </div>
+          <div class="spec" style="grid-template-columns:1fr;margin-top:10px">
+            <div>无 AppIndicator 时 <b>不静默退出</b>：窗口关闭改为最小化，并在首启提示托盘缺失。</div>
+            <div>deb/rpm 依赖写清 <code>libayatana-appindicator-gtk3</code>，缺依赖时给安装命令。</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 11 -->
+  <section class="board" id="b11">
+    <div class="board-head">
+      <span class="board-idx">11</span>
+      <div>
+        <h2>Windows 安装器（NSIS）三屏</h2>
+        <p>用系统向导，不自绘。只定制文案、安装范围与「未签名」提示位。</p>
+      </div>
+      <span class="badge">per-user · 免管理员</span>
+    </div>
+    <div class="frame pad">
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px">
+        <div class="wizard">
+          <div>
+            <h4>欢迎使用 pi carry 0.3.0</h4>
+            <p>为当前用户安装，无需管理员权限。安装位置可改。</p>
+            <div class="field">C:\Users\cyfor\AppData\Local\pi carry ▾</div>
+            <div class="tick"><span class="box on"></span><span style="font-size:10.5px">创建桌面快捷方式</span></div>
+            <div class="tick"><span class="box on"></span><span style="font-size:10.5px">开机启动（可稍后在托盘关闭）</span></div>
+          </div>
+          <div class="foot"><button class="btn">取消</button><button class="btn primary">安装</button></div>
+        </div>
+        <div class="wizard">
+          <div>
+            <h4>正在安装</h4>
+            <p>正在复制文件并注册深链 pi-carry://…</p>
+            <div class="prog" style="margin-top:16px"><i style="width:74%"></i></div>
+            <div class="prog-legend"><span>74%</span><span>复制文件</span></div>
+            <div class="note">安装器未签名：Windows 可能提示「无法验证发布者」，请核对 SHA256 后再继续。</div>
+          </div>
+          <div class="foot"><button class="btn" disabled>取消</button><button class="btn primary" disabled>安装</button></div>
+        </div>
+        <div class="wizard">
+          <div>
+            <h4 style="color:var(--mint)">安装完成</h4>
+            <p>pi carry 已安装。首次启动会检查 pi 与系统托盘。<br>数据保存在 <span class="mono" style="font-size:10px">%USERPROFILE%\.pi-carry</span>。</p>
+            <div class="tick"><span class="box on"></span><span style="font-size:10.5px">立即启动 pi carry</span></div>
+            <div class="note" style="background:rgba(124,107,255,.06);border-color:rgba(124,107,255,.22);color:#c8c2f5">便携版可与此安装共存；两者共用同一数据目录，请只运行一个。</div>
+          </div>
+          <div class="foot"><button class="btn primary">完成</button></div>
+        </div>
+      </div>
+    </div>
+    <div class="spec">
+      <div><b>安装范围</b>：默认 `currentUser`（无 UAC），安装到 `%LOCALAPPDATA%`；不做 per-machine 开关。</div>
+      <div><b>同源</b>：安装器与便携 zip 由同一次构建产出，exe 版本字符串与 SHA256 必须一致。</div>
+      <div><b>共存</b>：允许与便携版并存，但启动时检测到另一实例则聚焦已有窗口。</div>
+      <div><b>卸载</b>：保留 `~/.pi-carry`（含密钥与会话索引），卸载页明确提示，另给「同时删除数据」勾选。</div>
+    </div>
+  </section>
+
+  <!-- 12 -->
+  <section class="board" id="b12">
+    <div class="board-head">
+      <span class="board-idx">12</span>
+      <div>
+        <h2>macOS DMG 与首次打开</h2>
+        <p>应用未签名，必须在文档与首次启动引导里写清 Gatekeeper 放行步骤。</p>
+      </div>
+      <span class="badge">Universal · 未签名</span>
+    </div>
+    <div class="frame pad">
+      <div style="display:grid;grid-template-columns:1.15fr 1fr;gap:16px;align-items:start">
+        <div class="dmg">
+          <div class="dmg-inner">
+            <div class="dmg-bar"><span class="d"></span><span class="d"></span><span class="d"></span><b>pi carry 0.3.0</b></div>
+            <div class="dmg-body">
+              <div class="dmg-ico"><div class="sq">π</div><span>pi carry</span></div>
+              <div class="dmg-arrow">➜</div>
+              <div class="dmg-ico folder"><div class="sq">⌘</div><span>Applications</span></div>
+            </div>
+          </div>
+        </div>
+        <div class="card">
+          <h4>首次打开（未签名）</h4>
+          <div class="cap">macOS 会阻止未签名应用直接运行，这是系统行为，不是程序损坏。</div>
+          <div class="steps" style="margin-top:12px">
+            <div style="display:flex;gap:10px;font-size:11px;color:var(--text-2)"><b class="mono" style="color:#bdb4ff">1</b><div>把 pi carry 拖进 Applications，双击打开。</div></div>
+            <div style="display:flex;gap:10px;font-size:11px;color:var(--text-2)"><b class="mono" style="color:#bdb4ff">2</b><div>出现「无法打开」时，前往 <b>系统设置 → 隐私与安全性</b>，点「仍要打开」。</div></div>
+            <div style="display:flex;gap:10px;font-size:11px;color:var(--text-2)"><b class="mono" style="color:#bdb4ff">3</b><div>输入管理员密码，确认。<br><span class="muted">macOS 15 起不再支持右键 →「打开」的旧方式。</span></div></div>
+            <div style="display:flex;gap:10px;font-size:11px;color:var(--text-2)"><b class="mono" style="color:#bdb4ff">4</b><div>钥匙串会反复询问访问权限，可选择「始终允许」；若不想授权，应用会降级为明文密钥存储（见 07）。</div></div>
+          </div>
+          <div class="banner amber" style="margin-top:12px">
+            <div class="grow" style="font-size:10.5px">自动更新在未签名应用上可能被系统阻止；失败时会自动退回「提示下载 DMG」。</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="spec">
+      <div><b>单一 DMG</b>：`universal-apple-darwin` 产物，>60MB 才考虑拆双架构。</div>
+      <div><b>窗口布局</b>：图标 74px、间距 54px、深色背景，与产品视觉一致；不做自定义安装器。</div>
+      <div><b>分发说明</b>：Release 说明、README、DMG 内 `README.txt` 三处都写放行步骤，且写明「无签名、无公证」。</div>
+      <div><b>不做</b>：不引导用户关闭 Gatekeeper（`spctl --master-disable`），不教 `xattr` 为首选方案。</div>
+    </div>
+  </section>
+
+  <!-- 13 -->
+  <section class="board" id="b13">
+    <div class="board-head">
+      <span class="board-idx">13</span>
+      <div>
+        <h2>Linux 安装说明</h2>
+        <p>两种格式 × 两种架构。说明卡只给可复制命令，不做图形安装器。</p>
+      </div>
+      <span class="badge">deb + rpm · x64/arm64</span>
+    </div>
+    <div class="frame pad">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+        <div class="card">
+          <div style="display:flex;align-items:center;gap:8px"><h4>Debian / Ubuntu</h4><span class="pill">.deb</span></div>
+          <div class="cap">Ubuntu 22.04+ / Debian 12+</div>
+          <div class="code" style="margin-top:10px"><span class="c"># x64</span>
+sudo apt install ./pi-carry-linux-debian-12-x64-0.3.0.deb
+
+<span class="c"># arm64</span>
+sudo apt install ./pi-carry-linux-debian-12-arm64-0.3.0.deb
+
+<span class="c"># 校验</span>
+sha256sum -c SHA256SUMS --ignore-missing</div>
+        </div>
+        <div class="card">
+          <div style="display:flex;align-items:center;gap:8px"><h4>Fedora / RHEL</h4><span class="pill">.rpm</span></div>
+          <div class="cap">Fedora 39+ / RHEL 9+</div>
+          <div class="code" style="margin-top:10px"><span class="c"># x64</span>
+sudo dnf install ./pi-carry-linux-fedora-39-x64-0.3.0.rpm
+
+<span class="c"># arm64</span>
+sudo dnf install ./pi-carry-linux-fedora-39-arm64-0.3.0.rpm
+
+<span class="c"># 校验</span>
+sha256sum -c SHA256SUMS --ignore-missing</div>
+        </div>
+      </div>
+      <div class="banner rose" style="margin-top:14px">
+        <div class="grow"><b>依赖缺失</b>：`libwebkit2gtk-4.1-0` 未安装。请先执行
+          <span class="mono" style="font-size:10.5px">sudo apt install libwebkit2gtk-4.1-0 libayatana-appindicator3-1</span>，再重新安装。</div>
+        <button class="btn ghost">复制</button>
+      </div>
+      <div class="banner" style="margin-top:10px">
+        <div class="grow">升级：<span class="mono" style="font-size:10.5px">sudo apt install ./pi-carry-…-0.3.1.deb</span> 或 <span class="mono" style="font-size:10.5px">sudo dnf upgrade ./…rpm</span>。应用内更新也会调用包管理器（需 polkit 授权）。</div>
+      </div>
+    </div>
+    <div class="spec">
+      <div><b>命令优先</b>：所有 Linux 说明以可复制命令为准，不写「双击安装」。</div>
+      <div><b>架构显式</b>：文件名包含架构，避免用户下错包；`dpkg -i` 不推荐（不解决依赖）。</div>
+      <div><b>依赖声明</b>：deb `Depends: libwebkit2gtk-4.1-0, libgtk-3-0, libayatana-appindicator3-1`；rpm 同名 Requires。</div>
+      <div><b>更新失败</b>：polkit 拒绝时提示「未获得系统授权，请手动执行上面的命令」，不重试。</div>
+    </div>
+  </section>
+
+  <!-- 14 -->
+  <section class="board" id="b14">
+    <div class="board-head">
+      <span class="board-idx">14</span>
+      <div>
+        <h2>发布清单可视化</h2>
+        <p>发布时对照这张表：`latest.json` 的平台键必须与实际资产、签名、校验和一一对应。</p>
+      </div>
+      <span class="badge">7 个资产 + 清单</span>
+    </div>
+    <div class="frame pad">
+      <div style="display:grid;grid-template-columns:1.35fr 1fr;gap:16px;align-items:start">
+        <div class="card" style="padding:0;overflow:hidden">
+          <table class="assets">
+            <thead><tr><th>latest.json 键</th><th>资产</th><th>.sig</th><th>sha256</th></tr></thead>
+            <tbody>
+              <tr><td class="m">windows-x86_64-nsis</td><td class="m">…-setup.exe</td><td class="tickcell">✓</td><td class="tickcell">✓</td></tr>
+              <tr><td class="m">portable.windows-x86_64</td><td class="m">…-windows-10-x64-0.3.0.zip</td><td class="misscell">—</td><td class="tickcell">✓</td></tr>
+              <tr><td class="m">macos-universal</td><td class="m">…-macos-11-universal-0.3.0.dmg</td><td class="tickcell">✓</td><td class="tickcell">✓</td></tr>
+              <tr><td class="m">linux-x86_64-deb</td><td class="m">…-linux-debian-12-x64-0.3.0.deb</td><td class="tickcell">✓</td><td class="tickcell">✓</td></tr>
+              <tr><td class="m">linux-x86_64-rpm</td><td class="m">…-linux-fedora-39-x64-0.3.0.rpm</td><td class="tickcell">✓</td><td class="tickcell">✓</td></tr>
+              <tr><td class="m">linux-aarch64-deb</td><td class="m">…-linux-debian-12-arm64-0.3.0.deb</td><td class="tickcell">✓</td><td class="tickcell">✓</td></tr>
+              <tr><td class="m">linux-aarch64-rpm</td><td class="m">…-linux-fedora-39-arm64-0.3.0.rpm</td><td class="tickcell">✓</td><td class="tickcell">✓</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div>
+          <div class="code"><span class="c">// latest.json（节选）</span>
+{
+  <b>"version"</b>: "0.3.0",
+  "notes": "…",
+  "pub_date": "2026-11-24T09:00:00Z",
+  "platforms": {
+    "windows-x86_64-nsis": {
+      "signature": "…",
+      "url": "https://github.com/…-setup.exe"
+    },
+    "macos-universal": { … },
+    "linux-x86_64-deb": { … }
+  },
+  <b>"portable"</b>: {
+    "windows-x86_64": {
+      "version": "0.3.0",
+      "url": "…zip",
+      "sha256": "…"
+    }
+  }
+}</div>
+          <div class="banner amber" style="margin-top:12px">
+            <div class="grow" style="font-size:10.5px">任何一项缺失都不允许发布；`signature` 必须来自对应 `.sig`，不能手写。</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="spec">
+      <div><b>单一事实源</b>：`latest.json` 由 `scripts/gen-latest-json.mjs` 从构建产物生成，禁止手改。</div>
+      <div><b>键名核对</b>：平台键须与 updater 实际输出一致；首轮用 `RUST_LOG=tauri_plugin_updater=debug` 打印后固化。</div>
+      <div><b>便携段</b>：仅 Windows 有；便携版不参与 updater 验签，靠 sha256 与版本比较。</div>
+      <div><b>审计</b>：发布后保留 `SHA256SUMS` 与 `.sig` 至少 2 个版本，便于回滚核对。</div>
+    </div>
+  </section>
+
+  <div class="end-card">
+    <h3>原型边界</h3>
+    <p><b>这里能实现的</b>：横幅、更新对话框、进度与失败态、设置卡片、首启自检、密钥降级、深链预填、托盘菜单、安装说明卡、发布清单可视化 —— 全部由 `design/desktop-ui/index.html` + `app.js` 的原生 DOM 实现，不引入框架。</p>
+    <p><b>这里只是示意</b>：NSIS 三屏是 Windows 系统向导的外观，不可自绘；DMG 窗口由 `bundle.macOS.dmg` 的背景图与图标位置决定；macOS 的 Gatekeeper 提示是系统弹窗，应用只能提供说明。</p>
+    <p><b>配色</b>：所有颜色取生产变量（`--ink #05050a`、`--violet #7c6bff`、`--cyan #45d9d0`、`--rose #ff6b85`、`--amber #ffb86b`、`--mint #5be7a9`）；新增界面不要引入第二套主题。</p>
+    <p class="muted" style="margin-top:10px;font-size:11px">配套计划：<span class="mono">plan/0.3.0.md</span> §12；实现后请以真实截图为准确认本稿，不要直接照搬像素。</p>
+  </div>
+</div>
+
+<script>
+  // 导航由画板标题自动生成，避免手写 14 个锚点产生不一致
+  var boards = Array.prototype.slice.call(document.querySelectorAll('.board'));
+  var nav = document.getElementById('nav');
+  boards.forEach(function (b) {
+    var t = b.querySelector('.board-head h2').textContent;
+    var idx = b.querySelector('.board-idx').textContent;
+    var a = document.createElement('a');
+    a.href = '#' + b.id;
+    a.textContent = idx + ' ' + t;
+    nav.appendChild(a);
+  });
+  var links = Array.prototype.slice.call(nav.querySelectorAll('a'));
+  links.forEach(function (a) {
+    a.addEventListener('click', function (e) {
+      e.preventDefault();
+      document.querySelector(a.getAttribute('href')).scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  });
+  var io = new IntersectionObserver(function (entries) {
+    entries.forEach(function (en) {
+      if (!en.isIntersecting) return;
+      links.forEach(function (l) {
+        l.classList.toggle('on', l.getAttribute('href') === '#' + en.target.id);
+      });
+    });
+  }, { rootMargin: '-15% 0px -70% 0px' });
+  boards.forEach(function (b) { io.observe(b); });
+</script>
+</body>
+</html>

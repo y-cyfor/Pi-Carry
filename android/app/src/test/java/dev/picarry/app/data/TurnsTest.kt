@@ -96,6 +96,27 @@ class TurnsTest {
         assertTrue(turns.isEmpty())
     }
 
+    /** BUG-008：没有 usage 的轮次不能把 `0` 当成真实消耗显示出来。 */
+    @Test
+    fun `无 usage 的轮次 token 文案为破折号`() {
+        val messages = listOf(
+            msg("u1", "user", runId = "r1"),
+            msg("a1", "assistant", runId = "r1"),
+        )
+        val turn = computeTurns(messages).single()
+        assertEquals(0L, turn.displayTokens)
+        assertEquals("—", turn.tokenText)
+        assertEquals("—", turn.durationText)
+        // 有真实 usage 时仍是数字，不能被破折号规则误伤。
+        val withUsage = computeTurns(
+            listOf(
+                msg("u1", "user", runId = "r1"),
+                msg("a1", "assistant", runId = "r1", usage = MessageUsage(input = 1200, output = 100)),
+            ),
+        ).single()
+        assertEquals("1.3k", withUsage.tokenText)
+    }
+
     @Test
     fun `没有 runId 的老数据按消息顺序切轮并用时间戳近似时长`() {
         val messages = listOf(

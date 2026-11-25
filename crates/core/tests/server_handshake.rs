@@ -14,6 +14,9 @@ async fn start_bridge() -> (TempDir, std::sync::Arc<Bridge>) {
 async fn start_bridge_with(
     configure: impl FnOnce(&mut Config),
 ) -> (TempDir, std::sync::Arc<Bridge>) {
+    // 与 tests/common 一致：测试不碰真实系统钥匙串。
+    static BACKEND: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    BACKEND.get_or_init(|| std::env::set_var("PI_CARRY_SECRET_BACKEND", "file"));
     let dir = tempfile::tempdir().unwrap();
     let mut config = Config::default();
     config.node.name = "test-node".into();
@@ -679,15 +682,87 @@ async fn hello_and_status_expose_connection_method() {
     client.close().await;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while std::time::Instant::now() < deadline {
-        if bridge.server.conn_infos().get(&device_id).is_none() {
+        if !bridge.server.conn_infos().contains_key(&device_id) {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     assert!(
-        bridge.server.conn_infos().get(&device_id).is_none(),
+        !bridge.server.conn_infos().contains_key(&device_id),
         "连接关闭后必须清掉连接方式快照"
     );
 
     bridge.shutdown().await;
+}
+
+/// BUG-002 回归：同一个进程里「启动 → shutdown → 再启动」必须能重新拿到数据目录锁。
+///
+/// `start_expiry_ticker` 曾经克隆 `Arc<Bridge>` 并永不退出，Arc 计数归不了零，
+/// `DirLock` 也就不析构。桌面端「重启服务」正是这条路径：旧 Bridge 被 take 掉并
+/// shutdown 后新 Bridge 撞上旧锁，结果一个桥都不剩，只能重启整个应用。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bridge_can_restart_in_same_process_after_shutdown() {
+    static BACKEND: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    BACKEND.get_or_init(|| std::env::set_var("PI_CARRY_SECRET_BACKEND", "file"));
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = Config::default();
+    config.node.name = "restart-node".into();
+    config.transport.relay_mode = "disabled".into();
+    config.transport.bind_addr = Some("127.0.0.1:0".into());
+    config.sessions.dir = dir.path().join("sessions").display().to_string();
+    let paths = Paths::at(dir.path().join("home"));
+
+    for round in 1..=2 {
+        let bridge = Bridge::start(BridgeOptions {
+            config: config.clone(),
+            paths: paths.clone(),
+            clock: None,
+        })
+        .await
+        .unwrap_or_else(|e| panic!("同进程第 {round} 次启动失败（数据目录锁未释放）: {e}"));
+        bridge.shutdown().await;
+        // 必须真正释放所有 Arc：后台任务若还在跑，锁会跟着 Bridge 一起被吊住。
+        drop(bridge);
+    }
+}
+
+/// BUG-035 回归：`shutdown` 返回后锁必须已释放，与还有多少 `Arc<Bridge>` 克隆存活无关。
+///
+/// 桌面「重启服务」是在 `get_status` 之类的轮询可能持有克隆时发生的；旧实现要等最后一个
+/// Arc 析构才肯放锁，那个窗口里新 Bridge 会撞上「已有一个 pi-carry 进程在使用…」。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shutdown_releases_dir_lock_with_live_clones() {
+    static BACKEND: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    BACKEND.get_or_init(|| std::env::set_var("PI_CARRY_SECRET_BACKEND", "file"));
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = Config::default();
+    config.node.name = "clone-node".into();
+    config.transport.relay_mode = "disabled".into();
+    config.transport.bind_addr = Some("127.0.0.1:0".into());
+    config.sessions.dir = dir.path().join("sessions").display().to_string();
+    let paths = Paths::at(dir.path().join("home"));
+
+    let first = Bridge::start(BridgeOptions {
+        config: config.clone(),
+        paths: paths.clone(),
+        clock: None,
+    })
+    .await
+    .expect("第一次启动失败");
+    // 模拟 status 轮询持有的克隆：shutdown 之后仍然存活。
+    let clone = first.clone();
+    first.shutdown().await;
+
+    let second = Bridge::start(BridgeOptions {
+        config: config.clone(),
+        paths: paths.clone(),
+        clock: None,
+    })
+    .await
+    .expect("shutdown 后仍持有克隆时，新 Bridge 必须能拿到锁");
+    second.shutdown().await;
+
+    drop(second);
+    drop(first);
+    drop(clone);
 }

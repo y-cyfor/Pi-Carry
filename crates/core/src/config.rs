@@ -16,6 +16,7 @@ pub struct Config {
     pub sessions: SessionsConfig,
     pub service: ServiceConfig,
     pub ui: UiConfig,
+    pub updates: UpdatesConfig,
     /// 未知字段原样保留，便于旧版本不丢新配置。
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
@@ -143,6 +144,8 @@ pub struct ServiceConfig {
     pub autostart: bool,
     pub close_to_tray: bool,
     pub log_level: String,
+    /// 开机自启时以 `--minimized` 启动：托盘常驻但不弹窗。
+    pub start_minimized: bool,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -153,6 +156,34 @@ impl Default for ServiceConfig {
             autostart: false,
             close_to_tray: true,
             log_level: "info".into(),
+            start_minimized: true,
+            extra: BTreeMap::new(),
+        }
+    }
+}
+
+/// 自动更新配置。全部字段 `#[serde(default)]`，0.2.0 的 config.toml 可以直接读。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct UpdatesConfig {
+    /// stable | beta
+    pub channel: String,
+    pub check_on_startup: bool,
+    /// 上次成功检查的 RFC3339 时间；空表示从未检查。
+    pub last_checked_at: String,
+    /// 安装失败过的版本：同版本不再自动提示。
+    pub last_failed_version: String,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl Default for UpdatesConfig {
+    fn default() -> Self {
+        Self {
+            channel: "stable".into(),
+            check_on_startup: true,
+            last_checked_at: String::new(),
+            last_failed_version: String::new(),
             extra: BTreeMap::new(),
         }
     }
@@ -180,11 +211,16 @@ impl Default for UiConfig {
 pub struct Secrets {
     #[serde(default = "one")]
     pub version: u32,
-    /// iroh SecretKey 的 32 字节 hex。
+    /// iroh SecretKey 的 32 字节 hex。使用系统钥匙串时该字段在磁盘上为空，
+    /// 进程内存里始终是完整明文（见 `secretstore`）。
+    #[serde(default)]
     pub endpoint_secret: String,
     /// Argon2 PHC 字符串；为空表示未设置密码。
     #[serde(default)]
     pub password_hash: String,
+    /// v2 起为 true：密钥已迁移到系统钥匙串，本文件只剩标记。
+    #[serde(default)]
+    pub migrated: bool,
 }
 
 fn one() -> u32 {
@@ -229,6 +265,39 @@ impl Config {
             return Err(CoreError::Config(format!(
                 "ui.theme 必须是 auto/dark/light，实际 {}",
                 self.ui.theme
+            )));
+        }
+        // 日志级别直接进 EnvFilter：拼错会静默退回 info，用户以为改成功了。
+        if !matches!(
+            self.service.log_level.as_str(),
+            "error" | "warn" | "info" | "debug" | "trace"
+        ) {
+            return Err(CoreError::Config(format!(
+                "service.logLevel 必须是 error/warn/info/debug/trace，实际 {}",
+                self.service.log_level
+            )));
+        }
+        if !matches!(self.updates.channel.as_str(), "stable" | "beta") {
+            return Err(CoreError::Config(format!(
+                "updates.channel 必须是 stable/beta，实际 {}",
+                self.updates.channel
+            )));
+        }
+        // 非空时必须是可解析的 RFC3339：前端只做展示，坏值会让「上次检查」永远显示原文。
+        if !self.updates.last_checked_at.trim().is_empty()
+            && chrono::DateTime::parse_from_rfc3339(self.updates.last_checked_at.trim()).is_err()
+        {
+            return Err(CoreError::Config(format!(
+                "updates.lastCheckedAt 必须是 RFC3339，实际 {}",
+                self.updates.last_checked_at
+            )));
+        }
+        if !self.updates.last_failed_version.trim().is_empty()
+            && semver::Version::parse(self.updates.last_failed_version.trim()).is_err()
+        {
+            return Err(CoreError::Config(format!(
+                "updates.lastFailedVersion 必须是语义化版本，实际 {}",
+                self.updates.last_failed_version
             )));
         }
         if self.approvals.timeout_secs < 10 || self.approvals.timeout_secs > 3600 {
@@ -316,18 +385,43 @@ impl Secrets {
             }
             return Ok(secrets);
         }
-        let secrets = Self {
-            version: 1,
-            endpoint_secret: random_secret_hex(),
-            password_hash: String::new(),
-        };
+        let secrets = Self::new_random();
         secrets.save(paths)?;
         Ok(secrets)
     }
 
+    /// 读磁盘上的机密文件；不存在返回 `None`。
+    /// 与 `load_or_create` 的区别：空密钥不补随机值，交给上层判断是「已迁移」还是「文件损坏」。
+    pub fn load_file(paths: &Paths) -> Result<Option<Self>> {
+        let path = paths.secrets();
+        if !path.exists() {
+            return Ok(None);
+        }
+        let text = std::fs::read_to_string(&path)?;
+        Ok(Some(serde_json::from_str(&text)?))
+    }
+
+    pub fn new_random() -> Self {
+        Self {
+            version: 1,
+            endpoint_secret: random_secret_hex(),
+            password_hash: String::new(),
+            migrated: false,
+        }
+    }
+
+    /// 写明文机密文件（文件后端）。钥匙串后端走 `secretstore`，不要调用它。
     pub fn save(&self, paths: &Paths) -> Result<()> {
         let text = serde_json::to_vec_pretty(self)?;
         atomic_write(&paths.secrets(), &text)?;
+        restrict_permissions(&paths.secrets());
+        Ok(())
+    }
+
+    /// 只写迁移标记：`{"version":2,"migrated":true}`，文件里不出现任何密钥。
+    pub fn save_migrated_marker(&self, paths: &Paths) -> Result<()> {
+        let text = b"{\n  \"version\": 2,\n  \"migrated\": true\n}\n";
+        atomic_write(&paths.secrets(), text)?;
         restrict_permissions(&paths.secrets());
         Ok(())
     }
@@ -347,6 +441,12 @@ impl Secrets {
 
     /// 设置访问密码（Argon2id PHC）；传空字符串表示清除。
     pub fn set_password(&mut self, paths: &Paths, password: &str) -> Result<()> {
+        self.set_password_hash(password)?;
+        self.save(paths)
+    }
+
+    /// 只计算 pHC 字符串，不落盘；钥匙串后端由 `secretstore` 负责持久化。
+    pub fn set_password_hash(&mut self, password: &str) -> Result<()> {
         if password.is_empty() {
             self.password_hash.clear();
         } else {
@@ -357,7 +457,7 @@ impl Secrets {
                 .map_err(|e| CoreError::Config(format!("生成密码哈希失败: {e}")))?
                 .to_string();
         }
-        self.save(paths)
+        Ok(())
     }
 }
 
@@ -399,7 +499,7 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn restrict_permissions(path: &Path) {
+pub(crate) fn restrict_permissions(path: &Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -427,7 +527,7 @@ fn restrict_permissions(path: &Path) {
     let _ = path;
 }
 
-fn random_secret_hex() -> String {
+pub(crate) fn random_secret_hex() -> String {
     use rand::RngCore;
     let mut bytes = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut bytes);

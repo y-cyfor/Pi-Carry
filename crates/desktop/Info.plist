@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>LSMinimumSystemVersion</key>
+	<string>11.0</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>pi carry 需要访问本地网络，才能在同一 Wi-Fi 下直接连接你的手机，而不经过中转服务器。</string>
+	<!-- 桌面端深链：macOS 不会像 Windows/Linux 那样由插件写注册项，必须由 bundle 声明 scheme。 -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>dev.picarry.desktop.pair</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>pi-carry</string>
+			</array>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+		</dict>
+	</array>
+</dict>
+</plist>

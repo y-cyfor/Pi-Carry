@@ -16,27 +16,31 @@ import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
+import dev.picarry.app.R
 
 /**
- * pi carry 的双主题色板。
- *
- * 深色是产品原型的主视觉；浅色不是简单反色，而是把同一套“深空 + 电紫”语言
- * 翻译到纸白底上：保留紫/青/玫瑰作为强调色，但压暗亮度以保证白底可读性。
+ * 与 `design/mobile-ui/0.2.0-design.html` 一致的双主题色板。
+ * 深色是主视觉；浅色把同一套紫/青/玫瑰语言压暗到纸白底上。
  */
 @Immutable
 data class CarryPalette(
     val ink: Color,
     val inkElevated: Color,
     val panel: Color,
-    val panelHigh: Color,
+    val surface: Color,
+    val surface2: Color,
+    val surface3: Color,
     val line: Color,
+    val lineStrong: Color,
     val glow: Color,
     val violet: Color,
     val violetSoft: Color,
+    val accentSoft: Color,
     val cyan: Color,
     val rose: Color,
     val amber: Color,
@@ -48,38 +52,46 @@ data class CarryPalette(
 
 internal val DarkPalette = CarryPalette(
     ink = Color(0xFF05050A),
-    inkElevated = Color(0xFF0B0B14),
-    panel = Color(0xFF11111D),
-    panelHigh = Color(0xFF171728),
-    line = Color(0xFF262638),
-    glow = Color(0xFF151230),
+    inkElevated = Color(0xFF090910),
+    panel = Color(0xFF090910),
+    surface = Color(0xFF101019),
+    surface2 = Color(0xFF15151F),
+    surface3 = Color(0xFF1B1B27),
+    line = Color(0x13FFFFFF),
+    lineStrong = Color(0x24FFFFFF),
+    glow = Color(0xFF191632),
     violet = Color(0xFF7C6BFF),
-    violetSoft = Color(0xFFB9AEFF),
+    violetSoft = Color(0xFFA79BFF),
+    accentSoft = Color(0xFFC3BAFF),
     cyan = Color(0xFF45D9D0),
     rose = Color(0xFFFF6B85),
     amber = Color(0xFFFFB86B),
     mint = Color(0xFF5BE7A9),
-    textPrimary = Color(0xFFF2F1FA),
-    textSecondary = Color(0xFF9B99AD),
-    textMuted = Color(0xFF858296),
+    textPrimary = Color(0xFFF2F2F7),
+    textSecondary = Color(0xFFA6A6BC),
+    textMuted = Color(0xFF77778F),
 )
 
 internal val LightPalette = CarryPalette(
-    ink = Color(0xFFF6F5FB),
+    ink = Color(0xFFF1F1F4),
     inkElevated = Color(0xFFFFFFFF),
     panel = Color(0xFFFFFFFF),
-    panelHigh = Color(0xFFF0EEF8),
-    line = Color(0xFFDCD9E8),
-    glow = Color(0xFFE8E2FF),
-    violet = Color(0xFF5B4BE8),
-    violetSoft = Color(0xFF3B2DB5),
-    cyan = Color(0xFF0B7F79),
-    rose = Color(0xFFC73552),
-    amber = Color(0xFF9A5B00),
-    mint = Color(0xFF0A7B52),
-    textPrimary = Color(0xFF1B1826),
-    textSecondary = Color(0xFF5E5A70),
-    textMuted = Color(0xFF6F6B80),
+    surface = Color(0xFFFFFFFF),
+    surface2 = Color(0xFFF4F4F7),
+    surface3 = Color(0xFFECECF2),
+    line = Color(0x1A1A1A2E),
+    lineStrong = Color(0x291A1A2E),
+    glow = Color(0xFFF7DDE3),
+    violet = Color(0xFFC82444),
+    violetSoft = Color(0xFFB01F3C),
+    accentSoft = Color(0xFF9E1D37),
+    cyan = Color(0xFF067873),
+    rose = Color(0xFFC82444),
+    amber = Color(0xFF946200),
+    mint = Color(0xFF0B7A50),
+    textPrimary = Color(0xFF1A1A2E),
+    textSecondary = Color(0xFF51516A),
+    textMuted = Color(0xFF66667C),
 )
 
 private val LocalCarryPalette = staticCompositionLocalOf { DarkPalette }
@@ -94,106 +106,102 @@ private val DarkScheme = darkColorScheme(
     tertiary = DarkPalette.rose,
     background = DarkPalette.ink,
     onBackground = DarkPalette.textPrimary,
-    surface = DarkPalette.panel,
+    surface = DarkPalette.surface,
     onSurface = DarkPalette.textPrimary,
-    surfaceVariant = DarkPalette.panelHigh,
+    surfaceVariant = DarkPalette.surface2,
     onSurfaceVariant = DarkPalette.textSecondary,
-    outline = DarkPalette.line,
+    outline = DarkPalette.lineStrong,
     error = DarkPalette.rose,
-    surfaceDim = Color(0xFF0B0B14),
-    surfaceBright = Color(0xFF24243A),
-    surfaceContainerLowest = Color(0xFF05050A),
+    surfaceDim = DarkPalette.inkElevated,
+    surfaceBright = DarkPalette.surface3,
+    surfaceContainerLowest = DarkPalette.ink,
     surfaceContainerLow = DarkPalette.panel,
-    surfaceContainer = Color(0xFF171728),
-    surfaceContainerHigh = Color(0xFF1D1D30),
-    surfaceContainerHighest = Color(0xFF24243A),
+    surfaceContainer = DarkPalette.surface,
+    surfaceContainerHigh = DarkPalette.surface2,
+    surfaceContainerHighest = DarkPalette.surface3,
 )
 
 private val LightScheme = lightColorScheme(
     primary = LightPalette.violet,
     onPrimary = Color.White,
-    primaryContainer = Color(0xFFE6E1FF),
-    onPrimaryContainer = Color(0xFF241B6B),
+    primaryContainer = Color(0xFFF9DCE1),
+    onPrimaryContainer = Color(0xFF74172A),
     secondary = LightPalette.cyan,
     onSecondary = Color.White,
     tertiary = LightPalette.rose,
     background = LightPalette.ink,
     onBackground = LightPalette.textPrimary,
-    surface = LightPalette.panel,
+    surface = LightPalette.surface,
     onSurface = LightPalette.textPrimary,
-    surfaceVariant = LightPalette.panelHigh,
+    surfaceVariant = LightPalette.surface2,
     onSurfaceVariant = LightPalette.textSecondary,
-    outline = LightPalette.line,
+    outline = LightPalette.lineStrong,
     error = LightPalette.rose,
-    surfaceDim = Color(0xFFE4E1EE),
-    surfaceBright = Color(0xFFFFFFFF),
-    surfaceContainerLowest = Color(0xFFFFFFFF),
-    surfaceContainerLow = Color(0xFFFFFFFF),
-    surfaceContainer = Color(0xFFF6F5FB),
-    surfaceContainerHigh = LightPalette.panelHigh,
-    surfaceContainerHighest = Color(0xFFEAE7F3),
+    surfaceDim = Color(0xFFE4E4EA),
+    surfaceBright = Color.White,
+    surfaceContainerLowest = Color.White,
+    surfaceContainerLow = LightPalette.panel,
+    surfaceContainer = LightPalette.surface2,
+    surfaceContainerHigh = Color(0xFFF0F0F4),
+    surfaceContainerHighest = LightPalette.surface3,
 )
 
-/** 颜色使用 CompositionLocal，主题切换时所有页面自动重组，不需要重建 Activity。 */
-val Ink: Color
-    @Composable @ReadOnlyComposable get() = LocalCarryPalette.current.ink
+val Ink: Color @Composable @ReadOnlyComposable get() = LocalCarryPalette.current.ink
+val InkElevated: Color @Composable @ReadOnlyComposable get() = LocalCarryPalette.current.inkElevated
+val Panel: Color @Composable @ReadOnlyComposable get() = LocalCarryPalette.current.panel
+val PanelHigh: Color @Composable @ReadOnlyComposable get() = LocalCarryPalette.current.surface2
+val Surface2: Color @Composable @ReadOnlyComposable get() = LocalCarryPalette.current.surface2
+val Surface3: Color @Composable @ReadOnlyComposable get() = LocalCarryPalette.current.surface3
+val Line: Color @Composable @ReadOnlyComposable get() = LocalCarryPalette.current.line
+val LineStrong: Color @Composable @ReadOnlyComposable get() = LocalCarryPalette.current.lineStrong
+val Violet: Color @Composable @ReadOnlyComposable get() = LocalCarryPalette.current.violet
+val VioletSoft: Color @Composable @ReadOnlyComposable get() = LocalCarryPalette.current.violetSoft
+val AccentSoft: Color @Composable @ReadOnlyComposable get() = LocalCarryPalette.current.accentSoft
+val Cyan: Color @Composable @ReadOnlyComposable get() = LocalCarryPalette.current.cyan
+val Rose: Color @Composable @ReadOnlyComposable get() = LocalCarryPalette.current.rose
+val Amber: Color @Composable @ReadOnlyComposable get() = LocalCarryPalette.current.amber
+val Mint: Color @Composable @ReadOnlyComposable get() = LocalCarryPalette.current.mint
+val TextPrimary: Color @Composable @ReadOnlyComposable get() = LocalCarryPalette.current.textPrimary
+val TextSecondary: Color @Composable @ReadOnlyComposable get() = LocalCarryPalette.current.textSecondary
+val TextMuted: Color @Composable @ReadOnlyComposable get() = LocalCarryPalette.current.textMuted
+val CarryGlow: Color @Composable @ReadOnlyComposable get() = LocalCarryPalette.current.glow
 
-val InkElevated: Color
-    @Composable @ReadOnlyComposable get() = LocalCarryPalette.current.inkElevated
+val SpaceGrotesk = FontFamily(
+    Font(R.font.space_grotesk_400, FontWeight.Normal),
+    Font(R.font.space_grotesk_500, FontWeight.Medium),
+    Font(R.font.space_grotesk_600, FontWeight.SemiBold),
+    Font(R.font.space_grotesk_700, FontWeight.Bold),
+)
 
-val Panel: Color
-    @Composable @ReadOnlyComposable get() = LocalCarryPalette.current.panel
+val Inter = FontFamily(
+    Font(R.font.inter_400, FontWeight.Normal),
+    Font(R.font.inter_500, FontWeight.Medium),
+    Font(R.font.inter_600, FontWeight.SemiBold),
+    Font(R.font.inter_700, FontWeight.Bold),
+)
 
-val PanelHigh: Color
-    @Composable @ReadOnlyComposable get() = LocalCarryPalette.current.panelHigh
-
-val Line: Color
-    @Composable @ReadOnlyComposable get() = LocalCarryPalette.current.line
-
-val Violet: Color
-    @Composable @ReadOnlyComposable get() = LocalCarryPalette.current.violet
-
-val VioletSoft: Color
-    @Composable @ReadOnlyComposable get() = LocalCarryPalette.current.violetSoft
-
-val Cyan: Color
-    @Composable @ReadOnlyComposable get() = LocalCarryPalette.current.cyan
-
-val Rose: Color
-    @Composable @ReadOnlyComposable get() = LocalCarryPalette.current.rose
-
-val Amber: Color
-    @Composable @ReadOnlyComposable get() = LocalCarryPalette.current.amber
-
-val Mint: Color
-    @Composable @ReadOnlyComposable get() = LocalCarryPalette.current.mint
-
-val TextPrimary: Color
-    @Composable @ReadOnlyComposable get() = LocalCarryPalette.current.textPrimary
-
-val TextSecondary: Color
-    @Composable @ReadOnlyComposable get() = LocalCarryPalette.current.textSecondary
-
-val TextMuted: Color
-    @Composable @ReadOnlyComposable get() = LocalCarryPalette.current.textMuted
-
-val CarryGlow: Color
-    @Composable @ReadOnlyComposable get() = LocalCarryPalette.current.glow
+val JetBrainsMono = FontFamily(
+    Font(R.font.jetbrains_mono_400, FontWeight.Normal),
+    Font(R.font.jetbrains_mono_500, FontWeight.Medium),
+    Font(R.font.jetbrains_mono_600, FontWeight.SemiBold),
+)
 
 val CarryTypography = Typography(
-    displayLarge = TextStyle(fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.SemiBold, fontSize = 34.sp, letterSpacing = (-0.8).sp),
-    headlineLarge = TextStyle(fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.SemiBold, fontSize = 28.sp, letterSpacing = (-0.4).sp),
-    headlineMedium = TextStyle(fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.SemiBold, fontSize = 22.sp, letterSpacing = (-0.2).sp),
-    titleLarge = TextStyle(fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.SemiBold, fontSize = 18.sp),
-    titleMedium = TextStyle(fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.Medium, fontSize = 15.sp),
-    bodyLarge = TextStyle(fontFamily = FontFamily.SansSerif, fontSize = 15.sp, lineHeight = 22.sp),
-    bodyMedium = TextStyle(fontFamily = FontFamily.SansSerif, fontSize = 13.sp, lineHeight = 19.sp),
-    bodySmall = TextStyle(fontFamily = FontFamily.SansSerif, fontSize = 11.sp, lineHeight = 16.sp),
-    labelLarge = TextStyle(fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Medium, fontSize = 12.sp, letterSpacing = 0.4.sp),
-    labelMedium = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 10.sp, letterSpacing = 0.6.sp),
-    // 9sp 低于可读下限（TalkBack/低视力用户实际读不清），提到 10sp；
-    // 再大会撞上 360dp 宽度下密集 chip 的换行阈值，这是当前排版的可行上限。
-    labelSmall = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 10.sp, letterSpacing = 0.6.sp),
+    displayLarge = TextStyle(fontFamily = SpaceGrotesk, fontWeight = FontWeight.SemiBold, fontSize = 34.sp, lineHeight = 40.sp, letterSpacing = (-1.1).sp),
+    headlineLarge = TextStyle(fontFamily = SpaceGrotesk, fontWeight = FontWeight.SemiBold, fontSize = 25.sp, lineHeight = 30.sp, letterSpacing = (-0.88).sp),
+    headlineMedium = TextStyle(fontFamily = SpaceGrotesk, fontWeight = FontWeight.SemiBold, fontSize = 19.sp, lineHeight = 24.sp, letterSpacing = (-0.4).sp),
+    headlineSmall = TextStyle(fontFamily = SpaceGrotesk, fontWeight = FontWeight.SemiBold, fontSize = 17.sp, lineHeight = 22.sp, letterSpacing = (-0.2).sp),
+    titleLarge = TextStyle(fontFamily = SpaceGrotesk, fontWeight = FontWeight.SemiBold, fontSize = 17.sp, lineHeight = 22.sp),
+    titleMedium = TextStyle(fontFamily = SpaceGrotesk, fontWeight = FontWeight.Medium, fontSize = 15.5.sp, lineHeight = 21.sp),
+    titleSmall = TextStyle(fontFamily = Inter, fontWeight = FontWeight.SemiBold, fontSize = 13.5.sp, lineHeight = 19.sp),
+    bodyLarge = TextStyle(fontFamily = Inter, fontWeight = FontWeight.Normal, fontSize = 13.5.sp, lineHeight = 23.2.sp),
+    bodyMedium = TextStyle(fontFamily = Inter, fontWeight = FontWeight.Normal, fontSize = 13.sp, lineHeight = 21.sp),
+    bodySmall = TextStyle(fontFamily = Inter, fontWeight = FontWeight.Normal, fontSize = 11.5.sp, lineHeight = 17.sp),
+    // 小标签字号下限 11sp：U-11 记的门槛就是 11sp，本轮重构把 labelSmall 降到 9sp、
+    // labelMedium 降到 9.5sp，低于可访问性下限（BUG-020）。行高同步上调，避免裁字。
+    labelLarge = TextStyle(fontFamily = Inter, fontWeight = FontWeight.Medium, fontSize = 11.sp, lineHeight = 15.sp),
+    labelMedium = TextStyle(fontFamily = JetBrainsMono, fontWeight = FontWeight.Normal, fontSize = 11.sp, lineHeight = 15.sp, letterSpacing = 0.2.sp),
+    labelSmall = TextStyle(fontFamily = JetBrainsMono, fontWeight = FontWeight.Normal, fontSize = 11.sp, lineHeight = 15.sp, letterSpacing = 0.3.sp),
 )
 
 @Composable
@@ -204,7 +212,6 @@ fun PiCarryTheme(
     val view = LocalView.current
     val activity = view.context.findActivity()
 
-    // 状态栏/导航栏图标跟随主题：深色底用浅图标，浅色底用深图标。
     SideEffect {
         val window = activity?.window ?: return@SideEffect
         val controller = WindowCompat.getInsetsController(window, view)

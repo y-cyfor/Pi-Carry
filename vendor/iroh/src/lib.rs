@@ -262,6 +262,9 @@
 //! [`Connection::accept_bi`]: crate::endpoint::Connection::accept_bi
 
 #![recursion_limit = "256"]
+// 本仓库只做依赖快照，不跟随上游升级；其依赖的 noq/iroh-relay 已标记弃用，
+// 在 `cargo clippy -D warnings` 下发声会阻断我们的门禁，这里仅静音、不改行为。
+#![allow(deprecated)]
 #![deny(missing_docs, rustdoc::broken_intra_doc_links, unreachable_pub)]
 #![cfg_attr(wasm_browser, allow(unused))]
 #![cfg_attr(not(test), deny(clippy::unwrap_used))]

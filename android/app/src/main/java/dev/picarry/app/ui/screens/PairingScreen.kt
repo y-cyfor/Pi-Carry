@@ -1,6 +1,7 @@
 package dev.picarry.app.ui.screens
 
 import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -13,9 +14,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -27,13 +30,10 @@ import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.ContentPaste
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.QrCodeScanner
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -44,35 +44,42 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
-import androidx.activity.compose.rememberLauncherForActivityResult
 import dev.picarry.app.data.CarryRepository
 import dev.picarry.app.data.LinkState
 import dev.picarry.app.data.Node
+import dev.picarry.app.ui.components.CarryActionButton
 import dev.picarry.app.ui.components.CarryCard
+import dev.picarry.app.ui.components.CarryIconButton
 import dev.picarry.app.ui.components.MonoLabel
 import dev.picarry.app.ui.components.NullableStringSaver
 import dev.picarry.app.ui.theme.Amber
 import dev.picarry.app.ui.theme.Cyan
 import dev.picarry.app.ui.theme.Line
-import dev.picarry.app.ui.theme.Mint
+import dev.picarry.app.ui.theme.LineStrong
 import dev.picarry.app.ui.theme.Panel
 import dev.picarry.app.ui.theme.Rose
+import dev.picarry.app.ui.theme.Surface2
 import dev.picarry.app.ui.theme.TextMuted
 import dev.picarry.app.ui.theme.TextPrimary
 import dev.picarry.app.ui.theme.TextSecondary
 import dev.picarry.app.ui.theme.Violet
+import dev.picarry.app.ui.theme.VioletSoft
 import kotlinx.coroutines.delay
 
 internal data class PairInfo(
@@ -137,87 +144,147 @@ fun PairingScreen(repo: CarryRepository, initialUri: String, onBack: () -> Unit,
             .fillMaxSize()
             .imePadding()
             .statusBarsPadding()
+            .navigationBarsPadding()
             .verticalScroll(rememberScrollState())
-            .padding(horizontal = 20.dp, vertical = 6.dp),
+            .padding(horizontal = 18.dp),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(40.dp).clip(CircleShape).clickable(onClick = onBack), contentAlignment = Alignment.Center) {
-                Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回", tint = TextSecondary)
-            }
-            Spacer(Modifier.weight(1f))
-            MonoLabel("配对 · PAIRING")
-            Spacer(Modifier.weight(1f))
-            Spacer(Modifier.size(40.dp))
-        }
-        Spacer(Modifier.height(16.dp))
-        Text("配对新节点", style = MaterialTheme.typography.headlineLarge, color = TextPrimary)
-        Spacer(Modifier.height(6.dp))
-        Text("在电脑上运行 pi-carry，二维码 10 分钟内有效。", style = MaterialTheme.typography.bodyMedium, color = TextMuted)
-        Spacer(Modifier.height(20.dp))
-
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .height(214.dp)
-                .clip(RoundedCornerShape(24.dp))
-                .background(Panel.copy(alpha = 0.8f))
-                .border(0.7.dp, Violet.copy(alpha = 0.35f), RoundedCornerShape(24.dp))
-                .clickable {
-                    scanner.launch(ScanOptions().setDesiredBarcodeFormats(ScanOptions.QR_CODE).setPrompt("扫描 pi-carry 配对二维码").setBeepEnabled(false).setOrientationLocked(false))
-                },
-            contentAlignment = Alignment.Center,
+        Spacer(Modifier.height(26.dp))
+        Row(
+            Modifier.fillMaxWidth().height(54.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            CarryIconButton(Icons.AutoMirrored.Outlined.ArrowBack, "返回", onBack, size = 34)
+            Spacer(Modifier.width(10.dp))
+            Text(
+                "配对新节点",
+                style = MaterialTheme.typography.headlineMedium,
+                color = TextPrimary,
+                modifier = Modifier.weight(1f),
+            )
+            CarryIconButton(Icons.Outlined.QrCodeScanner, "扫描二维码", onClick = {
+                scanner.launch(
+                    ScanOptions().setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                        .setPrompt("扫描 pi-carry 配对二维码")
+                        .setBeepEnabled(false)
+                        .setOrientationLocked(false)
+                )
+            }, size = 34)
+        }
+        Spacer(Modifier.height(10.dp))
+        Text(
+            // 「二维码 10 分钟内有效」只在二维码区下方出现一次：同一信息重复两遍
+            // 会让用户以为是两个不同的有效期（BUG-017）。
+            "在电脑上运行 pi-carry pair，然后扫描二维码",
+            style = MaterialTheme.typography.bodySmall,
+            color = TextMuted,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Spacer(Modifier.height(18.dp))
+
+        Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+            Box(
+                Modifier
+                    .size(198.dp)
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(Color.White)
+                    .clickable {
+                        scanner.launch(
+                            ScanOptions().setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                                .setPrompt("扫描 pi-carry 配对二维码")
+                                .setBeepEnabled(false)
+                                .setOrientationLocked(false)
+                        )
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
+                // 设计稿的白色 QR 区在这里承担“取景/扫码”入口，而不是展示一个假二维码。
+                // 内框必须给底部的「点击打开相机」留出空间，否则边框会横穿文字（BUG-009）。
                 Box(
-                    Modifier.size(78.dp).clip(RoundedCornerShape(20.dp)).background(Violet.copy(alpha = 0.12f)),
+                    Modifier.size(140.dp).border(1.dp, Color(0xFFDADAE3), RoundedCornerShape(14.dp)),
                     contentAlignment = Alignment.Center,
-                ) { Icon(Icons.Outlined.QrCodeScanner, "扫描二维码", tint = Violet, modifier = Modifier.size(40.dp)) }
-                Spacer(Modifier.height(12.dp))
-                Text("扫描电脑上的二维码", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
-                Spacer(Modifier.height(4.dp))
-                Text("点击打开相机", style = MaterialTheme.typography.bodySmall, color = TextMuted)
+                ) {
+                    Icon(Icons.Outlined.QrCodeScanner, null, tint = Color(0xFF1A1A2E), modifier = Modifier.size(62.dp))
+                }
+                Column(Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    MonoLabel("点击打开相机", color = Color(0xFF51516A))
+                }
             }
+            Spacer(Modifier.height(12.dp))
+            Text(
+                if (parsed != null) "已读取二维码链接" else "二维码 10 分钟内有效",
+                style = MaterialTheme.typography.labelLarge,
+                color = if (parsed != null) Cyan else TextMuted,
+            )
+            // 粘贴入口只保留这一个：之前底部还有一个「从剪贴板读取链接」，
+            // 同一动作两个入口、且「或手动输入 6 位码」旁边放的是粘贴动作（BUG-017）。
+            Spacer(Modifier.height(8.dp))
+            Row(
+                Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable {
+                        val text = clipboard.getText()?.text.orEmpty()
+                        val info = parsePairUri(text)
+                        if (info == null) {
+                            error = "剪贴板不是 pi-carry 配对链接"
+                        } else {
+                            uriText = text
+                            endpoint = info.endpointId
+                            error = null
+                        }
+                    }
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+            ) {
+                Icon(Icons.Outlined.ContentPaste, null, tint = Cyan, modifier = Modifier.size(13.dp))
+                Text("从剪贴板粘贴链接", style = MaterialTheme.typography.labelMedium, color = Cyan)
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            PairStep(1, "扫描")
+            Spacer(Modifier.width(16.dp))
+            PairStep(2, "校验指纹")
+            Spacer(Modifier.width(16.dp))
+            PairStep(3, "命名节点")
         }
 
         Spacer(Modifier.height(22.dp))
-        MonoLabel("或手动输入")
-        Spacer(Modifier.height(8.dp))
-        Field(endpoint, { endpoint = it.trim().lowercase(); uriText = "" }, "Endpoint ID（64 位十六进制）")
+        // 这一行只是 6 位码的标题：粘贴链接的动作已挪到二维码区下方，
+        // 标签与按钮语义不再错位（BUG-017）。
+        MonoLabel("或手动输入 6 位码", color = TextMuted)
+        Spacer(Modifier.height(7.dp))
+        CarryCard(Modifier.fillMaxWidth(), padding = 12.dp) {
+            Column {
+                MonoLabel("ENDPOINT ID", color = TextMuted)
+                Spacer(Modifier.height(4.dp))
+                BasicTextField(
+                    value = endpoint,
+                    onValueChange = { endpoint = it.trim().lowercase(); uriText = "" },
+                    singleLine = true,
+                    textStyle = TextStyle(color = TextPrimary, fontSize = 11.sp, fontFamily = FontFamily.Monospace, letterSpacing = 0.2.sp),
+                    cursorBrush = SolidColor(Violet),
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                    decorationBox = { inner ->
+                        if (endpoint.isBlank()) Text("64 位十六进制公钥", style = MaterialTheme.typography.labelLarge, color = TextMuted)
+                        inner()
+                    },
+                )
+            }
+        }
         Spacer(Modifier.height(9.dp))
-        Field(code, { code = it.filter(Char::isDigit).take(6) }, "6 位配对码", KeyboardType.NumberPassword, monospace = true, big = true)
-        Spacer(Modifier.height(6.dp))
+        CodeBoxes(code) { code = it.filter(Char::isDigit).take(6) }
+        Spacer(Modifier.height(7.dp))
         Text(
             "扫码会自动使用二维码里的一次性令牌；6 位码是没有摄像头时的备用方式。",
-            style = MaterialTheme.typography.bodySmall,
+            style = MaterialTheme.typography.labelSmall,
             color = TextMuted,
         )
-        Spacer(Modifier.height(9.dp))
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(13.dp))
-                .background(Panel.copy(alpha = 0.55f))
-                .border(0.7.dp, Line, RoundedCornerShape(13.dp))
-                .clickable {
-                    val text = clipboard.getText()?.text.orEmpty()
-                    val info = parsePairUri(text)
-                    if (info == null) {
-                        error = "剪贴板不是 pi-carry 配对链接"
-                    } else {
-                        uriText = text
-                        endpoint = info.endpointId
-                        error = null
-                    }
-                }
-                .padding(horizontal = 12.dp, vertical = 11.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Icon(Icons.Outlined.ContentPaste, "粘贴配对链接", tint = Cyan, modifier = Modifier.size(17.dp))
-            Text("从剪贴板粘贴配对链接", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
-            Spacer(Modifier.weight(1f))
-            MonoLabel("paste")
-        }
 
         if (uriText.isNotBlank() && parsed == null) {
             Spacer(Modifier.height(8.dp))
@@ -228,34 +295,35 @@ fun PairingScreen(repo: CarryRepository, initialUri: String, onBack: () -> Unit,
             Text(error!!, style = MaterialTheme.typography.bodySmall, color = Rose)
         }
 
-        Spacer(Modifier.height(18.dp))
+        Spacer(Modifier.height(16.dp))
         Row(
             Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(13.dp))
+                .clip(RoundedCornerShape(11.dp))
                 .background(Cyan.copy(alpha = 0.06f))
-                .border(0.7.dp, Cyan.copy(alpha = 0.18f), RoundedCornerShape(13.dp))
-                .padding(12.dp),
+                .border(0.7.dp, Cyan.copy(alpha = 0.18f), RoundedCornerShape(11.dp))
+                .padding(11.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Icon(Icons.Outlined.Lock, null, tint = Cyan, modifier = Modifier.size(15.dp))
+            Icon(Icons.Outlined.Lock, null, tint = Cyan, modifier = Modifier.size(14.dp))
             Text(
-                "二维码只包含节点公钥与一次性配对令牌；配对后手机保存节点公钥，所有流量走 iroh 加密通道。",
-                style = MaterialTheme.typography.bodySmall,
+                "二维码只包含节点公钥与一次性配对令牌；配对后所有流量走 iroh 加密通道。",
+                style = MaterialTheme.typography.labelSmall,
                 color = TextSecondary,
             )
         }
 
-        Spacer(Modifier.height(18.dp))
-        Button(
+        Spacer(Modifier.height(16.dp))
+        CarryActionButton(
+            if (waitingId != null) "正在建立加密连接…" else "完成配对",
             onClick = {
                 val info = parsed
                 val id = info?.endpointId ?: endpoint.trim()
-                if (id.isBlank()) { error = "请扫描二维码或输入 Endpoint ID"; return@Button }
-                if (!ENDPOINT_ID.matches(id)) { error = "Endpoint ID 必须是 64 位十六进制"; return@Button }
+                if (id.isBlank()) { error = "请扫描二维码或输入 Endpoint ID"; return@CarryActionButton }
+                if (!ENDPOINT_ID.matches(id)) { error = "Endpoint ID 必须是 64 位十六进制"; return@CarryActionButton }
                 val token = info?.token.orEmpty()
                 val c = code.trim()
-                if (token.isBlank() && c.length != 6) { error = "请输入 6 位配对码"; return@Button }
+                if (token.isBlank() && c.length != 6) { error = "请输入 6 位配对码"; return@CarryActionButton }
                 error = null
                 val node = Node(
                     id = id,
@@ -272,67 +340,102 @@ fun PairingScreen(repo: CarryRepository, initialUri: String, onBack: () -> Unit,
                 repo.addNode(node)
                 waitingId = id
             },
-            modifier = Modifier.fillMaxWidth().height(52.dp),
-            shape = RoundedCornerShape(15.dp),
-            colors = ButtonDefaults.buttonColors(containerColor = Violet, contentColor = Color.White),
+            modifier = Modifier.fillMaxWidth(),
             enabled = waitingId == null,
-        ) {
-            if (waitingId != null) {
-                CircularProgressIndicator(Modifier.size(18.dp), color = Color.White, strokeWidth = 2.dp)
-                Spacer(Modifier.size(10.dp))
-                Text("正在建立加密连接…", style = MaterialTheme.typography.titleMedium)
-            } else {
-                Text("完成配对", style = MaterialTheme.typography.titleMedium)
-            }
-        }
+            height = 46.dp,
+        )
         if (waitingId != null) {
             Spacer(Modifier.height(4.dp))
-            TextButton(
-                onClick = {
-                    val id = waitingId
-                    waitingId = null
-                    error = null
-                    // 取消后停掉这次连接尝试，否则后台继续连上而界面已经放弃。
-                    if (id != null && link[id] != LinkState.Online) repo.disconnect(id)
-                },
-                modifier = Modifier.fillMaxWidth(),
-            ) { Text("取消等待", style = MaterialTheme.typography.bodyMedium, color = TextSecondary) }
+            Row(Modifier.fillMaxWidth().height(40.dp), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(Modifier.size(13.dp), color = Violet, strokeWidth = 1.5.dp)
+                Spacer(Modifier.width(7.dp))
+                Text("等待节点确认…", style = MaterialTheme.typography.labelMedium, color = TextMuted)
+                Spacer(Modifier.width(14.dp))
+                Text(
+                    "取消",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = Rose,
+                    modifier = Modifier.clickable {
+                        val id = waitingId
+                        waitingId = null
+                        error = null
+                        // 取消后停掉这次连接尝试，否则后台继续连上而界面已经放弃。
+                        if (id != null && link[id] != LinkState.Online) repo.disconnect(id)
+                    }.padding(horizontal = 8.dp),
+                )
+            }
         }
-        Spacer(Modifier.height(30.dp))
+        Spacer(Modifier.height(28.dp))
     }
 }
 
 @Composable
-private fun Field(
-    value: String,
-    onChange: (String) -> Unit,
-    placeholder: String,
-    keyboard: KeyboardType = KeyboardType.Text,
-    monospace: Boolean = false,
-    big: Boolean = false,
-) {
-    Box(
-        Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(13.dp))
-            .background(Panel.copy(alpha = 0.72f))
-            .border(0.7.dp, Line, RoundedCornerShape(13.dp))
-            .padding(horizontal = 13.dp, vertical = if (big) 13.dp else 11.dp),
-    ) {
-        if (value.isBlank()) Text(placeholder, style = MaterialTheme.typography.bodySmall, color = TextMuted)
+private fun PairStep(number: Int, label: String) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(
+            Modifier.size(17.dp).clip(CircleShape).background(Violet.copy(alpha = 0.16f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                number.toString(),
+                style = MaterialTheme.typography.labelSmall,
+                color = VioletSoft,
+            )
+        }
+        Spacer(Modifier.width(5.dp))
+        Text(label, style = MaterialTheme.typography.labelSmall, color = TextMuted)
+    }
+}
+
+@Composable
+private fun CodeBoxes(code: String, onChange: (String) -> Unit) {
+    val focusRequester = remember { FocusRequester() }
+    var focused by remember { mutableStateOf(false) }
+    Box(Modifier.fillMaxWidth()) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(11.dp))
+                .clickable { focusRequester.requestFocus() },
+            horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
+        ) {
+            repeat(6) { index ->
+                val char = code.getOrNull(index)?.toString().orEmpty()
+                val active = focused && (index == code.length.coerceAtMost(5))
+                Box(
+                    Modifier
+                        .width(43.dp)
+                        .height(54.dp)
+                        .clip(RoundedCornerShape(11.dp))
+                        .background(if (active) Violet.copy(alpha = 0.08f) else Surface2.copy(alpha = 0.55f))
+                        .border(
+                            if (active) 1.2.dp else 0.8.dp,
+                            if (active) Violet else LineStrong,
+                            RoundedCornerShape(11.dp),
+                        ),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        char,
+                        style = MaterialTheme.typography.headlineSmall.copy(fontFamily = FontFamily.Monospace),
+                        color = if (char.isBlank()) TextMuted else VioletSoft,
+                        textAlign = TextAlign.Center,
+                    )
+                }
+            }
+        }
         BasicTextField(
-            value = value,
+            value = code,
             onValueChange = onChange,
             singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = keyboard),
-            textStyle = TextStyle(
-                color = TextPrimary,
-                fontSize = if (big) 22.sp else 13.sp,
-                fontFamily = if (monospace) FontFamily.Monospace else FontFamily.SansSerif,
-                letterSpacing = if (big) 6.sp else 0.sp,
-            ),
-            cursorBrush = SolidColor(Violet),
-            modifier = Modifier.fillMaxWidth(),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+            textStyle = TextStyle(color = Color.Transparent, fontSize = 1.sp),
+            cursorBrush = SolidColor(Color.Transparent),
+            modifier = Modifier
+                .matchParentSize()
+                .alpha(0.01f)
+                .focusRequester(focusRequester)
+                .onFocusChanged { focused = it.isFocused },
         )
     }
 }
@@ -348,6 +451,9 @@ internal fun parsePairUri(raw: String): PairInfo? {
         if (uri.scheme != "pi-carry" && uri.scheme != "picarry") return null
         // 深链只允许 pair 这个 host：其它 host 的链接不是配对链接。
         if (uri.host != "pair") return null
+        // 与桌面端 pair_uri::parse 一致：只接受 v=1。忽略 v 会让未来协议的字段
+        // 被旧客户端按旧语义静默解析（BUG-026）。
+        if (uri.getQueryParameter("v") != "1") return null
         val endpoint = (uri.getQueryParameter("endpoint") ?: uri.getQueryParameter("id") ?: return null).lowercase()
         if (!ENDPOINT_ID.matches(endpoint)) return null
         PairInfo(

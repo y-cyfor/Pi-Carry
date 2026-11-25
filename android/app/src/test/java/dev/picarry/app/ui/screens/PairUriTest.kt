@@ -46,4 +46,23 @@ class PairUriTest {
         assertNotNull(info)
         assertEquals("工作站 A", info!!.name)
     }
+
+    /** BUG-026：版本字段必须校验，否则未来协议的链接会被旧客户端按旧语义静默接受。 */
+    @Test
+    fun rejectsUnsupportedVersion() {
+        assertNull(parsePairUri("pi-carry://pair?v=2&endpoint=$endpoint&token=abc"))
+        assertNull(parsePairUri("pi-carry://pair?endpoint=$endpoint&token=abc"))
+    }
+
+    /** 生成侧会写 `relay=n0` 和多条 `addr`：解析必须照单全收（BUG-001 的客户端一侧）。 */
+    @Test
+    fun acceptsRelayModeAndMultipleAddrs() {
+        val info = parsePairUri(
+            "pi-carry://pair?v=1&endpoint=$endpoint&token=abc&relay=n0" +
+                "&addr=127.0.0.1%3A55277&addr=192.168.1.9%3A55277&addr=%5B%3A%3A1%5D%3A55279",
+        )
+        assertNotNull(info)
+        assertEquals("n0", info!!.relay)
+        assertEquals(listOf("127.0.0.1:55277", "192.168.1.9:55277", "[::1]:55279"), info.addrs)
+    }
 }

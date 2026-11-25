@@ -32,8 +32,8 @@ android {
         applicationId = "dev.picarry.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 6
-        versionName = "0.2.0"
+        versionCode = 7
+        versionName = "0.3.0"
     }
     splits {
         abi {
@@ -54,6 +54,21 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     buildFeatures { compose = true }
+    testOptions {
+        unitTests.isIncludeAndroidResources = true
+        // Robolectric 首次运行要联网下载 android-all-instrumented（300+ MB），
+        // 受限环境（$HOME 不可写 / 无外网）会卡在下载锁上。把参数暴露成 Gradle 属性，
+        // 离线环境按文档传 -Probolectric.offline=true -Probolectric.dependency.dir=<dir> 即可（BUG-014）。
+        unitTests.all { test ->
+            test.systemProperty(
+                "robolectric.offline",
+                providers.gradleProperty("robolectric.offline").getOrElse("false"),
+            )
+            providers.gradleProperty("robolectric.dependency.dir").orNull?.let { dir ->
+                test.systemProperty("robolectric.dependency.dir", dir)
+            }
+        }
+    }
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
     }
@@ -90,4 +105,6 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.14.1")
     testImplementation("androidx.test:core:1.6.1")
+    testImplementation("androidx.compose.ui:ui-test-junit4")
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
 }

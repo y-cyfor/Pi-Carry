@@ -2,6 +2,8 @@ package dev.picarry.app
 
 import android.Manifest
 import android.content.Intent
+import android.content.res.Configuration
+import android.graphics.drawable.ColorDrawable
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -12,22 +14,24 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Forum
-import androidx.compose.material.icons.outlined.Hub
+import androidx.compose.material.icons.outlined.ChatBubbleOutline
+import androidx.compose.material.icons.outlined.Dns
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -42,9 +46,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavHostController
 import androidx.navigation.NavType
@@ -55,17 +61,17 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import dev.picarry.app.net.CarryService
 import dev.picarry.app.ui.components.CarryBackground
+import dev.picarry.app.ui.components.pressClickable
 import dev.picarry.app.ui.screens.ChatScreen
 import dev.picarry.app.ui.screens.NodesScreen
 import dev.picarry.app.ui.screens.PairingScreen
 import dev.picarry.app.ui.screens.SessionsScreen
 import dev.picarry.app.ui.screens.SettingsScreen
-import dev.picarry.app.ui.theme.Ink
 import dev.picarry.app.ui.theme.Line
 import dev.picarry.app.ui.theme.PiCarryTheme
 import dev.picarry.app.ui.theme.TextMuted
-import dev.picarry.app.ui.theme.TextPrimary
 import dev.picarry.app.ui.theme.Violet
+import dev.picarry.app.ui.theme.VioletSoft
 
 private const val KEY_PAIR_CONSUMED = "pair_consumed"
 
@@ -76,8 +82,24 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // 透明系统栏；图标明暗由 PiCarryTheme 根据“自动/黑色/白色”设置动态切换。
+        // 先建立 edge-to-edge 系统栏样式，再按用户主题覆盖图标明暗：
+        // 反过来的话 enableEdgeToEdge() 会按资源夜间模式把手动设置覆盖掉，强制主题下
+        // 首帧出现「浅底 + 浅色图标」（BUG-027 reopened）。
         enableEdgeToEdge()
+        // 首帧底色必须跟随用户选的「自动/黑色/白色」，而不是资源限定符里的系统夜间模式：
+        // 系统深色 + 应用内选白色（或反之）时，冷启动会先闪一帧相反底色（BUG-027）。
+        val startupRepo = (application as PiCarryApp).repo
+        val startupDark = when (startupRepo.themeMode.value) {
+            "dark" -> true
+            "light" -> false
+            else -> (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+                Configuration.UI_MODE_NIGHT_YES
+        }
+        window.setBackgroundDrawable(ColorDrawable(if (startupDark) 0xFF05050A.toInt() else 0xFFF1F1F4.toInt()))
+        WindowCompat.getInsetsController(window, window.decorView).apply {
+            isAppearanceLightStatusBars = !startupDark
+            isAppearanceLightNavigationBars = !startupDark
+        }
         if (Build.VERSION.SDK_INT >= 33) {
             notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
@@ -251,25 +273,38 @@ fun PiCarryAppRoot(
 
 @Composable
 private fun BottomBar(nav: NavHostController, route: String) {
-    Column {
-        Box(Modifier.fillMaxWidth().height(0.7.dp).background(Line.copy(alpha = 0.8f)))
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .background(Ink.copy(alpha = 0.96f))
-                .navigationBarsPadding()
-                .height(64.dp),
-            horizontalArrangement = Arrangement.SpaceEvenly,
-            verticalAlignment = Alignment.CenterVertically,
+    val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+    val safeBottom = maxOf(navBottom, 22.dp)
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .height(64.dp + safeBottom)
+            .background(
+                Brush.verticalGradient(
+                    listOf(androidx.compose.ui.graphics.Color.Transparent, dev.picarry.app.ui.theme.Ink.copy(alpha = 0.94f))
+                )
+            )
+            .padding(bottom = safeBottom),
+    ) {
+        Box(
+            Modifier.fillMaxSize(),
+            contentAlignment = Alignment.TopCenter,
         ) {
-            BarItem("节点", Icons.Outlined.Hub, route == Routes.Nodes) {
-                nav.switchTab(Routes.Nodes)
-            }
-            BarItem("会话", Icons.Outlined.Forum, route == Routes.Sessions || route == Routes.SessionsByNode) {
-                nav.switchTab(Routes.Sessions)
-            }
-            BarItem("设置", Icons.Outlined.Settings, route == Routes.Settings) {
-                nav.switchTab(Routes.Settings)
+            Box(Modifier.fillMaxWidth().height(0.7.dp).background(Line.copy(alpha = 0.7f)))
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 26.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                BarItem(Modifier.weight(1f), "节点", Icons.Outlined.Dns, route == Routes.Nodes) {
+                    nav.switchTab(Routes.Nodes)
+                }
+                BarItem(Modifier.weight(1f), "会话", Icons.Outlined.ChatBubbleOutline, route == Routes.Sessions || route == Routes.SessionsByNode) {
+                    nav.switchTab(Routes.Sessions)
+                }
+                BarItem(Modifier.weight(1f), "设置", Icons.Outlined.Settings, route == Routes.Settings) {
+                    nav.switchTab(Routes.Settings)
+                }
             }
         }
     }
@@ -289,28 +324,35 @@ private fun NavHostController.switchTab(route: String) {
 }
 
 @Composable
-private fun BarItem(label: String, icon: ImageVector, active: Boolean, onClick: () -> Unit) {
+private fun BarItem(
+    modifier: Modifier,
+    label: String,
+    icon: ImageVector,
+    active: Boolean,
+    onClick: () -> Unit,
+) {
     Column(
-        Modifier
-            .clip(CircleShape)
-            .background(if (active) Violet.copy(alpha = 0.10f) else Color.Transparent)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 18.dp, vertical = 6.dp),
+        modifier
+            .clip(RoundedCornerShape(12.dp))
+            .pressClickable(onClick = onClick, scale = 0.94f)
+            .padding(vertical = 2.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Icon(icon, label, tint = if (active) Violet else TextMuted, modifier = Modifier.size(21.dp))
+        Box(
+            Modifier
+                .size(width = 44.dp, height = 28.dp)
+                .clip(RoundedCornerShape(9.dp))
+                .background(if (active) Violet.copy(alpha = 0.14f) else Color.Transparent)
+                .then(if (active) Modifier.border(0.7.dp, Violet.copy(alpha = 0.16f), RoundedCornerShape(9.dp)) else Modifier),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(icon, label, tint = if (active) VioletSoft else TextMuted, modifier = Modifier.size(18.dp))
+        }
         Spacer(Modifier.height(3.dp))
         Text(
             label,
             style = MaterialTheme.typography.labelSmall,
-            color = if (active) TextPrimary else TextMuted,
-        )
-        Box(
-            Modifier
-                .padding(top = 3.dp)
-                .size(3.dp)
-                .clip(CircleShape)
-                .background(if (active) Violet else Color.Transparent)
+            color = if (active) VioletSoft else TextMuted,
         )
     }
 }

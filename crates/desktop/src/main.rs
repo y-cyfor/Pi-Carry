@@ -16,8 +16,14 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WindowEvent};
 use tracing_subscriber::fmt::time::ChronoLocal;
 
+mod deeplink;
+mod selfcheck;
+mod update;
+
 /// desktop.log 超过这个大小就在下次写入前轮转，避免常驻托盘时无限增长。
-const LOG_ROTATE_BYTES: u64 = 5 * 1024 * 1024;
+const LOG_ROTATE_BYTES: u64 = 10 * 1024 * 1024;
+/// 轮转归档保留天数：再久的日志对用户排障没有价值，只会占满磁盘。
+const LOG_RETENTION_DAYS: u64 = 7;
 /// get_logs 只读日志尾部这么多字节：日志可能很大，整文件读入会按文件大小分配内存。
 const LOG_TAIL_BYTES: u64 = 256 * 1024;
 
@@ -42,6 +48,19 @@ struct AppState {
     lifecycle: tokio::sync::Mutex<()>,
     /// 设置读写锁：`update_settings` 是「读—改—写」，两次保存并发会互相覆盖。
     settings: Mutex<()>,
+    /// 最近一次检查到的安装器更新：`install_update` 只装这里的东西，
+    /// 避免前端传入任意下载地址。
+    pending_update: Mutex<Option<tauri_plugin_updater::Update>>,
+    /// 取消更新下载：句柄唤醒 select，标志位覆盖「正在退避等待」的窗口期。
+    update_cancel: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    update_cancelled: AtomicBool,
+    /// 深链预填数据：页面加载完成前先存着，前端用 `get_pending_pair` 取走。
+    pending_pair: Mutex<Option<Value>>,
+    /// 最近一次检查结果：启动检查可能早于页面加载，窗口打开后仍能看到横幅。
+    last_update: Mutex<Option<Value>>,
+    /// 托盘是否创建成功：失败时自检卡提示，且开机自启不再追加 `--minimized`
+    /// （否则窗口永远出不来）。
+    tray_available: AtomicBool,
 }
 
 impl Default for AppState {
@@ -53,6 +72,12 @@ impl Default for AppState {
             restarting: AtomicBool::new(false),
             lifecycle: tokio::sync::Mutex::new(()),
             settings: Mutex::new(()),
+            pending_update: Mutex::new(None),
+            update_cancel: Mutex::new(None),
+            update_cancelled: AtomicBool::new(false),
+            pending_pair: Mutex::new(None),
+            last_update: Mutex::new(None),
+            tray_available: AtomicBool::new(false),
         }
     }
 }
@@ -95,6 +120,73 @@ impl AppState {
 
     fn error(&self) -> Option<String> {
         lock(&self.last_error).clone()
+    }
+
+    pub(crate) fn pending_update(&self) -> Option<tauri_plugin_updater::Update> {
+        lock(&self.pending_update).clone()
+    }
+
+    pub(crate) fn set_pending_update(&self, value: Option<tauri_plugin_updater::Update>) {
+        *lock(&self.pending_update) = value;
+    }
+
+    /// 开始一次安装：清掉上次的取消标志并返回本次的取消信号。
+    pub(crate) fn begin_update_cancel(&self) -> tokio::sync::oneshot::Receiver<()> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.update_cancelled.store(false, Ordering::Relaxed);
+        *lock(&self.update_cancel) = Some(tx);
+        rx
+    }
+
+    pub(crate) fn cancel_update(&self) {
+        self.update_cancelled.store(true, Ordering::Relaxed);
+        if let Some(tx) = lock(&self.update_cancel).take() {
+            let _ = tx.send(());
+        }
+    }
+
+    pub(crate) fn end_update_cancel(&self) {
+        lock(&self.update_cancel).take();
+    }
+
+    pub(crate) fn is_update_cancelled(&self) -> bool {
+        self.update_cancelled.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn set_pending_pair(&self, value: Option<Value>) {
+        *lock(&self.pending_pair) = value;
+    }
+
+    fn take_pending_pair(&self) -> Option<Value> {
+        lock(&self.pending_pair).take()
+    }
+
+    pub(crate) fn set_last_update(&self, value: Value) {
+        *lock(&self.last_update) = Some(value);
+    }
+
+    fn last_update(&self) -> Value {
+        lock(&self.last_update).clone().unwrap_or(Value::Null)
+    }
+
+    pub(crate) fn tray_available(&self) -> bool {
+        self.tray_available.load(Ordering::Relaxed)
+    }
+
+    fn set_tray_available(&self, value: bool) {
+        self.tray_available.store(value, Ordering::Relaxed);
+    }
+
+    /// 在设置锁内读—改—写配置：更新检查记录时间/失败版本时，
+    /// 不能绕过 `update_settings` 的串行化，否则会把它刚保存的字段覆盖回旧值。
+    pub(crate) fn update_config<F>(&self, paths: &Paths, change: F) -> Result<(), String>
+    where
+        F: FnOnce(&mut Config),
+    {
+        let _guard = lock(&self.settings);
+        let mut config = Config::load(paths).map_err(|e| format!("读取配置失败：{e}"))?;
+        change(&mut config);
+        config.save(paths).map_err(|e| format!("保存配置失败：{e}"))
     }
 }
 
@@ -190,6 +282,9 @@ fn status_value(state: &AppState) -> Value {
             "configPath": Paths::discover().config().display().to_string(),
             "dataDir": Paths::discover().home.display().to_string(),
             "version": pi_carry_core::VERSION,
+            // 桥接未起时还不知道后端，前端按 null 处理（不显示「明文」误报）。
+            "secretBackend": Value::Null,
+            "portable": update::is_portable(),
             "devices": [],
             "sessions": [],
         });
@@ -222,6 +317,8 @@ fn status_value(state: &AppState) -> Value {
         "configPath": bridge.paths.config().display().to_string(),
         "dataDir": bridge.paths.home.display().to_string(),
         "version": pi_carry_core::VERSION,
+        "secretBackend": bridge.secret_backend.as_str(),
+        "portable": update::is_portable(),
         "lastError": state.error(),
         // 概览自带明细：前端不需要再发起两次全量扫描（D-3）。
         "devices": devices,
@@ -249,6 +346,16 @@ fn sessions_value(state: &AppState) -> Result<Value, String> {
 #[tauri::command]
 fn get_status(state: State<'_, AppState>) -> Value {
     status_value(&state)
+}
+
+#[tauri::command]
+fn get_pending_pair(state: State<'_, AppState>) -> Value {
+    state.take_pending_pair().unwrap_or(Value::Null)
+}
+
+#[tauri::command]
+fn get_last_update(state: State<'_, AppState>) -> Value {
+    state.last_update()
 }
 
 #[tauri::command]
@@ -409,6 +516,26 @@ fn apply_settings(mut config: Config, values: &Value) -> Result<Config, String> 
     if let Some(v) = values.get("closeToTray").and_then(Value::as_bool) {
         config.service.close_to_tray = v;
     }
+    if let Some(v) = values.get("startMinimized").and_then(Value::as_bool) {
+        config.service.start_minimized = v;
+    }
+    if let Some(v) = values.get("logLevel").and_then(Value::as_str) {
+        if !matches!(v, "error" | "warn" | "info" | "debug" | "trace") {
+            return Err(format!(
+                "logLevel 必须是 error/warn/info/debug/trace，实际 {v}"
+            ));
+        }
+        config.service.log_level = v.to_string();
+    }
+    if let Some(v) = values.get("checkOnStartup").and_then(Value::as_bool) {
+        config.updates.check_on_startup = v;
+    }
+    if let Some(v) = values.get("updateChannel").and_then(Value::as_str) {
+        if !matches!(v, "stable" | "beta") {
+            return Err(format!("updateChannel 必须是 stable/beta，实际 {v}"));
+        }
+        config.updates.channel = v.to_string();
+    }
     if let Some(v) = values.get("defaultCapability").and_then(Value::as_str) {
         config.sessions.default_capability = v.to_string();
     }
@@ -468,13 +595,20 @@ fn update_settings(state: State<'_, AppState>, values: Value) -> Result<Value, S
     if let Some(v) = values.get("closeToTray").and_then(Value::as_bool) {
         state.close_to_tray.store(v, Ordering::Relaxed);
     }
-    if let Some(v) = values.get("autoStart").and_then(Value::as_bool) {
-        if let Err(err) = set_autostart(v) {
+    // 开机自启的注册项要跟着两个开关走：显式切换自启，或自启开着时改
+    // 「启动时最小化」。否则用户改了最小化，注册表/plist 里仍是旧参数。
+    let autostart_toggled = values.get("autoStart").is_some();
+    let minimized_toggled = values.get("startMinimized").is_some();
+    if autostart_toggled || (minimized_toggled && config.service.autostart) {
+        // 托盘不可用时绝不追加 --minimized：那会让开机启动后窗口永远不出现。
+        let minimized = config.service.start_minimized && state.tray_available();
+        if let Err(err) = set_autostart(config.service.autostart, minimized) {
             // 注册表没改成，把配置回滚到旧值，避免两边对不上。
-            // 只回滚 service.autostart：同一 payload 里的其他字段已经成功落盘，
+            // 只回滚 service 里的这两个开关：同一 payload 里的其他字段已经成功落盘，
             // 内存里的 close_to_tray 也已同步为新值，不再动它。
             let mut rolled_back = config.clone();
             rolled_back.service.autostart = previous.service.autostart;
+            rolled_back.service.start_minimized = previous.service.start_minimized;
             let _ = rolled_back.save(&paths);
             return Err(err);
         }
@@ -495,7 +629,10 @@ fn update_settings(state: State<'_, AppState>, values: Value) -> Result<Value, S
             // SessionManager 持有 Config 克隆，允许根目录只在启动时读取，
             // 不重启的话给手机展示的仍是旧根目录。
             || values.get("allowedRoots").is_some()
-            || values.get("approvalTimeoutSecs").is_some(),
+            || values.get("approvalTimeoutSecs").is_some()
+            // 日志级别只在 init_logging 时读取；托盘/开机自启参数在下次登录才生效。
+            || values.get("logLevel").is_some()
+            || values.get("startMinimized").is_some(),
     }))
 }
 
@@ -591,7 +728,7 @@ fn open_data_dir() -> Result<(), String> {
     open_path(&paths.home)
 }
 
-fn open_path(path: &std::path::Path) -> Result<(), String> {
+pub(crate) fn open_path(path: &std::path::Path) -> Result<(), String> {
     #[cfg(windows)]
     {
         std::process::Command::new("explorer.exe")
@@ -616,14 +753,24 @@ fn open_path(path: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
-fn set_autostart(enable: bool) -> Result<(), String> {
+/// 开机自启命令行：路径必须带引号（含空格时 reg/launchd 才会当成一个参数），
+/// `--minimized` 只在托盘可用时追加，否则开机后窗口永远不出现。
+fn autostart_command(exe: &std::path::Path, minimized: bool) -> String {
+    let mut command = format!("\"{}\"", exe.display());
+    if minimized {
+        command.push_str(" --minimized");
+    }
+    command
+}
+
+fn set_autostart(enable: bool, minimized: bool) -> Result<(), String> {
     #[cfg(windows)]
     {
         let exe = std::env::current_exe().map_err(|e| format!("无法获取程序路径: {e}"))?;
         let key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
         if enable {
             // Run 键的值必须是带引号的完整路径，否则路径含空格时开机不会启动。
-            let command = format!("\"{}\"", exe.display());
+            let command = autostart_command(&exe, minimized);
             let status = std::process::Command::new("reg")
                 .args([
                     "add",
@@ -672,16 +819,19 @@ fn set_autostart(enable: bool) -> Result<(), String> {
         if enable {
             std::fs::create_dir_all(&dir)
                 .map_err(|e| format!("创建 LaunchAgents 目录失败: {e}"))?;
+            let mut arguments = format!("<string>{}</string>", xml_escape(&exe.to_string_lossy()));
+            if minimized {
+                arguments.push_str("<string>--minimized</string>");
+            }
             let body = format!(
                 "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
                  <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
                  <plist version=\"1.0\"><dict>\n\
                  \u{20}<key>Label</key><string>dev.picarry.desktop</string>\n\
-                 \u{20}<key>ProgramArguments</key><array><string>{}</string></array>\n\
+                 \u{20}<key>ProgramArguments</key><array>{arguments}</array>\n\
                  \u{20}<key>RunAtLoad</key><true/>\n\
                  \u{20}<key>ProcessType</key><string>Interactive</string>\n\
-                 </dict></plist>\n",
-                xml_escape(&exe.to_string_lossy())
+                 </dict></plist>\n"
             );
             crate::config_atomic_write(&plist, body.as_bytes())?;
             // load -w 让本次登录也立即生效；已加载时返回非零，不算失败。
@@ -708,10 +858,11 @@ fn set_autostart(enable: bool) -> Result<(), String> {
             std::fs::create_dir_all(&dir).map_err(|e| format!("创建 autostart 目录失败: {e}"))?;
             // Exec 需要引号包裹路径，且路径内的引号/反斜杠要按 Desktop Entry 规范转义。
             let exec = format!(
-                "\"{}\"",
+                "\"{}\"{}",
                 exe.to_string_lossy()
                     .replace('\\', "\\\\")
-                    .replace('"', "\\\"")
+                    .replace('"', "\\\""),
+                if minimized { " --minimized" } else { "" }
             );
             let body = format!(
                 "[Desktop Entry]\nType=Application\nName=pi carry\nComment=pi 的远程桥接\nExec={exec}\nTerminal=false\nX-GNOME-Autostart-enabled=true\n"
@@ -766,7 +917,50 @@ fn show_main(app: &AppHandle) {
     }
 }
 
-/// 写入前轮转：常驻托盘时 desktop.log 只增不减，先转成 desktop.log.1 再新建。
+/// 轮转归档文件名：`desktop-20261125-011500-123.log`。
+/// 同一毫秒内多次轮转时追加序号，避免 Windows 上 rename 因目标已存在而失败
+/// （Unix 会静默覆盖，反而丢掉一份日志）。
+fn log_archive_path(log: &std::path::Path) -> std::path::PathBuf {
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S-%3f");
+    let mut candidate = log.with_file_name(format!("desktop-{stamp}.log"));
+    let mut seq = 1;
+    while candidate.exists() && seq < 1000 {
+        candidate = log.with_file_name(format!("desktop-{stamp}-{seq}.log"));
+        seq += 1;
+    }
+    candidate
+}
+
+/// 清理超过保留期的轮转归档。只认 `desktop-*.log`：
+/// 不碰当前正在写的 `desktop.log`，也不碰用户放在同目录的其它文件。
+fn cleanup_old_logs(log: &std::path::Path, now: std::time::SystemTime) {
+    let Some(dir) = log.parent() else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let cutoff = now
+        .checked_sub(std::time::Duration::from_secs(
+            LOG_RETENTION_DAYS * 24 * 60 * 60,
+        ))
+        .unwrap_or(std::time::UNIX_EPOCH);
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !(name.starts_with("desktop-") && name.ends_with(".log")) {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        // 拿不到修改时间时保守保留：删错日志比多占几 MB 更糟。
+        if meta.modified().is_ok_and(|modified| modified < cutoff) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// 写入前轮转：常驻托盘时 desktop.log 只增不减，超限就归档后新建。
 ///
 /// 这里刻意不写 tracing 日志：它由下面的写入器在持锁状态下调用，再进 tracing 会重入死锁。
 fn rotate_log_if_needed(log: &std::path::Path) -> std::io::Result<()> {
@@ -776,23 +970,46 @@ fn rotate_log_if_needed(log: &std::path::Path) -> std::io::Result<()> {
     if meta.len() <= LOG_ROTATE_BYTES {
         return Ok(());
     }
-    let backup = log.with_extension("log.1");
-    // Windows 上 rename 不会覆盖已存在的目标，先删掉上一份轮转文件。
-    let _ = std::fs::remove_file(&backup);
-    std::fs::rename(log, &backup)
+    std::fs::rename(log, log_archive_path(log))?;
+    cleanup_old_logs(log, std::time::SystemTime::now());
+    Ok(())
 }
 
-/// 每次写入前检查大小并轮转。
+/// 每次写入前检查大小/日期并轮转。
 ///
 /// 不长期持有文件句柄：Windows 上仍被打开的文件无法 rename，常驻进程会一直占着句柄，
 /// 只在启动时轮转等于让 desktop.log 无限增长。
 struct RotatingLog {
     path: std::path::PathBuf,
+    /// 当前文件属于哪一天：跨天时即使没到 10MB 也归档，保证「按天 + 10MB」。
+    day: chrono::NaiveDate,
+}
+
+impl RotatingLog {
+    fn new(path: std::path::PathBuf) -> Self {
+        Self {
+            path,
+            day: chrono::Local::now().date_naive(),
+        }
+    }
+
+    fn rotate_checked(&mut self) -> std::io::Result<()> {
+        let today = chrono::Local::now().date_naive();
+        if self.day != today {
+            if self.path.exists() {
+                std::fs::rename(&self.path, log_archive_path(&self.path))?;
+                cleanup_old_logs(&self.path, std::time::SystemTime::now());
+            }
+            self.day = today;
+            return Ok(());
+        }
+        rotate_log_if_needed(&self.path)
+    }
 }
 
 impl std::io::Write for RotatingLog {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        rotate_log_if_needed(&self.path)?;
+        self.rotate_checked()?;
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -806,26 +1023,45 @@ impl std::io::Write for RotatingLog {
     }
 }
 
+/// 日志级别：`PI_CARRY_LOG`（临时排障）优先于配置，配置优先于 info。
+fn log_level(paths: &Paths) -> String {
+    if let Ok(value) = std::env::var("PI_CARRY_LOG") {
+        if !value.trim().is_empty() {
+            return value;
+        }
+    }
+    Config::load(paths)
+        .ok()
+        .map(|config| config.service.log_level)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "info".into())
+}
+
 fn init_logging() {
     let paths = Paths::discover();
     let _ = paths.ensure();
     let log = paths.logs().join("desktop.log");
+    let _ = rotate_log_if_needed(&log);
+    cleanup_old_logs(&log, std::time::SystemTime::now());
     // 先建出文件：首次启动时日志目录可能是空的，get_logs 需要文件存在才不报空。
     let prepared = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&log)
         .is_ok();
-    let level = std::env::var("PI_CARRY_LOG").unwrap_or_else(|_| "info".into());
-    let filter = tracing_subscriber::EnvFilter::try_new(level)
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let level = log_level(&paths);
+    let filter = tracing_subscriber::EnvFilter::try_new(&level).unwrap_or_else(|err| {
+        // 订阅器还没装好，只能先写 stderr；级别写坏不应阻止程序启动。
+        eprintln!("日志级别 {level:?} 无效，回退到 info：{err}");
+        tracing_subscriber::EnvFilter::new("info")
+    });
     let builder = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_timer(ChronoLocal::rfc_3339())
         .with_ansi(false);
     if prepared {
         // Mutex 保证单个事件的多段写入不与其他线程交错。
-        let writer = Mutex::new(RotatingLog { path: log });
+        let writer = Mutex::new(RotatingLog::new(log));
         let _ = builder.with_writer(writer).try_init();
     } else {
         let _ = builder.try_init();
@@ -849,12 +1085,19 @@ fn isolated_smoke_home() -> std::io::Result<std::path::PathBuf> {
     Ok(dir)
 }
 
-fn run_smoke() -> Result<(), String> {
+fn run_smoke(pair_uri: Option<String>) -> Result<(), String> {
+    // 深链探针：只验证「能解析、会预填」，不开始也不确认配对（plan §4.4）。
+    let pair_uri_ok = pair_uri
+        .as_deref()
+        .map(|uri| pi_carry_core::pair_uri::parse(uri).is_ok());
     tauri::async_runtime::block_on(async {
         let bridge = Bridge::start(BridgeOptions::load().map_err(|e| e.to_string())?)
             .await
             .map_err(|e| format!("桥接启动失败: {e}"))?;
         let node = bridge.node_status();
+        // 深链可用性的真实检验：把「本机刚刚生成的配对链接」喂回解析器。
+        // 手写 URI 只能证明解析器对理想输入有效，证明不了产品自己的产物能被自己接受（BUG-001）。
+        let round_trip = pi_carry_core::pair_uri::parse(&bridge.begin_pairing(None).uri).is_ok();
         println!(
             "{}",
             serde_json::to_string_pretty(&json!({
@@ -863,6 +1106,8 @@ fn run_smoke() -> Result<(), String> {
                 "relayMode": node.get("relayMode"),
                 "sessions": bridge.sessions.list().map(|s| s.len()).unwrap_or(0),
                 "piInstalled": node.get("piInstalled"),
+                "pairUriOk": pair_uri_ok,
+                "pairUriRoundTrip": round_trip,
             }))
             .unwrap()
         );
@@ -938,6 +1183,8 @@ fn spawn_show_listener(app: tauri::AppHandle) {
         loop {
             WaitForSingleObject(ev, INFINITE);
             ResetEvent(ev);
+            // 第二个实例可能同时留下了深链：先消费再显示，避免窗口先闪一下空白页。
+            deeplink::consume_pending(&app);
             show_main(&app);
         }
     });
@@ -992,6 +1239,7 @@ fn spawn_show_listener(app: tauri::AppHandle) {
                     let mut buf = [0u8; 16];
                     let n = stream.read(&mut buf).unwrap_or(0);
                     if &buf[..n] == SHOW_MESSAGE.as_bytes() {
+                        deeplink::consume_pending(&app);
                         show_main(&app);
                     }
                 }
@@ -1027,12 +1275,16 @@ fn single_instance_socket_path() -> std::path::PathBuf {
 }
 
 fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
     // --smoke 是测试探针，不是第二个桌面实例：不打开窗口、不抢单实例互斥。
     // 必须先于互斥判定，否则桌面端已运行时会被 exit(0) 提前放行，smoke 假绿。
-    let smoke = std::env::args().any(|a| a == "--smoke");
+    let smoke = args.iter().any(|a| a == "--smoke");
     // 探针自建的隔离目录要在退出时删掉：里面含 endpoint_secret 与 SQLite，
     // 留在 %TEMP% 等于把节点身份副本散落在磁盘上（NEW-16）。
     let mut smoke_owned_home: Option<std::path::PathBuf> = None;
+    // 会话目录同样要隔离：否则 `--smoke` 会把真实 `~/.pi/agent/sessions` 扫进内存（只读也
+    // 不该碰用户的会话列表），机器上会话多时还会拖慢探针（BUG-033）。
+    let mut smoke_owned_sessions: Option<std::path::PathBuf> = None;
     if smoke {
         // 探针不能与正在运行的桌面实例共享数据目录（两个 Bridge 会抢同一个
         // endpoint_secret 与 SQLite）。没显式指定就自动隔离到临时目录。
@@ -1048,10 +1300,37 @@ fn main() {
                 }
             }
         }
+        // 临时目录删得掉，系统钥匙串里写进去的身份删不掉：探针默认走明文后端，
+        // 绝不读写用户真实的凭据库（BUG-003）。显式设置 PI_CARRY_SECRET_BACKEND 时尊重用户选择。
+        if std::env::var_os(pi_carry_core::secretstore::BACKEND_ENV).is_none() {
+            std::env::set_var(pi_carry_core::secretstore::BACKEND_ENV, "file");
+        }
+        if std::env::var_os("PI_CARRY_SESSIONS").is_none() {
+            let dir = std::env::temp_dir()
+                .join(format!("pi-carry-smoke-sessions-{}", std::process::id()));
+            match std::fs::create_dir_all(&dir) {
+                Ok(()) => {
+                    std::env::set_var("PI_CARRY_SESSIONS", &dir);
+                    smoke_owned_sessions = Some(dir);
+                }
+                Err(e) => {
+                    eprintln!("无法创建冒烟会话目录: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
     } else {
+        let pair_uri = deeplink::pair_uri_from_args(&args);
         match acquire_single_instance() {
             Ok(true) => {}
             Ok(false) => {
+                // 第二个实例拿到的深链先落到运行目录，再发「显示窗口」信号：
+                // 具名事件/socket 只传信号，不携带任意长度 payload。
+                if let Some(uri) = pair_uri.as_deref() {
+                    if let Err(err) = deeplink::forward_uri(uri) {
+                        eprintln!("{err}");
+                    }
+                }
                 // 已有实例在跑：把窗口提上前台再退出，而不是无声退出（D-8）。
                 notify_running_instance();
                 std::process::exit(0);
@@ -1065,11 +1344,16 @@ fn main() {
 
     init_logging();
     if smoke {
-        let result = run_smoke();
+        let result = run_smoke(deeplink::pair_uri_from_args(&args));
         if let Some(dir) = smoke_owned_home {
             // SQLite 的 WAL/SHM 文件在连接关闭后才能删干净；Bridge::shutdown 已跑完。
             if let Err(e) = std::fs::remove_dir_all(&dir) {
                 eprintln!("清理冒烟目录 {} 失败: {e}", dir.display());
+            }
+        }
+        if let Some(dir) = smoke_owned_sessions {
+            if let Err(e) = std::fs::remove_dir_all(&dir) {
+                eprintln!("清理冒烟会话目录 {} 失败: {e}", dir.display());
             }
         }
         if let Err(e) = result {
@@ -1079,12 +1363,16 @@ fn main() {
         return;
     }
     let state = AppState::default();
-    let close_to_tray = Config::load(&Paths::discover())
-        .map(|c| c.service.close_to_tray)
-        .unwrap_or(true);
-    state.close_to_tray.store(close_to_tray, Ordering::Relaxed);
+    let startup_config = Config::load(&Paths::discover()).unwrap_or_default();
+    state
+        .close_to_tray
+        .store(startup_config.service.close_to_tray, Ordering::Relaxed);
+    let check_on_startup = startup_config.updates.check_on_startup;
+    let setup_args = args.clone();
 
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             get_status,
@@ -1101,8 +1389,17 @@ fn main() {
             restart_service,
             get_logs,
             open_data_dir,
+            get_pending_pair,
+            get_last_update,
+            update::check_update,
+            update::install_update,
+            update::cancel_update,
+            update::restart_app,
+            update::open_external,
+            selfcheck::self_check,
+            selfcheck::open_logs_dir,
         ])
-        .setup(|app| {
+        .setup(move |app| {
             let handle = app.handle().clone();
             let state = app.state::<AppState>();
 
@@ -1114,16 +1411,27 @@ fn main() {
                 let _ = window.center();
             }
 
-            let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/32x32.png"))?;
             // 第二个实例不会自己开窗口，而是通知首个实例把窗口提上来。
             spawn_show_listener(app.handle().clone());
             let show = MenuItem::with_id(app, "show", "打开 pi carry", true, None::<&str>)?;
             let pair = MenuItem::with_id(app, "pair", "开始配对", true, None::<&str>)?;
+            let check = MenuItem::with_id(app, "update", "检查更新", true, None::<&str>)?;
+            let logs = MenuItem::with_id(app, "logs", "打开日志目录", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &pair, &quit])?;
-            TrayIconBuilder::with_id("main")
-                .icon(icon)
-                .tooltip("pi carry · 本机桥接")
+            let menu = Menu::with_items(app, &[&show, &pair, &check, &logs, &quit])?;
+            let tray_icon = if cfg!(target_os = "macos") {
+                // macOS 要求模板图：纯黑 + alpha，系统自动适配深浅色菜单栏。
+                tauri::image::Image::from_bytes(include_bytes!("../icons/tray-template.png"))?
+            } else {
+                tauri::image::Image::from_bytes(include_bytes!("../icons/32x32.png"))?
+            };
+            let tray = TrayIconBuilder::with_id("main")
+                .icon(tray_icon)
+                .icon_as_template(cfg!(target_os = "macos"))
+                .tooltip(format!(
+                    "pi carry · 本机桥接 · v{}",
+                    app.package_info().version
+                ))
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
@@ -1131,6 +1439,27 @@ fn main() {
                     "pair" => {
                         show_main(app);
                         let _ = app.emit("navigate", "pairing");
+                    }
+                    "update" => {
+                        show_main(app);
+                        // 失败原因显示在设置页「更新」卡：先切页，避免用户停在概览页看不到任何反馈。
+                        let _ = app.emit("navigate", "settings");
+                        let app = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let state = app.state::<AppState>();
+                            if let Err(err) = update::check_update(app.clone(), state, true).await {
+                                tracing::warn!(error = %err, "手动检查更新失败");
+                                let _ = app.emit(
+                                    "update-error",
+                                    json!({ "kind": "check", "message": err }),
+                                );
+                            }
+                        });
+                    }
+                    "logs" => {
+                        if let Err(err) = selfcheck::open_logs_dir() {
+                            tracing::warn!(error = %err, "打开日志目录失败");
+                        }
                     }
                     "quit" => app.exit(0),
                     _ => {}
@@ -1145,16 +1474,55 @@ fn main() {
                         show_main(tray.app_handle());
                     }
                 })
-                .build(app)?;
+                .build(app);
+            match tray {
+                Ok(_) => state.set_tray_available(true),
+                // 托盘创建失败（例如 Linux 没有 StatusNotifier 宿主）不应阻止启动：
+                // 窗口仍可用，自检卡会提示；开机自启也不再追加 --minimized。
+                Err(err) => {
+                    tracing::warn!(error = %err, "托盘创建失败，继续以无托盘模式运行");
+                    state.set_tray_available(false);
+                }
+            }
+
+            // 开机自启带 --minimized：有托盘时只驻留托盘，不弹窗。
+            if setup_args.iter().any(|arg| arg == "--minimized") && state.tray_available() {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.hide();
+                }
+            }
+
+            deeplink::init(&handle);
+            deeplink::handle_cli(&handle, &setup_args);
+            // 第二个实例可能在本进程 setup 完成前就写好文件并退出。
+            deeplink::consume_pending(&handle);
 
             let _ = app.emit("bridge-status", status_value(&state));
+            let bridge_handle = handle.clone();
             tauri::async_runtime::spawn(async move {
-                let state = handle.state::<AppState>();
+                let state = bridge_handle.state::<AppState>();
                 // 与 restart_service 共用生命周期锁：启动期间用户点重启会排队，
                 // 而不是各自起一个 Bridge（D-1）。
                 let _lifecycle = state.lifecycle.lock().await;
                 match launch_bridge().await {
                     Ok(bridge) => {
+                        // 一行结构化摘要：不含任何密钥/token，排障先看这行。
+                        let pi_path = {
+                            let explicit = bridge.config.node.pi_path.trim();
+                            let explicit = (!explicit.is_empty()).then_some(explicit);
+                            pi_carry_core::pi::resolve_pi(explicit)
+                                .map(|path| path.display().to_string())
+                                .unwrap_or_else(|err| format!("未找到（{err}）"))
+                        };
+                        tracing::info!(
+                            version = %bridge_handle.package_info().version,
+                            platform = %std::env::consts::OS,
+                            data_dir = %bridge.paths.home.display(),
+                            pi_path = %pi_path,
+                            relay_mode = %bridge.config.transport.relay_mode,
+                            backend = bridge.secret_backend.as_str(),
+                            "启动摘要"
+                        );
                         install_bridge(&state, bridge).await;
                         state.set_error(None);
                     }
@@ -1163,14 +1531,31 @@ fn main() {
                         state.set_error(Some(err));
                     }
                 }
-                let _ = handle.emit("bridge-status", status_value(&state));
+                let _ = bridge_handle.emit("bridge-status", status_value(&state));
             });
+
+            // 启动 30s 后静默检查一次：太早会和桥接抢先占用 CPU/网络，也容易
+            // 在用户还没看到界面时弹横幅；失败只留 debug 日志，不打扰。
+            if check_on_startup {
+                let updater = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    let state = updater.state::<AppState>();
+                    if let Err(err) = update::check_update(updater.clone(), state, false).await {
+                        tracing::debug!(error = %err, "自动检查更新失败");
+                    }
+                });
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 let state = window.state::<AppState>();
-                if window.label() == "main" && state.close_to_tray.load(Ordering::Relaxed) {
+                // 托盘不可用时不能隐藏：否则窗口关不掉、托盘又找不到，用户只能杀进程。
+                if window.label() == "main"
+                    && state.close_to_tray.load(Ordering::Relaxed)
+                    && state.tray_available()
+                {
                     api.prevent_close();
                     let _ = window.hide();
                 } else {
@@ -1395,6 +1780,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    fn archived_logs(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        std::fs::read_dir(dir)
+            .expect("读取日志目录")
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("desktop-") && name.ends_with(".log"))
+            })
+            .collect()
+    }
+
     #[test]
     fn rotate_log_if_needed_moves_oversized_log() {
         let dir = temp_path("rotate-log");
@@ -1402,9 +1800,9 @@ mod tests {
         std::fs::write(&log, vec![b'x'; (LOG_ROTATE_BYTES + 1) as usize]).expect("写入日志");
 
         rotate_log_if_needed(&log).expect("轮转日志");
-        let backup = dir.join("desktop.log.1");
         assert!(!log.exists(), "超限日志应被移走");
-        assert!(backup.exists(), "应生成 desktop.log.1");
+        let archived = archived_logs(&dir);
+        assert_eq!(archived.len(), 1, "应生成一个时间戳归档: {archived:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1416,7 +1814,7 @@ mod tests {
 
         rotate_log_if_needed(&log).expect("小日志不轮转");
         assert!(log.exists());
-        assert!(!dir.join("desktop.log.1").exists());
+        assert!(archived_logs(&dir).is_empty());
         // 文件不存在时不应报错（首次启动尚无日志）。
         rotate_log_if_needed(&dir.join("missing.log")).expect("缺失文件不报错");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1430,10 +1828,85 @@ mod tests {
         let log = dir.join("desktop.log");
         std::fs::write(&log, vec![b'x'; (LOG_ROTATE_BYTES + 1) as usize]).expect("写入日志");
 
-        let mut writer = RotatingLog { path: log.clone() };
+        let mut writer = RotatingLog::new(log.clone());
         writer.write_all(b"after-rotate\n").expect("写入新日志");
         assert_eq!(std::fs::read_to_string(&log).unwrap(), "after-rotate\n");
-        assert!(dir.join("desktop.log.1").exists());
+        assert_eq!(archived_logs(&dir).len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cleanup_old_logs_only_removes_expired_archives() {
+        let dir = temp_path("log-cleanup");
+        let log = dir.join("desktop.log");
+        let old = dir.join("desktop-20200101-000000-000.log");
+        let other = dir.join("notes.txt");
+        std::fs::write(&log, "current\n").expect("写当前日志");
+        std::fs::write(&old, "old\n").expect("写旧归档");
+        std::fs::write(&other, "keep\n").expect("写其它文件");
+
+        // 用一个「未来」的时间点，等价于归档已超过保留期。
+        let future = std::time::SystemTime::now()
+            + std::time::Duration::from_secs((LOG_RETENTION_DAYS + 1) * 24 * 60 * 60);
+        cleanup_old_logs(&log, future);
+        assert!(!old.exists(), "过期归档应被删除");
+        assert!(log.exists(), "当前日志不能被删");
+        assert!(other.exists(), "非归档文件不能被删");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn update_cancel_flag_resets_on_next_run() {
+        let state = AppState::default();
+        let _rx = state.begin_update_cancel();
+        state.cancel_update();
+        assert!(state.is_update_cancelled());
+        state.end_update_cancel();
+        let _rx = state.begin_update_cancel();
+        assert!(
+            !state.is_update_cancelled(),
+            "新一次安装必须清掉上次的取消标志"
+        );
+    }
+
+    #[test]
+    fn autostart_command_quotes_path_and_appends_minimized() {
+        let exe = std::path::PathBuf::from(r"C:\Program Files\pi carry\pi-carry-desktop.exe");
+        assert_eq!(
+            autostart_command(&exe, false),
+            format!("\"{}\"", exe.display())
+        );
+        assert!(autostart_command(&exe, true).ends_with(" --minimized"));
+    }
+
+    #[test]
+    fn apply_settings_accepts_update_and_service_fields() {
+        let applied = apply_settings(
+            Config::default(),
+            &json!({
+                "startMinimized": false,
+                "logLevel": "debug",
+                "checkOnStartup": false,
+                "updateChannel": "beta",
+            }),
+        )
+        .expect("应能应用");
+        assert!(!applied.service.start_minimized);
+        assert_eq!(applied.service.log_level, "debug");
+        assert!(!applied.updates.check_on_startup);
+        assert_eq!(applied.updates.channel, "beta");
+    }
+
+    #[test]
+    fn apply_settings_rejects_invalid_log_level_and_channel() {
+        let err = apply_settings(Config::default(), &json!({ "logLevel": "verbose" })).unwrap_err();
+        assert!(
+            err.contains("error/warn/info/debug/trace"),
+            "实际错误: {err}"
+        );
+
+        let err =
+            apply_settings(Config::default(), &json!({ "updateChannel": "nightly" })).unwrap_err();
+        assert!(err.contains("stable/beta"), "实际错误: {err}");
     }
 }

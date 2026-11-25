@@ -337,7 +337,7 @@ impl SessionManager {
             if let Some(mem) = live_snapshots.get(&s.id) {
                 s.clone_from(mem);
             }
-            s.pending_approvals = pending.get(&s.id).copied().unwrap_or(0) as u32;
+            s.pending_approvals = pending.get(&s.id).copied().unwrap_or(0);
         }
         out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         out.truncate(self.config.sessions.scan_limit);
@@ -784,7 +784,7 @@ impl SessionManager {
                 let msgs: Vec<Value> = entries
                     .iter()
                     .filter(|e| e.get("type").and_then(Value::as_str) == Some("message"))
-                    .filter_map(|e| entry_to_message(e))
+                    .filter_map(entry_to_message)
                     .collect();
                 // 空会话合法；只有拿到有效条目才覆盖冷路径结果。
                 snap.messages = msgs;
@@ -3335,8 +3335,10 @@ mod tests {
     #[test]
     fn run_stats_without_agent_start_reports_null_duration() {
         // 半路 attach：拿不到 agent_start，不能编造时长。
-        let mut stats = RunStats::default();
-        stats.run_id = "run-3".into();
+        let mut stats = RunStats {
+            run_id: "run-3".into(),
+            ..RunStats::default()
+        };
         stats.add_usage(&json!({"role": "assistant", "usage": {"input": 5, "output": 7}}));
         let ev = stats.to_event(chrono::Utc::now(), false);
         assert!(ev["durationMs"].is_null());

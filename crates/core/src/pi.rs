@@ -628,7 +628,7 @@ fn quote_cmd_arg(arg: &str) -> String {
     format!("\"{}\"", arg.replace('"', "\"\""))
 }
 
-/// 查找 pi：显式配置 > PI_CARRY_PI > PATH。
+/// 查找 pi：显式配置 > PI_CARRY_PI > PATH（含登录环境补齐）。
 pub fn resolve_pi(explicit: Option<&str>) -> Result<PathBuf> {
     let candidates: Vec<PathBuf> = explicit
         .map(PathBuf::from)
@@ -646,19 +646,62 @@ pub fn resolve_pi(explicit: Option<&str>) -> Result<PathBuf> {
     } else {
         &[""]
     };
+    // GUI 启动（Finder/Dock/.desktop）拿不到登录 shell 的 PATH，先用登录环境补一次。
+    // install() 内部缓存，第二次调用零成本；冷启动最多阻塞 1.2s。
+    crate::shellpath::install();
     let path = std::env::var_os("PATH").unwrap_or_default();
+    let mut tried: Vec<PathBuf> = Vec::new();
     for dir in std::env::split_paths(&path) {
         for ext in exts {
             let c = dir.join(format!("pi{ext}"));
+            tried.push(c.clone());
             if c.is_file() {
                 return Ok(c);
             }
         }
     }
+    record_resolve_failure(&tried);
     Err(CoreError::PiNotInstalled(
         "未找到 pi，请安装 @earendil-works/pi-coding-agent 或在 config.toml 里设置 node.piPath"
             .into(),
     ))
+}
+
+/// 找不到 pi 时落一份可诊断的日志；任何写入失败都只告警，不影响返回结果。
+fn record_resolve_failure(tried: &[PathBuf]) {
+    use std::io::Write;
+    tracing::warn!(
+        candidates = tried.len(),
+        "未在 PATH 中找到 pi，已尝试登录 shell 环境"
+    );
+    let paths = crate::paths::Paths::discover();
+    if let Err(e) = std::fs::create_dir_all(paths.logs()) {
+        tracing::warn!(error = %e, "创建日志目录失败，跳过 pi 解析诊断");
+        return;
+    }
+    // 候选列表可能上千项（PATH 很长 + 多扩展名），只留前 200 条，避免日志被刷爆。
+    let candidates: Vec<String> = tried
+        .iter()
+        .take(200)
+        .map(|p| p.display().to_string())
+        .collect();
+    let entry = serde_json::json!({
+        "at": chrono::Utc::now().to_rfc3339(),
+        "candidates": candidates,
+        "processPath": std::env::var("PATH").unwrap_or_default(),
+        "shellPathAttempts": crate::shellpath::attempts(),
+    });
+    let file = paths.logs().join("pi-resolve.log");
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&file)
+    {
+        Ok(mut f) => {
+            let _ = writeln!(f, "{entry}");
+        }
+        Err(e) => tracing::warn!(error = %e, path = %file.display(), "写 pi 解析诊断失败"),
+    }
 }
 
 #[cfg(windows)]
@@ -844,7 +887,7 @@ fn version_command(path: &Path) -> (String, std::process::Command) {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         let mut cmd = std::process::Command::new(path);
         cmd.creation_flags(CREATE_NO_WINDOW);
-        return (path.display().to_string(), cmd);
+        (path.display().to_string(), cmd)
     }
     #[cfg(not(windows))]
     {

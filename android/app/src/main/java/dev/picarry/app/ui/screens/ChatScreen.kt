@@ -20,10 +20,12 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.sizeIn
@@ -44,8 +46,14 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.outlined.AccountTree
 import androidx.compose.material.icons.outlined.ArrowUpward
+import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Bolt
+import androidx.compose.material.icons.outlined.AccountTree
+import androidx.compose.material.icons.outlined.Compress
+import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.PowerSettingsNew
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ContentCopy
@@ -53,23 +61,24 @@ import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.ExpandLess
 import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Image
+import androidx.compose.material.icons.outlined.Lock
+import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.AddPhotoAlternate
+import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material.icons.outlined.MoreVert
+import androidx.compose.material.icons.outlined.PowerSettingsNew
 import androidx.compose.material.icons.outlined.Psychology
-import androidx.compose.material.icons.outlined.StopCircle
+import androidx.compose.material.icons.outlined.Stop
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.Tune
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -93,6 +102,8 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
@@ -110,7 +121,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
+import androidx.core.content.res.ResourcesCompat
 import java.io.File
+import dev.picarry.app.R
 import dev.picarry.app.data.Approval
 import dev.picarry.app.data.CarryRepository
 import dev.picarry.app.data.ImagePreparer
@@ -137,27 +150,42 @@ import dev.picarry.app.data.formatTokens
 import dev.picarry.app.data.defaultModelFor
 import dev.picarry.app.data.defaultThinkingLevel
 import dev.picarry.app.data.groupModelsByProvider
-import dev.picarry.app.data.modelPillText
 import dev.picarry.app.data.thinkingLabel
 import dev.picarry.app.data.withCurrentModel
+import dev.picarry.app.ui.components.ButtonKind
+import dev.picarry.app.ui.components.CarryActionButton
 import dev.picarry.app.ui.components.CarryCard
+import dev.picarry.app.ui.components.CarryIconButton
+import dev.picarry.app.ui.components.CarrySheetGrabber
+import dev.picarry.app.ui.components.CarrySwitch
+import dev.picarry.app.ui.components.CarrySheetHeader
+import dev.picarry.app.ui.components.DividerLine
 import dev.picarry.app.ui.components.MonoLabel
 import dev.picarry.app.ui.components.NullableStringSaver
 import dev.picarry.app.ui.components.Pill
+import dev.picarry.app.ui.components.StatusDot
+import dev.picarry.app.ui.components.Tag
+import dev.picarry.app.ui.components.pressClickable
 import dev.picarry.app.ui.components.riskColor
 import dev.picarry.app.ui.components.statusColor
 import dev.picarry.app.ui.theme.Amber
 import dev.picarry.app.ui.theme.Cyan
 import dev.picarry.app.ui.theme.Mint
 import dev.picarry.app.ui.theme.Ink
+import dev.picarry.app.ui.theme.Inter
+import dev.picarry.app.ui.theme.JetBrainsMono
 import dev.picarry.app.ui.theme.Line
+import dev.picarry.app.ui.theme.LineStrong
 import dev.picarry.app.ui.theme.Panel
 import dev.picarry.app.ui.theme.PanelHigh
 import dev.picarry.app.ui.theme.Rose
+import dev.picarry.app.ui.theme.Surface2
+import dev.picarry.app.ui.theme.Surface3
 import dev.picarry.app.ui.theme.TextMuted
 import dev.picarry.app.ui.theme.TextPrimary
 import dev.picarry.app.ui.theme.TextSecondary
 import dev.picarry.app.ui.theme.Violet
+import dev.picarry.app.ui.theme.VioletSoft
 import io.noties.markwon.AbstractMarkwonPlugin
 import io.noties.markwon.Markwon
 import io.noties.markwon.core.MarkwonTheme
@@ -205,7 +233,12 @@ private fun pendingDir(context: android.content.Context, nodeId: String, session
     return File(context.cacheDir, "pending/${safe(nodeId)}_${safe(sessionId)}")
 }
 
-/** 旋转/进程重建后恢复待发图片；已上传成功的只恢复 blobId，不再占内存（B-09/B-15）。 */
+/**
+ * 旋转/进程重建后恢复待发图片。
+ *
+ * 已上传成功的项也要恢复磁盘上的小图：只留 blobId 会让缩略图变成灰色占位
+ * （BUG-007）。原图字节此时早已丢弃，`<id>.bin` 里是压缩后的缩略图。
+ */
 private fun loadPendingImages(context: android.content.Context, nodeId: String, sessionId: String): List<OutgoingImage> =
     loadPendingImagesFrom(pendingDir(context, nodeId, sessionId))
 
@@ -221,7 +254,8 @@ internal fun loadPendingImagesFrom(dir: File): List<OutgoingImage> {
         val mime = p[1]
         val blobId = p[2].ifBlank { null }
         val size = p[3].toLongOrNull() ?: return@mapNotNull null
-        val bytes = if (blobId == null) File(dir, "$id.bin").takeIf { it.isFile }?.readBytes() else null
+        // 已上传项也有小图；没有文件时才退回“只有 blobId”。
+        val bytes = File(dir, "$id.bin").takeIf { it.isFile }?.readBytes()
         if (blobId == null && bytes == null) return@mapNotNull null
         OutgoingImage(
             id = id, mimeType = mime, bytes = bytes ?: ByteArray(0), size = size,
@@ -241,7 +275,8 @@ internal fun savePendingImagesTo(dir: File, items: List<OutgoingImage>) {
     dir.mkdirs()
     val index = StringBuilder()
     items.forEach { item ->
-        if (item.blobId == null && item.bytes.isNotEmpty()) {
+        // 已上传项也要写盘：里面是压缩后的小图，用于旋转/重建后仍能看到缩略图（BUG-007）。
+        if (item.bytes.isNotEmpty()) {
             val f = File(dir, item.id + ".bin")
             if (!f.isFile || f.length() != item.bytes.size.toLong()) f.writeBytes(item.bytes)
         } else {
@@ -281,6 +316,7 @@ fun ChatScreen(
     val readySessions by repo.ready.collectAsState()
     val openErrors by repo.openErrors.collectAsState()
     val link by repo.link.collectAsState()
+    val connInfos by repo.connInfo.collectAsState()
     val catalogs by repo.models.collectAsState()
     val levelCatalogs by repo.thinkingLevels.collectAsState()
     val runInfo by repo.runInfo.collectAsState()
@@ -315,6 +351,10 @@ fun ChatScreen(
     // 草稿跨旋转保留；fork 迁移换路由时由仓库按旧→新会话复制。
     var text by rememberSaveable(sessionId) { mutableStateOf(repo.draftFor(nodeId, sessionId)) }
     var mode by rememberSaveable { mutableStateOf("auto") }
+    // 流式操作模式只对当前这次运行有效；运行结束后回到 auto，避免下一条普通消息误用 steer/queue。
+    LaunchedEffect(session?.isRunning) {
+        if (session?.isRunning != true) mode = "auto"
+    }
     // 两个 sheet 是用户正在看的弹层，旋转后重建等于把刚打开的列表吞掉；
     // 下拉菜单（showMenu）属于瞬时交互，重建后关掉更符合预期，故仍用 remember。
     var showModels by rememberSaveable { mutableStateOf(false) }
@@ -330,7 +370,8 @@ fun ChatScreen(
     var entriesError by remember { mutableStateOf<String?>(null) }
     var selectedEntryId by rememberSaveable { mutableStateOf<String?>(null) }
     var forking by remember { mutableStateOf(false) }
-    var migrationNotice by remember { mutableStateOf(repo.isMigrationTarget(nodeId, sessionId)) }
+    // 用户主动关掉「已迁移」横幅后，旋转屏幕不能让它再冒出来（BUG-023）。
+    var migrationNotice by rememberSaveable { mutableStateOf(repo.isMigrationTarget(nodeId, sessionId)) }
     // 弹窗只记录审批 id：旋转后按 id 从仓库状态恢复，审批被超时/其它设备解决时对话框自然消失。
     var openApprovalId by rememberSaveable(stateSaver = NullableStringSaver) { mutableStateOf<String?>(null) }
     // 待发图片：选完立即分片上传，发送只带 sha/大小；上传/重试都在本页完成。
@@ -375,7 +416,12 @@ fun ChatScreen(
     }
     val clipboard = LocalClipboardManager.current
     val listState = rememberLazyListState()
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val menuSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val modelSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val commandSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val renameSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val entriesSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val turnSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val scope = rememberCoroutineScope()
     // 只有接近底部才跟随新内容；用户上滑阅读历史时不再被拽回底部。
     val nearBottom by remember {
@@ -402,8 +448,10 @@ fun ChatScreen(
         if (outgoing.none { it.id == item.id }) return
         updateImage(item.id) { it.copy(uploading = true, error = null, progress = 0f) }
         scope.launch {
+            // 成功后要压一张小图：解码/压缩必须离开主线程，所以和上传放在同一个
+            // runCatching 里完成，onSuccess 只做状态更新（BUG-007）。
             runCatching {
-                repo.uploadBlob(nodeId, sessionId, item.bytes, item.mimeType) { sent, total ->
+                val sha = repo.uploadBlob(nodeId, sessionId, item.bytes, item.mimeType) { sent, total ->
                     // 回调来自 IO 线程：mutableState 必须在主线程写，否则会丢图（B-17）。
                     scope.launch(Dispatchers.Main) {
                         updateImage(item.id) {
@@ -411,14 +459,17 @@ fun ChatScreen(
                         }
                     }
                 }
-            }.onSuccess { sha ->
+                sha to (withContext(Dispatchers.IO) { thumbnailBytes(item.bytes) } ?: ByteArray(0))
+            }.onSuccess { (sha, thumb) ->
                 if (removedImageIds.remove(item.id)) {
-                    // 上传期间用户已移除：服务端引用刚登记，立即释放，避免永久占用额度。
-                    runCatching { repo.releaseBlob(nodeId, sessionId, sha) }.onSuccess { usageBytes = it }
+                    // 上传期间用户已移除：若没有别的待发图复用同一 blob，释放服务端引用。
+                    if (outgoing.none { it.id != item.id && it.blobId == sha }) {
+                        runCatching { repo.releaseBlob(nodeId, sessionId, sha) }.onSuccess { usageBytes = it }
+                    }
                     return@onSuccess
                 }
-                // 上传完立即丢掉字节，10 张大图不能一直常驻（B-15）。
-                updateImage(item.id) { it.copy(blobId = sha, uploading = false, progress = 1f, error = null, bytes = ByteArray(0)) }
+                // 上传完只丢原图字节，留下 ~20KB 的小图：缩略图始终可见（B-15 + BUG-007）。
+                updateImage(item.id) { it.copy(blobId = sha, uploading = false, progress = 1f, error = null, bytes = thumb) }
                 // 上传完成时服务端就登记了会话引用，用量以服务端为准，避免本地重复累加。
                 runCatching { repo.blobUsage(nodeId, sessionId) }.onSuccess {
                     usageBytes = it.first
@@ -596,123 +647,80 @@ fun ChatScreen(
         }.getOrNull()
     }) {
     Column(Modifier.fillMaxSize().statusBarsPadding().imePadding()) {
+        Spacer(Modifier.height(28.dp))
         Row(
-            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+            Modifier.fillMaxWidth().height(54.dp).padding(horizontal = 14.dp),
             verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Box(Modifier.size(38.dp).clip(CircleShape).clickable(onClick = onBack), contentAlignment = Alignment.Center) {
-                Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回", tint = TextSecondary)
-            }
-            Column(Modifier.weight(1f).padding(horizontal = 6.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            CarryIconButton(Icons.AutoMirrored.Outlined.ArrowBack, "返回", onBack, plain = true, size = 34)
+            Column(Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                    StatusDot(if (session?.isRunning == true) Amber else if (link[nodeId] == LinkState.Online) Mint else TextMuted, 4)
                     Text(
-                        session?.title ?: "会话",
-                        style = MaterialTheme.typography.titleLarge,
-                        color = TextPrimary,
+                        buildString {
+                            append(node?.name ?: nodeId.take(8))
+                            val detail = connInfos[nodeId]?.detail
+                            if (!detail.isNullOrBlank()) append(" · ").append(detail)
+                        },
+                        style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                        color = TextMuted,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    if (session?.isRunning == true) {
-                        CircularProgressIndicator(Modifier.size(11.dp), color = Violet, strokeWidth = 1.5.dp)
-                    }
                 }
-                MonoLabel(node?.name ?: nodeId.take(8), color = TextMuted)
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    session?.title ?: "会话",
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+                    color = TextPrimary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
-            Box(Modifier.size(38.dp).clip(CircleShape).clickable { showMenu = true }, contentAlignment = Alignment.Center) {
-                Icon(Icons.Outlined.MoreVert, "更多", tint = TextSecondary)
-            }
-            DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
-                DropdownMenuItem(text = { Text("复制会话 ID") }, onClick = {
-                    clipboard.setText(AnnotatedString(sessionId)); showMenu = false
-                }, leadingIcon = { Icon(Icons.Outlined.ContentCopy, null, tint = TextMuted) })
-                DropdownMenuItem(text = { Text("重命名会话") }, onClick = {
-                    showMenu = false
-                    renameText = session?.name.orEmpty()
-                    renameError = null
-                    showRename = true
-                }, leadingIcon = { Icon(Icons.Outlined.Edit, null, tint = TextMuted) })
-                DropdownMenuItem(text = { Text("查看分支与 entries") }, onClick = {
-                    openEntries()
-                }, leadingIcon = { Icon(Icons.Outlined.Terminal, null, tint = TextMuted) })
-                DropdownMenuItem(text = { Text("压缩上下文") }, onClick = {
-                    repo.compact(nodeId, sessionId); showMenu = false
-                }, leadingIcon = { Icon(Icons.Outlined.Tune, null, tint = TextMuted) })
-                DropdownMenuItem(text = { Text("关闭会话") }, onClick = {
-                    showMenu = false
-                    // 请求成功才返回列表；失败留在会话内，错误由仓库写入聊天流的提示气泡，可直接重试。
-                    repo.closeSession(nodeId, sessionId) { onBack() }
-                }, leadingIcon = { Icon(Icons.Outlined.Close, null, tint = Rose) })
-            }
+            CarryIconButton(Icons.Outlined.MoreHoriz, "更多", onClick = { showMenu = true }, plain = true, size = 34)
         }
 
         Row(
-            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
-            horizontalArrangement = Arrangement.spacedBy(7.dp),
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 18.dp).padding(bottom = 9.dp),
+            horizontalArrangement = Arrangement.spacedBy(5.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Pill(
-                session?.status?.let(::statusLabel) ?: if (link[nodeId] == LinkState.Online) "在线" else "离线",
-                statusColor(session?.status ?: "idle"),
-                filled = true,
+            ChatMetaChip(
+                currentName.ifBlank { "默认模型" },
+                VioletSoft,
+                icon = Icons.Outlined.AutoAwesome,
+                onClick = { showModels = true },
             )
-            Pill(
-                "模型 · " + modelPillText(currentProvider, currentName.ifBlank { "默认" }),
-                Violet,
-            )
-            Pill("thinking · $currentThinking", Cyan)
-            // 末段截取必须认反斜杠（Windows 路径），且不能走 MonoLabel：那里会 uppercase，
-            // `C:\\Users\\me\\Project` 会变成 `C:\\USERS\\ME\\PROJECT` 且截不出末段（U-05）。
-            Text(
-                displayName(session?.cwd.orEmpty()).ifBlank { "~" },
-                style = MaterialTheme.typography.labelSmall,
-                color = TextMuted,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+            ChatMetaChip("thinking · $currentThinking", Cyan, onClick = { showModels = true })
+            ChatMetaChip(displayName(session?.cwd.orEmpty()).ifBlank { "~" }, TextMuted)
         }
 
         if (migrationNotice) {
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
-                    .clip(RoundedCornerShape(10.dp)).background(Cyan.copy(alpha = 0.10f)).padding(10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("已迁移到 fork 会话 · 旧会话已停止写入", style = MaterialTheme.typography.bodySmall, color = Cyan, modifier = Modifier.weight(1f))
-                Icon(Icons.Outlined.Close, "关闭提示", tint = TextMuted, modifier = Modifier.size(15.dp).clickable { migrationNotice = false })
-            }
+            NoticeBanner("已迁移到 fork 会话 · 旧会话已停止写入", Amber, onClose = { migrationNotice = false })
         }
 
-        if (session?.writable == false) {
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
-                    .clip(RoundedCornerShape(10.dp)).background(Amber.copy(alpha = 0.10f)).padding(10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    if (readOnly) "该会话已迁移，当前为只读" else "本机终端正在写这个会话，当前为只读",
-                    style = MaterialTheme.typography.bodySmall, color = Amber,
-                )
-            }
+        if (session?.writable == false && !migrationNotice) {
+            NoticeBanner(
+                // 只读原因必须按真实来源判断：这里已经在 `writable == false` 分支内，
+                // 再用 readOnly（含 writable 条件）判断会让「本机终端正在写」永不出现（BUG-025）。
+                if (migrated.contains(key)) "该会话已迁移，当前为只读" else "本机终端正在写这个会话，当前为只读",
+                Amber,
+            )
         }
         if (openError != null) {
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
-                    .clip(RoundedCornerShape(10.dp)).background(Rose.copy(alpha = 0.10f)).padding(10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("打开会话失败：$openError", style = MaterialTheme.typography.bodySmall, color = Rose, modifier = Modifier.weight(1f))
-                Text("重试", style = MaterialTheme.typography.bodySmall, color = Cyan,
-                    modifier = Modifier.clickable {
-                        scope.launch { repo.openSession(nodeId, sessionId) }
-                    })
-            }
+            NoticeBanner(
+                "打开会话失败：$openError",
+                Rose,
+                action = "重试" to { scope.launch { repo.openSession(nodeId, sessionId) } },
+            )
         }
 
         LazyColumn(
             state = listState,
             modifier = Modifier.weight(1f).fillMaxWidth(),
-            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            contentPadding = PaddingValues(horizontal = 18.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(15.dp),
         ) {
             items(messages, key = { it.id }) { msg ->
                 when (msg.role) {
@@ -732,10 +740,13 @@ fun ChatScreen(
             if (messages.isEmpty() && pending.isEmpty()) {
                 item {
                     Column(Modifier.fillMaxWidth().padding(top = 60.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                        Icon(Icons.Outlined.Terminal, null, tint = TextMuted, modifier = Modifier.size(32.dp))
-                        Spacer(Modifier.height(10.dp))
-                        Text("会话已连接", style = MaterialTheme.typography.titleMedium, color = TextSecondary)
-                        Text("在下方输入消息，pi 会在电脑上执行", style = MaterialTheme.typography.bodySmall, color = TextMuted)
+                        Box(Modifier.size(46.dp).clip(RoundedCornerShape(14.dp)).background(Violet.copy(alpha = 0.10f)).border(0.8.dp, Violet.copy(alpha = 0.25f), RoundedCornerShape(14.dp)), contentAlignment = Alignment.Center) {
+                            Icon(Icons.Outlined.Terminal, null, tint = VioletSoft, modifier = Modifier.size(22.dp))
+                        }
+                        Spacer(Modifier.height(12.dp))
+                        Text("会话已连接", style = MaterialTheme.typography.titleSmall, color = TextSecondary)
+                        Spacer(Modifier.height(2.dp))
+                        Text("在下方输入消息，pi 会在电脑上执行", style = MaterialTheme.typography.labelLarge, color = TextMuted)
                     }
                 }
             }
@@ -793,7 +804,7 @@ fun ChatScreen(
                 outgoing = outgoing.filterNot { it.id == id }
                 // 已上传的图移除后立即释放服务端额度（B-16）。
                 val sha = removed?.blobId
-                if (sha != null) {
+                if (sha != null && outgoing.none { it.blobId == sha }) {
                     scope.launch {
                         runCatching { repo.releaseBlob(nodeId, sessionId, sha) }
                             .onSuccess { usageBytes = it }
@@ -818,6 +829,8 @@ fun ChatScreen(
                     )
                     text = ""
                     failedSend = null
+                    // 上一次的图片错误与这次发送无关，不清掉会一直挂在输入框上方（BUG-024）。
+                    imageError = null
                     repo.saveDraft(nodeId, sessionId, "")
                     outgoing = emptyList()
                     sentTick += 1
@@ -828,8 +841,46 @@ fun ChatScreen(
     }
     }
 
+    if (showMenu) {
+        ModalBottomSheet(
+            onDismissRequest = { showMenu = false },
+            sheetState = menuSheetState,
+            containerColor = Panel,
+            shape = RoundedCornerShape(topStart = 26.dp, topEnd = 26.dp),
+            scrimColor = Color.Black.copy(alpha = 0.66f),
+            dragHandle = null,
+        ) {
+            SessionMenuSheet(
+                name = session?.title ?: "会话",
+                readOnly = readOnly,
+                onClose = { showMenu = false },
+                onRename = {
+                    showMenu = false
+                    renameText = session?.name.orEmpty()
+                    renameError = null
+                    showRename = true
+                },
+                onCopyId = {
+                    clipboard.setText(AnnotatedString(sessionId))
+                    Toast.makeText(context, "会话 ID 已复制", Toast.LENGTH_SHORT).show()
+                    showMenu = false
+                },
+                onEntries = { openEntries() },
+                onCompact = {
+                    showMenu = false
+                    repo.compact(nodeId, sessionId)
+                },
+                onCloseSession = {
+                    showMenu = false
+                    repo.closeSession(nodeId, sessionId) { onBack() }
+                },
+            )
+        }
+    }
+
     if (showModels) {
-        ModalBottomSheet(onDismissRequest = { showModels = false }, sheetState = sheetState, containerColor = Panel) {
+        ModalBottomSheet(onDismissRequest = { showModels = false }, sheetState = modelSheetState, containerColor = Panel,
+            shape = RoundedCornerShape(topStart = 26.dp, topEnd = 26.dp), scrimColor = Color.Black.copy(alpha = 0.66f), dragHandle = null) {
             ModelSheet(
                 repo = repo,
                 nodeId = nodeId,
@@ -839,12 +890,14 @@ fun ChatScreen(
                 currentProvider = currentProvider,
                 currentModelId = currentModelId,
                 currentThinking = currentThinking,
+                onClose = { showModels = false },
             )
         }
     }
     if (showCommands) {
-        ModalBottomSheet(onDismissRequest = { showCommands = false }, sheetState = sheetState, containerColor = Panel) {
-            CommandSheet { cmd ->
+        ModalBottomSheet(onDismissRequest = { showCommands = false }, sheetState = commandSheetState, containerColor = Panel,
+            shape = RoundedCornerShape(topStart = 26.dp, topEnd = 26.dp), scrimColor = Color.Black.copy(alpha = 0.66f), dragHandle = null) {
+            CommandSheet(onClose = { showCommands = false }) { cmd ->
                 showCommands = false
                 when (cmd.name) {
                     "model" -> showModels = true
@@ -855,21 +908,36 @@ fun ChatScreen(
         }
     }
     if (showRename) {
-        AlertDialog(
+        ModalBottomSheet(
             onDismissRequest = { showRename = false },
+            sheetState = renameSheetState,
             containerColor = Panel,
-            shape = RoundedCornerShape(24.dp),
-            title = { Text("重命名会话", style = MaterialTheme.typography.titleLarge, color = TextPrimary) },
-            text = {
-                Column {
+            shape = RoundedCornerShape(topStart = 26.dp, topEnd = 26.dp),
+            scrimColor = Color.Black.copy(alpha = 0.66f),
+            dragHandle = null,
+        ) {
+            Column(Modifier.fillMaxWidth()) {
+                CarrySheetGrabber()
+                CarrySheetHeader(
+                    title = "重命名会话",
+                    subtitle = "只影响列表与对话标题 · 不改变 .jsonl 路径",
+                    onClose = { showRename = false },
+                )
+                Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp).padding(bottom = 26.dp)) {
+                    MonoLabel("会话名称", color = TextMuted)
+                    Spacer(Modifier.height(5.dp))
                     Box(
-                        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(PanelHigh)
-                            .border(0.7.dp, Line, RoundedCornerShape(12.dp)).padding(12.dp),
+                        Modifier.fillMaxWidth().height(44.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Surface2)
+                            .border(0.8.dp, LineStrong, RoundedCornerShape(10.dp))
+                            .padding(horizontal = 12.dp),
+                        contentAlignment = Alignment.CenterStart,
                     ) {
                         BasicTextField(
                             value = renameText,
-                            onValueChange = { renameText = it.take(200); renameError = null },
-                            textStyle = TextStyle(color = TextPrimary, fontSize = 15.sp),
+                            onValueChange = { renameText = it.take(60); renameError = null },
+                            textStyle = TextStyle(color = TextPrimary, fontSize = 13.sp, fontFamily = Inter, lineHeight = 20.sp),
                             cursorBrush = SolidColor(Violet),
                             singleLine = true,
                             modifier = Modifier.fillMaxWidth(),
@@ -877,96 +945,146 @@ fun ChatScreen(
                     }
                     Spacer(Modifier.height(6.dp))
                     Text(
-                        renameError ?: "只改显示名，不会改写会话记录。",
+                        renameError ?: "留空则恢复默认名称；名称最长 60 个字符。",
                         style = MaterialTheme.typography.labelSmall,
                         color = if (renameError != null) Rose else TextMuted,
                     )
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    repo.renameSession(nodeId, sessionId, renameText) { error ->
-                        if (error == null) showRename = false else renameError = error
+                    Spacer(Modifier.height(14.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        CarryActionButton(
+                            "取消", { showRename = false },
+                            modifier = Modifier.weight(1f), kind = ButtonKind.Ghost,
+                        )
+                        CarryActionButton(
+                            "保存", {
+                                repo.renameSession(nodeId, sessionId, renameText) { error ->
+                                    if (error == null) showRename = false else renameError = error
+                                }
+                            },
+                            modifier = Modifier.weight(1.3f), kind = ButtonKind.Primary,
+                        )
                     }
-                }) { Text("保存", color = Violet, fontWeight = FontWeight.SemiBold) }
-            },
-            dismissButton = {
-                TextButton(onClick = { showRename = false }) { Text("取消", color = TextSecondary) }
-            },
-        )
+                }
+            }
+        }
     }
 
     if (showEntries) {
-        ModalBottomSheet(onDismissRequest = { if (!forking) showEntries = false }, sheetState = sheetState, containerColor = Panel) {
-            Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp).padding(bottom = 20.dp)) {
-                Text("分支与 entries", style = MaterialTheme.typography.headlineMedium, color = TextPrimary)
-                Spacer(Modifier.height(4.dp))
+        ModalBottomSheet(
+            onDismissRequest = { if (!forking) showEntries = false },
+            sheetState = entriesSheetState,
+            containerColor = Panel,
+            shape = RoundedCornerShape(topStart = 26.dp, topEnd = 26.dp),
+            scrimColor = Color.Black.copy(alpha = 0.66f),
+            dragHandle = null,
+        ) {
+            Column(Modifier.fillMaxWidth().fillMaxHeight(0.82f)) {
+                CarrySheetGrabber()
                 val page = entriesPage
-                Text(
-                    if (page == null) "从任意 entry 分叉会复制到该点，原会话保持不变。"
-                    else "当前 leaf · " + (page.leafId?.take(8) ?: "—") + " · 共 " + page.entries.size + " 条",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = TextMuted,
+                CarrySheetHeader(
+                    title = "分支与 entries",
+                    subtitle = if (page == null) "从任意 entry 分叉会复制到该点，原会话保持不变。"
+                    else "leaf ${page.leafId?.take(8) ?: "—"} · 共 ${page.entries.size} 条",
+                    onClose = { if (!forking) showEntries = false },
                 )
-                Spacer(Modifier.height(10.dp))
                 when {
-                    entriesLoading -> Box(Modifier.fillMaxWidth().height(120.dp), contentAlignment = Alignment.Center) {
+                    entriesLoading -> Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
                         CircularProgressIndicator(color = Violet, strokeWidth = 2.dp)
                     }
-                    entriesError != null -> {
+                    entriesError != null -> Column(Modifier.fillMaxWidth().weight(1f).padding(horizontal = 18.dp)) {
                         Text(entriesError.orEmpty(), style = MaterialTheme.typography.bodySmall, color = Rose)
                         Spacer(Modifier.height(8.dp))
-                        TextButton(onClick = { openEntries() }) { Text("重试", color = Cyan) }
+                        CarryActionButton("重试", { openEntries() }, kind = ButtonKind.Ghost)
                     }
                     page != null -> {
                         val children = remember(page) { page.entries.groupingBy { it.parentId }.eachCount() }
-                        LazyColumn(Modifier.fillMaxWidth().height(300.dp)) {
-                            items(page.entries.asReversed(), key = { it.id }) { entry ->
-                                val selected = entry.id == selectedEntryId
-                                Row(
-                                    Modifier.fillMaxWidth()
-                                        .padding(start = (entry.depth * 12).dp)
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(if (selected) Violet.copy(alpha = 0.16f) else Color.Transparent)
-                                        .clickable { selectedEntryId = entry.id }
-                                        .padding(horizontal = 8.dp, vertical = 7.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                ) {
-                                    Text(
-                                        entry.id.take(8),
-                                        style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
-                                        color = if (selected) Violet else TextMuted,
-                                    )
-                                    Spacer(Modifier.width(8.dp))
-                                    Text(
-                                        (if (entry.role.isBlank()) entry.type else entry.role) + " · " + entry.preview,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = if (selected) TextPrimary else TextSecondary,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.weight(1f),
-                                    )
-                                    if ((children[entry.id] ?: 0) > 1) {
-                                        Text("分支", style = MaterialTheme.typography.labelSmall, color = Amber)
+                        Box(Modifier.fillMaxWidth().weight(1f)) {
+                            Box(
+                                Modifier.padding(start = 32.dp, top = 8.dp, bottom = 8.dp)
+                                    .width(1.dp).fillMaxHeight().background(Line),
+                            )
+                            LazyColumn(
+                                Modifier.fillMaxSize(),
+                                contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 4.dp, bottom = 8.dp),
+                                verticalArrangement = Arrangement.spacedBy(2.dp),
+                            ) {
+                                items(page.entries.asReversed(), key = { it.id }) { entry ->
+                                    val selected = entry.id == selectedEntryId
+                                    val indent = (entry.depth * 13).dp
+                                    Row(
+                                        Modifier.fillMaxWidth()
+                                            .padding(start = indent)
+                                            .clip(RoundedCornerShape(11.dp))
+                                            .background(if (selected) Violet.copy(alpha = 0.10f) else Color.Transparent)
+                                            .border(
+                                                0.7.dp,
+                                                if (selected) Violet.copy(alpha = 0.30f) else Color.Transparent,
+                                                RoundedCornerShape(11.dp),
+                                            )
+                                            .clickable { selectedEntryId = entry.id }
+                                            .padding(vertical = 8.dp, horizontal = 7.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    ) {
+                                        val role = if (entry.role.isBlank()) entry.type else entry.role
+                                        Box(
+                                            Modifier.size(28.dp).clip(RoundedCornerShape(9.dp))
+                                                .background(if (selected) Violet.copy(alpha = 0.18f) else Surface2)
+                                                .border(0.7.dp, if (selected) Violet.copy(alpha = 0.35f) else Line, RoundedCornerShape(9.dp)),
+                                            contentAlignment = Alignment.Center,
+                                        ) {
+                                            Text(
+                                                when {
+                                                    role.contains("user", true) -> "U"
+                                                    role.contains("tool", true) -> "T"
+                                                    else -> "A"
+                                                },
+                                                style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                                                color = if (selected) VioletSoft else TextMuted,
+                                            )
+                                        }
+                                        Column(Modifier.weight(1f)) {
+                                            Text(
+                                                entry.preview.ifBlank { role },
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = if (selected) TextPrimary else TextSecondary,
+                                                maxLines = 2,
+                                                overflow = TextOverflow.Ellipsis,
+                                            )
+                                            Spacer(Modifier.height(2.dp))
+                                            Text(
+                                                entry.id.take(8) + " · " + role,
+                                                style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                                                color = TextMuted,
+                                                maxLines = 1,
+                                            )
+                                        }
+                                        if ((children[entry.id] ?: 0) > 1) {
+                                            Tag("分支", Amber)
+                                        }
                                     }
                                 }
                             }
                         }
-                        Spacer(Modifier.height(8.dp))
-                        Row(verticalAlignment = Alignment.CenterVertically) {
+                        Row(
+                            Modifier.fillMaxWidth().background(Surface2.copy(alpha = 0.7f))
+                                .padding(horizontal = 18.dp, vertical = 11.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
                             Text(
-                                "分叉会复制到所选 entry，不移动原会话。",
+                                "复制到所选 entry，不移动原会话。",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = TextMuted,
                                 modifier = Modifier.weight(1f),
                             )
-                            TextButton(onClick = { doFork() }, enabled = selectedEntryId != null && !forking) {
-                                Text(
-                                    if (forking) "正在分叉…" else "从 " + (selectedEntryId?.take(8) ?: "…") + " 分叉",
-                                    color = if (forking) TextMuted else Violet,
-                                    fontWeight = FontWeight.SemiBold,
-                                )
-                            }
+                            CarryActionButton(
+                                if (forking) "正在分叉…" else "从 ${selectedEntryId?.take(8) ?: "…"} 分叉",
+                                { doFork() },
+                                kind = ButtonKind.Primary,
+                                enabled = selectedEntryId != null && !forking,
+                                height = 38.dp,
+                            )
                         }
                     }
                 }
@@ -975,8 +1093,9 @@ fun ChatScreen(
     }
 
     openTurn?.let { turn ->
-        ModalBottomSheet(onDismissRequest = { openTurnAnchor = null }, sheetState = sheetState, containerColor = Panel) {
-            TurnDetailSheet(turn)
+        ModalBottomSheet(onDismissRequest = { openTurnAnchor = null }, sheetState = turnSheetState, containerColor = Panel,
+            shape = RoundedCornerShape(topStart = 26.dp, topEnd = 26.dp), scrimColor = Color.Black.copy(alpha = 0.66f), dragHandle = null) {
+            TurnDetailSheet(turn) { openTurnAnchor = null }
         }
     }
     openApproval?.let { approval ->
@@ -993,17 +1112,176 @@ fun ChatScreen(
 }
 
 @Composable
+private fun ChatMetaChip(
+    label: String,
+    color: Color,
+    running: Boolean = false,
+    icon: androidx.compose.ui.graphics.vector.ImageVector? = null,
+    onClick: (() -> Unit)? = null,
+) {
+    val shape = RoundedCornerShape(7.dp)
+    Row(
+        Modifier
+            .height(24.dp)
+            .clip(shape)
+            .background(if (onClick != null) Color.White.copy(alpha = 0.035f) else color.copy(alpha = 0.10f))
+            .border(0.7.dp, if (onClick != null) Line else color.copy(alpha = 0.22f), shape)
+            .then(if (onClick != null) Modifier.pressClickable(onClick = onClick, scale = 0.96f) else Modifier)
+            .padding(horizontal = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        if (running) {
+            CircularProgressIndicator(color = color, strokeWidth = 1.2.dp, modifier = Modifier.size(9.dp))
+        } else if (icon != null) {
+            Icon(icon, null, tint = color, modifier = Modifier.size(11.dp))
+        }
+        Text(
+            label,
+            style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+            color = if (onClick != null) TextSecondary else color,
+            maxLines = 1,
+        )
+    }
+}
+
+@Composable
+private fun NoticeBanner(
+    text: String,
+    color: Color,
+    action: Pair<String, () -> Unit>? = null,
+    onClose: (() -> Unit)? = null,
+) {
+    val shape = RoundedCornerShape(11.dp)
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 14.dp, vertical = 3.dp)
+            .clip(shape)
+            .background(color.copy(alpha = 0.09f))
+            .border(0.7.dp, color.copy(alpha = 0.28f), shape)
+            .padding(horizontal = 11.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(7.dp),
+    ) {
+        Box(Modifier.size(5.dp).clip(CircleShape).background(color))
+        Text(
+            text,
+            style = MaterialTheme.typography.labelLarge,
+            color = color,
+            modifier = Modifier.weight(1f),
+        )
+        if (action != null) {
+            Text(
+                action.first,
+                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                color = color,
+                modifier = Modifier.clip(RoundedCornerShape(6.dp)).clickable(onClick = action.second).padding(horizontal = 6.dp, vertical = 4.dp),
+            )
+        }
+        if (onClose != null) {
+            Icon(
+                Icons.Outlined.Close,
+                "关闭提示",
+                tint = color.copy(alpha = 0.75f),
+                modifier = Modifier.size(14.dp).clickable(onClick = onClose),
+            )
+        }
+    }
+}
+
+@Composable
+private fun SessionMenuSheet(
+    name: String,
+    readOnly: Boolean,
+    onClose: () -> Unit,
+    onRename: () -> Unit,
+    onCopyId: () -> Unit,
+    onEntries: () -> Unit,
+    onCompact: () -> Unit,
+    onCloseSession: () -> Unit,
+) {
+    Column(Modifier.fillMaxWidth()) {
+        CarrySheetGrabber()
+        CarrySheetHeader(title = "会话操作", subtitle = name, onClose = onClose)
+        Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp)) {
+            ChatMenuRow(Icons.Outlined.Edit, "重命名会话", "只改显示名，不改写记录", enabled = !readOnly, onClick = onRename)
+            ChatMenuRow(Icons.Outlined.ContentCopy, "复制会话 ID", "用于脚本或反馈问题", onClick = onCopyId)
+            ChatMenuRow(Icons.Outlined.AccountTree, "分支与 entries", "查看消息树，从任意节点分叉", enabled = !readOnly, onClick = onEntries)
+            ChatMenuRow(Icons.Outlined.Tune, "压缩上下文", "保留摘要，释放上下文窗口", enabled = !readOnly, onClick = onCompact)
+            Spacer(Modifier.height(6.dp))
+            HorizontalDivider(color = Line)
+            Spacer(Modifier.height(6.dp))
+            ChatMenuRow(Icons.Outlined.Close, "关闭会话", "不影响电脑上的 pi 记录", danger = true, onClick = onCloseSession)
+        }
+        Spacer(Modifier.height(24.dp))
+    }
+}
+
+@Composable
+private fun ChatMenuRow(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    title: String,
+    subtitle: String,
+    enabled: Boolean = true,
+    danger: Boolean = false,
+    onClick: () -> Unit,
+) {
+    val tint = when {
+        !enabled -> TextMuted.copy(alpha = 0.45f)
+        danger -> Rose
+        else -> TextSecondary
+    }
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .then(if (enabled) Modifier.pressClickable(onClick = onClick, scale = 0.985f) else Modifier)
+            .padding(vertical = 8.dp, horizontal = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(11.dp),
+    ) {
+        Box(
+            Modifier.size(30.dp).clip(RoundedCornerShape(9.dp))
+                .background(tint.copy(alpha = if (danger) 0.12f else 0.06f))
+                .border(0.7.dp, tint.copy(alpha = 0.14f), RoundedCornerShape(9.dp)),
+            contentAlignment = Alignment.Center,
+        ) { Icon(icon, null, tint = tint, modifier = Modifier.size(15.dp)) }
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Medium), color = if (danger) Rose else if (enabled) TextPrimary else TextMuted)
+            Spacer(Modifier.height(1.dp))
+            Text(subtitle, style = MaterialTheme.typography.labelSmall, color = TextMuted)
+        }
+    }
+}
+
+@Composable
 private fun UserBubble(msg: ChatMessage) {
     Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End) {
         if (msg.text.isNotBlank()) {
             Box(
                 Modifier
-                    .widthIn(max = 300.dp)
-                    .clip(RoundedCornerShape(18.dp, 18.dp, 5.dp, 18.dp))
-                    .background(Brush.linearGradient(listOf(Violet.copy(alpha = 0.88f), Color(0xFF5B4BE0))))
-                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                    .widthIn(max = 310.dp)
+                    .clip(RoundedCornerShape(16.dp, 16.dp, 5.dp, 16.dp))
+                    .background(Brush.linearGradient(listOf(Violet.copy(alpha = 0.30f), Violet.copy(alpha = 0.12f))))
+                    .border(0.7.dp, Violet.copy(alpha = 0.30f), RoundedCornerShape(16.dp, 16.dp, 5.dp, 16.dp))
+                    .padding(horizontal = 14.dp, vertical = 11.dp),
             ) {
-                Text(msg.text, style = MaterialTheme.typography.bodyLarge, color = Color.White)
+                Column {
+                    Text(msg.text, style = MaterialTheme.typography.bodyLarge.copy(lineHeight = 21.6.sp), color = TextPrimary)
+                    val stamp = msg.tsMs
+                    if (stamp > 0) {
+                        val clock = remember(stamp) {
+                            java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date(stamp))
+                        }
+                        Text(
+                            clock,
+                            style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMono, fontSize = 8.5.sp),
+                            color = VioletSoft.copy(alpha = 0.5f),
+                            textAlign = androidx.compose.ui.text.style.TextAlign.End,
+                            modifier = Modifier.align(Alignment.End).padding(top = 6.dp),
+                        )
+                    }
+                }
             }
         }
         if (msg.images.isNotEmpty()) {
@@ -1016,26 +1294,29 @@ private fun UserBubble(msg: ChatMessage) {
 @Composable
 private fun AssistantBlock(msg: ChatMessage) {
     Column(Modifier.fillMaxWidth()) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            Box(Modifier.size(16.dp).clip(CircleShape).background(Violet.copy(alpha = 0.22f)), contentAlignment = Alignment.Center) {
-                Box(Modifier.size(5.dp).clip(CircleShape).background(Violet))
-            }
-            MonoLabel(if (msg.streaming) "pi · 生成中" else "pi", color = if (msg.streaming) Violet else TextMuted)
-            if (msg.streaming) {
-                Box(Modifier.size(5.dp).clip(CircleShape).background(Violet))
-            }
+        if (msg.streaming) {
+            MonoLabel("pi · 生成中", color = Violet)
+            Spacer(Modifier.height(5.dp))
         }
         if (msg.thinking.isNotBlank()) {
             var expanded by remember(msg.id) { mutableStateOf(false) }
+            val dashedLine = LineStrong
             Spacer(Modifier.height(6.dp))
             Column(
                 Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(Panel.copy(alpha = 0.65f))
-                    .border(0.7.dp, Line.copy(alpha = 0.7f), RoundedCornerShape(12.dp))
+                    .drawBehind {
+                        val stroke = 1.dp.toPx()
+                        drawLine(
+                            color = dashedLine,
+                            start = Offset(stroke / 2, 0f),
+                            end = Offset(stroke / 2, size.height),
+                            strokeWidth = stroke,
+                            pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(4.dp.toPx(), 4.dp.toPx())),
+                        )
+                    }
                     .clickable { expanded = !expanded }
-                    .padding(11.dp),
+                    .padding(start = 11.dp, top = 2.dp, bottom = 2.dp),
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Outlined.Psychology, null, tint = TextMuted, modifier = Modifier.size(14.dp))
@@ -1047,9 +1328,9 @@ private fun AssistantBlock(msg: ChatMessage) {
                 AnimatedVisibility(visible = expanded) {
                     Text(
                         msg.thinking,
-                        style = MaterialTheme.typography.bodySmall,
+                        style = MaterialTheme.typography.bodySmall.copy(lineHeight = 19.sp),
                         color = TextMuted,
-                        modifier = Modifier.padding(top = 7.dp),
+                        modifier = Modifier.padding(top = 6.dp),
                     )
                 }
             }
@@ -1085,17 +1366,17 @@ private fun ToolCard(tool: ToolCall) {
     Column(
         Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
-            .background(Panel.copy(alpha = 0.72f))
-            .border(0.7.dp, if (tool.isError) Rose.copy(alpha = 0.4f) else Line, RoundedCornerShape(14.dp))
+            .clip(RoundedCornerShape(13.dp))
+            .background(Panel.copy(alpha = 0.55f))
+            .border(0.7.dp, if (tool.isError) Rose.copy(alpha = 0.4f) else Line, RoundedCornerShape(13.dp))
             .clickable { expanded = !expanded }
-            .padding(12.dp),
+            .padding(horizontal = 10.dp, vertical = 9.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-            Box(Modifier.size(24.dp).clip(RoundedCornerShape(7.dp)).background(Cyan.copy(alpha = 0.12f)), contentAlignment = Alignment.Center) {
-                Icon(Icons.Outlined.Terminal, null, tint = if (tool.isError) Rose else Cyan, modifier = Modifier.size(13.dp))
+            Box(Modifier.size(26.dp).clip(RoundedCornerShape(8.dp)).background(Cyan.copy(alpha = 0.10f)), contentAlignment = Alignment.Center) {
+                Icon(Icons.Outlined.Terminal, null, tint = if (tool.isError) Rose else Cyan, modifier = Modifier.size(14.dp))
             }
-            Text(tool.name, style = MaterialTheme.typography.titleMedium, color = TextPrimary)
+            Text(tool.name, style = MaterialTheme.typography.labelLarge.copy(fontFamily = FontFamily.Monospace), color = TextPrimary)
             if (tool.durationMs > 0) MonoLabel("${tool.durationMs}ms", color = TextMuted)
             Spacer(Modifier.weight(1f))
             when (tool.status) {
@@ -1111,7 +1392,7 @@ private fun ToolCard(tool: ToolCall) {
             Spacer(Modifier.height(6.dp))
             Text(
                 summary.take(if (expanded) 4000 else 160),
-                style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
                 color = TextMuted,
                 maxLines = if (expanded) 80 else 1,
                 overflow = TextOverflow.Ellipsis,
@@ -1135,11 +1416,13 @@ private fun ToolCard(tool: ToolCall) {
                 if (tool.result.isNotBlank()) {
                     Spacer(Modifier.height(9.dp))
                     MonoLabel(if (tool.isError) "错误输出" else "结果", color = if (tool.isError) Rose else TextMuted)
-                    Text(
-                        tool.result.take(20000),
-                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-                        color = if (tool.isError) Rose else TextSecondary,
-                    )
+                    Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(9.dp)).background(Color.Black.copy(alpha = 0.28f)).padding(10.dp)) {
+                        Text(
+                            tool.result.take(20000),
+                            style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace, lineHeight = 16.sp),
+                            color = if (tool.isError) Rose else TextSecondary,
+                        )
+                    }
                 }
             }
         }
@@ -1200,8 +1483,9 @@ private fun MarkdownBody(text: String, streaming: Boolean = false) {
             TextView(ctx).apply {
                 setTextIsSelectable(true)
                 movementMethod = LinkMovementMethod.getInstance()
-                setLineSpacing(0f, 1.16f)
-                textSize = 15f
+                setLineSpacing(0f, 1.72f)
+                typeface = ResourcesCompat.getFont(ctx, R.font.inter_400)
+                textSize = 13.5f
                 setTextColor(textColor)
                 setLinkTextColor(linkColor)
                 setPadding(0, 0, 0, 0)
@@ -1234,6 +1518,28 @@ private suspend fun decodeImage(part: ImagePart, loader: suspend (ImagePart) -> 
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
     }.getOrNull()
 
+/**
+ * 上传成功后保留的小图（约 20 KB）：原图字节可以丢，缩略图必须留到发送前，
+ * 否则用户再也无法核对待发的是哪张图（BUG-007）。调用方负责在 IO 线程执行。
+ */
+private fun thumbnailBytes(bytes: ByteArray, maxSide: Int = 240): ByteArray? = runCatching {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+    val opts = BitmapFactory.Options().apply {
+        inSampleSize = computeSampleSize(bounds.outWidth, bounds.outHeight, maxSide)
+    }
+    val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+    if (bitmap == null) {
+        null
+    } else {
+        java.io.ByteArrayOutputStream().use { out ->
+            bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 80, out)
+            bitmap.recycle()
+            out.toByteArray()
+        }
+    }
+}.getOrNull()
+
 @Composable
 private fun ImageStrip(images: List<ImagePart>, modifier: Modifier = Modifier) {
     var preview by remember { mutableStateOf<ImagePart?>(null) }
@@ -1254,7 +1560,7 @@ private fun ImageStrip(images: List<ImagePart>, modifier: Modifier = Modifier) {
             if (image == null) {
                 // 加载中/不可用不能直接消失，否则用户以为图片丢了（B-42）。
                 Box(
-                    Modifier.size(150.dp).clip(RoundedCornerShape(10.dp)).background(Panel)
+                    Modifier.size(96.dp).clip(RoundedCornerShape(9.dp)).background(Panel)
                         .border(0.7.dp, Line, RoundedCornerShape(10.dp))
                         .clickable(enabled = loaded && !part.unavailable) { retry += 1 },
                     contentAlignment = Alignment.Center,
@@ -1276,9 +1582,9 @@ private fun ImageStrip(images: List<ImagePart>, modifier: Modifier = Modifier) {
                     contentDescription = "图片 ${index + 1}",
                     contentScale = ContentScale.Crop,
                     modifier = Modifier
-                        .size(150.dp)
-                        .clip(RoundedCornerShape(10.dp))
-                        .border(0.7.dp, Line, RoundedCornerShape(10.dp))
+                        .size(96.dp)
+                        .clip(RoundedCornerShape(9.dp))
+                        .border(0.7.dp, Line, RoundedCornerShape(9.dp))
                         .clickable { preview = part },
                 )
             }
@@ -1324,30 +1630,52 @@ private fun ImageStrip(images: List<ImagePart>, modifier: Modifier = Modifier) {
 @Composable
 private fun ApprovalCard(approval: Approval, onClick: () -> Unit) {
     val remaining = rememberCountdown(approval)
+    val accent = Rose
     Column(
         Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(15.dp))
-            .background(Rose.copy(alpha = 0.055f))
-            .border(0.8.dp, Rose.copy(alpha = 0.45f), RoundedCornerShape(15.dp))
+            .clip(RoundedCornerShape(16.dp))
+            .background(Brush.linearGradient(listOf(Rose.copy(alpha = 0.12f), Rose.copy(alpha = 0.035f))))
+            .border(0.8.dp, Rose.copy(alpha = 0.42f), RoundedCornerShape(16.dp))
+            .drawBehind {
+                drawLine(accent.copy(alpha = 0.85f), Offset(1.5.dp.toPx(), 12.dp.toPx()), Offset(1.5.dp.toPx(), size.height - 12.dp.toPx()), 2.dp.toPx())
+            }
             .clickable(onClick = onClick)
-            .padding(13.dp),
+            .padding(horizontal = 15.dp, vertical = 13.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.Outlined.Bolt, null, tint = Rose, modifier = Modifier.size(15.dp))
-            Spacer(Modifier.size(6.dp))
-            Text("待审批 · ${approval.toolName}", style = MaterialTheme.typography.titleMedium, color = Rose)
+            Tag(approval.risk, riskColor(approval.risk), filled = true)
+            Spacer(Modifier.size(7.dp))
+            Text(approval.toolName, style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMono), color = TextSecondary)
             Spacer(Modifier.weight(1f))
             MonoLabel(if (remaining <= 0) "已超时" else "${remaining}s", color = if (remaining <= 0) TextMuted else Rose)
         }
-        Spacer(Modifier.height(6.dp))
-        Text(approval.summary.ifBlank { approval.command ?: "高风险操作" }, style = MaterialTheme.typography.bodyMedium, color = TextSecondary, maxLines = 2)
+        Spacer(Modifier.height(7.dp))
+        Text(
+            approval.command ?: approval.summary.ifBlank { "高风险操作" },
+            style = MaterialTheme.typography.labelMedium.copy(fontFamily = JetBrainsMono, lineHeight = 17.sp),
+            color = TextPrimary,
+            maxLines = 3,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(9.dp))
+                .background(Color.Black.copy(alpha = 0.35f)).padding(horizontal = 10.dp, vertical = 8.dp),
+        )
+        Spacer(Modifier.height(8.dp))
+        Box(Modifier.fillMaxWidth().height(2.dp).clip(CircleShape).background(Rose.copy(alpha = 0.12f))) {
+            Box(Modifier.fillMaxWidth((remaining / 120f).coerceIn(0f, 1f)).fillMaxHeight().background(Rose.copy(alpha = 0.8f)))
+        }
         Spacer(Modifier.height(9.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Pill(approval.risk, riskColor(approval.risk), filled = true)
-            Pill(approval.category, TextMuted)
-            Spacer(Modifier.weight(1f))
-            Text("查看并处理 →", style = MaterialTheme.typography.labelMedium, color = Rose)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                approval.cwd.ifBlank { approval.path.orEmpty() },
+                style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMono),
+                color = TextMuted,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            Spacer(Modifier.size(8.dp))
+            Text("审批 →", style = MaterialTheme.typography.labelMedium, color = Rose)
         }
     }
 }
@@ -1360,7 +1688,7 @@ private fun ApprovalDialog(
     onDecide: (String, Boolean) -> Unit,
     onExtend: () -> Unit,
 ) {
-    var rememberRule by remember { mutableStateOf(false) }
+    var rememberRule by remember(approval.id) { mutableStateOf(false) }
     var remaining by remember(approval.id) { mutableStateOf(approval.remainingSeconds) }
     LaunchedEffect(approval.id, approval.remainingSeconds) {
         remaining = approval.remainingSeconds
@@ -1371,86 +1699,155 @@ private fun ApprovalDialog(
     }
     // 服务端到点即超时拒绝：按钮必须一起失效，否则用户以为还能批准。
     val expired = remaining <= 0
-    AlertDialog(
+    val critical = approval.risk.equals("critical", ignoreCase = true)
+    val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ModalBottomSheet(
         onDismissRequest = onDismiss,
+        sheetState = sheet,
         containerColor = Panel,
-        shape = RoundedCornerShape(24.dp),
-        title = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            shape = RoundedCornerShape(topStart = 26.dp, topEnd = 26.dp),
+        scrimColor = Color.Black.copy(alpha = 0.66f),
+        dragHandle = null,
+    ) {
+        Column(Modifier.fillMaxWidth()) {
+            CarrySheetGrabber()
+            Row(
+                Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 4.dp, bottom = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(11.dp),
+            ) {
+                Box(
+                    Modifier.size(44.dp).clip(RoundedCornerShape(13.dp))
+                        .background(Brush.linearGradient(listOf(Rose.copy(alpha = 0.30f), Rose.copy(alpha = 0.10f))))
+                        .border(0.8.dp, Rose.copy(alpha = 0.38f), RoundedCornerShape(13.dp)),
+                    contentAlignment = Alignment.Center,
+                ) { Icon(Icons.Outlined.Bolt, null, tint = Rose, modifier = Modifier.size(21.dp)) }
                 Column(Modifier.weight(1f)) {
-                    Text("待审批操作", style = MaterialTheme.typography.titleLarge, color = TextPrimary)
-                    // 审批弹窗里的目录名同样不能大写（U-05）：路径大小写对用户是有意义的信息。
+                    Text("需要审批", style = MaterialTheme.typography.titleLarge, color = TextPrimary)
+                    Spacer(Modifier.height(2.dp))
                     Text(
-                        "${approval.toolName} · ${displayName(approval.cwd)}",
+                        approval.toolName + " · " + displayName(approval.cwd),
                         style = MaterialTheme.typography.labelSmall,
                         color = TextMuted,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
-                Box(
-                    Modifier.size(44.dp).clip(CircleShape).border(1.dp, Rose.copy(alpha = 0.6f), CircleShape),
-                    contentAlignment = Alignment.Center,
-                ) { Text("$remaining", style = MaterialTheme.typography.labelLarge, color = if (expired) TextMuted else Rose) }
-            }
-        },
-        text = {
-            Column {
-                Text("批准后立即在电脑本机执行", style = MaterialTheme.typography.bodyMedium, color = Rose)
-                Spacer(Modifier.height(12.dp))
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Pill(approval.risk, riskColor(approval.risk), filled = true)
-                    Pill(approval.category, TextMuted)
-                    Spacer(Modifier.weight(1f))
-                    MonoLabel("${approval.remainingSeconds}s 超时拒绝", color = TextMuted)
+                Box(Modifier.size(44.dp), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(
+                        progress = { if (approval.remainingSeconds <= 0) 0f else (remaining.toFloat() / approval.remainingSeconds).coerceIn(0f, 1f) },
+                        color = if (expired) TextMuted else Rose,
+                        trackColor = Line,
+                        strokeWidth = 2.dp,
+                        modifier = Modifier.size(44.dp),
+                    )
+                    Text(
+                        if (expired) "0" else "$remaining",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (expired) TextMuted else Rose,
+                    )
                 }
-                Spacer(Modifier.height(12.dp))
-                KeyValue("COMMAND", approval.command ?: approval.summary)
-                KeyValue("CWD", approval.cwd.ifBlank { "—" })
-                KeyValue("SESSION", approval.sessionId.take(12))
-                KeyValue("REQUEST", approval.requestedAt)
-                Spacer(Modifier.height(10.dp))
+            }
+            Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp).padding(bottom = 26.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Tag(approval.risk, riskColor(approval.risk), filled = true)
+                    Tag(approval.category, TextMuted)
+                    Spacer(Modifier.weight(1f))
+                    MonoLabel(if (expired) "已超时 · 将按拒绝处理" else "批准后立即在本机执行", color = if (expired) TextMuted else Rose)
+                }
+                Spacer(Modifier.height(11.dp))
+                Column(
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                        .background(Color.Black.copy(alpha = 0.34f))
+                        .border(0.7.dp, Line, RoundedCornerShape(12.dp))
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        MonoLabel("COMMAND", color = TextMuted)
+                        Spacer(Modifier.weight(1f))
+                        Icon(Icons.Outlined.Lock, null, tint = TextMuted, modifier = Modifier.size(11.dp))
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        approval.command ?: approval.summary,
+                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace, lineHeight = 17.sp),
+                        color = TextPrimary,
+                        maxLines = 8,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Spacer(Modifier.height(9.dp))
+                ApprovalKeyValue("CWD", approval.cwd.ifBlank { "—" })
+                ApprovalKeyValue("SESSION", approval.sessionId.take(12))
+                ApprovalKeyValue("REQUEST", approval.requestedAt)
+                Spacer(Modifier.height(9.dp))
                 Row(
-                    Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(PanelHigh).padding(horizontal = 10.dp, vertical = 6.dp),
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(Surface2).padding(horizontal = 10.dp, vertical = 7.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text("记住此命令（仅此命令）", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
-                    Spacer(Modifier.weight(1f))
-                    Switch(
-                        checked = rememberRule,
-                        onCheckedChange = { rememberRule = it },
-                        colors = SwitchDefaults.colors(checkedTrackColor = Violet, uncheckedTrackColor = Line),
-                    )
+                    Column(Modifier.weight(1f)) {
+                        Text("记住此命令", style = MaterialTheme.typography.bodySmall, color = if (critical) TextMuted else TextSecondary)
+                        Text(
+                            if (critical) "危险命令不允许记住" else "仅记住这一条命令",
+                            style = MaterialTheme.typography.labelSmall, color = TextMuted,
+                        )
+                    }
+                    CarrySwitch(checked = rememberRule && !critical, onCheckedChange = { rememberRule = it }, enabled = !critical)
                 }
                 Spacer(Modifier.height(6.dp))
                 Text(
                     if (expired) "已超时：服务端已按拒绝处理，请等待下一次审批请求。"
-                    else "本对话都允许：后续普通工具不再询问；rm -rf 等危险命令仍会逐次确认，重启 App/桥后恢复逐次审批。",
+                    else "本对话都允许：后续普通工具不再询问；rm -rf 等危险命令仍会逐次确认。",
                     style = MaterialTheme.typography.labelSmall,
                     color = if (expired) Rose else TextMuted,
                 )
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = { onDecide("allow", rememberRule) }, enabled = !expired) {
-                Text("批准并执行", color = if (expired) TextMuted else Rose, fontWeight = FontWeight.SemiBold)
-            }
-        },
-        dismissButton = {
-            Row {
-                TextButton(
-                    onClick = { onExtend(); remaining = (remaining + 120).coerceAtMost(300) },
-                    enabled = !expired && remaining < 300,
-                ) { Text("延长 120 秒", color = if (expired) TextMuted else Amber) }
-                TextButton(onClick = { onDecide("deny", false) }, enabled = !expired) {
-                    Text("拒绝", color = if (expired) TextMuted else TextSecondary)
+                Spacer(Modifier.height(13.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(7.dp), verticalAlignment = Alignment.CenterVertically) {
+                    CarryActionButton(
+                        "拒绝", { onDecide("deny", false) },
+                        modifier = Modifier.weight(1f), kind = ButtonKind.Ghost, enabled = !expired, height = 44.dp,
+                    )
+                    CarryActionButton(
+                        "延长 120s", { onExtend(); remaining = (remaining + 120).coerceAtMost(300) },
+                        modifier = Modifier.weight(1.12f), kind = ButtonKind.Ghost, enabled = !expired && remaining < 300, height = 44.dp,
+                    )
+                    CarryActionButton(
+                        "批准", { onDecide("allow", rememberRule && !critical) },
+                        modifier = Modifier.weight(1.35f), kind = ButtonKind.Danger, enabled = !expired, height = 44.dp,
+                    )
                 }
-                TextButton(onClick = { onDecide("allow_always", rememberRule) }, enabled = !expired) {
-                    Text("本对话都允许", color = if (expired) TextMuted else Cyan, fontWeight = FontWeight.SemiBold)
-                }
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "本对话都允许",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = Cyan,
+                    modifier = Modifier.fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable(enabled = !expired) { onDecide("allow_always", rememberRule && !critical) }
+                        .padding(vertical = 10.dp),
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                )
             }
-        },
-    )
+        }
+    }
+}
+
+@Composable
+private fun ApprovalKeyValue(key: String, value: String) {
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        MonoLabel(key, color = TextMuted)
+        Spacer(Modifier.weight(1f))
+        Text(
+            value,
+            style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+            color = TextSecondary,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
 }
 
 @Composable
@@ -1483,159 +1880,262 @@ private fun Composer(
     onStop: () -> Unit,
 ) {
     fun mb(v: Long): String = String.format(java.util.Locale.US, "%.1f", v / 1048576.0)
+    val canSend = !readOnly && (text.isNotBlank() || pendingImages.isNotEmpty())
     Column(
         Modifier
             .fillMaxWidth()
-            .background(Ink.copy(alpha = 0.94f))
-            .padding(horizontal = 12.dp, vertical = 8.dp)
+            .background(Brush.verticalGradient(listOf(Ink.copy(alpha = 0f), Ink.copy(alpha = 0.96f))))
+            .navigationBarsPadding()
+            .padding(start = 14.dp, end = 14.dp, top = 8.dp, bottom = 14.dp),
     ) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-            ModeChip("自动", mode == "auto") { onMode("auto") }
-            ModeChip("插话", mode == "steer") { onMode("steer") }
-            ModeChip("排队", mode == "queue") { onMode("queue") }
-            if (readOnly) MonoLabel("只读", color = Amber)
-            Spacer(Modifier.weight(1f))
-            Box(Modifier.size(30.dp).clip(CircleShape).clickable(onClick = onCommands), contentAlignment = Alignment.Center) {
-                Text("/", style = MaterialTheme.typography.titleMedium, color = TextMuted)
+        if (running) {
+            Row(
+                Modifier.fillMaxWidth().height(26.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Row(
+                    Modifier.height(26.dp).clip(RoundedCornerShape(8.dp)).background(Surface2.copy(alpha = 0.72f)).padding(2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    StreamModeButton("插话", mode == "steer", Modifier.width(52.dp)) { onMode("steer") }
+                    StreamModeButton("排队", mode == "queue", Modifier.width(52.dp)) { onMode("queue") }
+                }
+                Spacer(Modifier.weight(1f))
+                StreamModeButton("打断", false, Modifier.width(58.dp), danger = true, icon = Icons.Outlined.Stop, onClick = onStop)
             }
-            Box(Modifier.size(30.dp).clip(CircleShape).clickable(onClick = onModels), contentAlignment = Alignment.Center) {
-                Icon(Icons.Outlined.Tune, "选择模型", tint = TextMuted, modifier = Modifier.size(16.dp))
-            }
+            Spacer(Modifier.height(7.dp))
         }
         if (pendingImages.isNotEmpty()) {
-            Spacer(Modifier.height(6.dp))
-            // 队列总进度：不能只显示单张，用户看不到 10 张里还剩几张（B-43）。
             val done = pendingImages.count { it.blobId != null || it.error != null }
-            if (pendingImages.any { it.uploading }) {
-                Text(
-                    "正在上传 ${done.coerceAtMost(pendingImages.size)}/${pendingImages.size} 张",
-                    style = MaterialTheme.typography.labelSmall, color = Cyan,
-                )
-                LinearProgressIndicator(
-                    progress = { pendingImages.sumOf { (if (it.blobId != null) 1f else it.progress).toDouble() }.toFloat() / pendingImages.size },
-                    modifier = Modifier.fillMaxWidth().padding(top = 3.dp).height(2.dp),
-                    color = Cyan, trackColor = Line,
-                )
-                Spacer(Modifier.height(4.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                MonoLabel("附件 $done/${pendingImages.size}", color = TextMuted)
+                Spacer(Modifier.weight(1f))
+                MonoLabel("会话 ${mb(usageBytes)}/${mb(usageLimit)} MiB", color = if (usageBytes > usageLimit) Rose else TextMuted)
             }
-            LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                items(pendingImages, key = { it.id }) { item ->
-                    Column(
-                        Modifier.width(152.dp).clip(RoundedCornerShape(10.dp)).background(Panel).padding(8.dp),
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Outlined.Image, null, tint = Cyan, modifier = Modifier.size(14.dp))
-                            Spacer(Modifier.width(5.dp))
-                            Text(
-                                mb(item.size) + " MB",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = TextSecondary,
-                                modifier = Modifier.weight(1f),
-                            )
-                            Icon(
-                                Icons.Outlined.Close, "移除图片", tint = TextMuted,
-                                modifier = Modifier.size(14.dp).clickable { onRemoveImage(item.id) },
-                            )
-                        }
-                        Spacer(Modifier.height(3.dp))
-                        if (item.uploading) {
-                            Text(
-                                "上传中 " + (item.progress * 100).toInt() + "%",
-                                style = MaterialTheme.typography.labelSmall, color = Cyan,
-                            )
-                            LinearProgressIndicator(
-                                progress = { item.progress },
-                                modifier = Modifier.fillMaxWidth().padding(top = 3.dp).height(2.dp),
-                                color = Cyan,
-                                trackColor = Line,
-                            )
-                        } else if (item.error != null) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(
-                                    item.error,
-                                    style = MaterialTheme.typography.labelSmall, color = Rose,
-                                    maxLines = 1, overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.weight(1f),
-                                )
-                                Text(
-                                    "重试", style = MaterialTheme.typography.labelSmall, color = Cyan,
-                                    modifier = Modifier.clickable { onRetryImage(item.id) },
-                                )
-                            }
-                        } else {
-                            Text("已上传", style = MaterialTheme.typography.labelSmall, color = Mint)
-                        }
+            Spacer(Modifier.height(6.dp))
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                itemsIndexed(pendingImages, key = { _, item -> item.id }) { index, item ->
+                    OutgoingThumb(
+                        item = item,
+                        index = index,
+                        onRemove = { onRemoveImage(item.id) },
+                        onRetry = { onRetryImage(item.id) },
+                    )
+                }
+                if (pendingImages.size < MAX_IMAGES_PER_MESSAGE && !readOnly) {
+                    item {
+                        val dashedLine = LineStrong
+                        Box(
+                            Modifier.size(76.dp)
+                                .clip(RoundedCornerShape(9.dp))
+                                .background(Color.White.copy(alpha = 0.02f))
+                                .drawBehind {
+                                    val stroke = 0.8.dp.toPx()
+                                    drawRoundRect(
+                                        color = dashedLine,
+                                        style = androidx.compose.ui.graphics.drawscope.Stroke(
+                                            width = stroke,
+                                            pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(5.dp.toPx(), 4.dp.toPx())),
+                                        ),
+                                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(9.dp.toPx()),
+                                    )
+                                }
+                                .clickable(onClick = onPickImage),
+                            contentAlignment = Alignment.Center,
+                        ) { Icon(Icons.Outlined.Add, "添加图片", tint = TextMuted, modifier = Modifier.size(18.dp)) }
                     }
                 }
             }
-            Spacer(Modifier.height(4.dp))
-            Text(
-                pendingImages.size.toString() + "/" + MAX_IMAGES_PER_MESSAGE + " 张 · 单张 ≤" +
-                    MAX_IMAGE_MB + "MB · 会话 " + mb(usageBytes) + "/" + mb(usageLimit) + " MB",
-                style = MaterialTheme.typography.labelSmall,
-                color = if (usageBytes > usageLimit) Rose else TextMuted,
+            Spacer(Modifier.height(6.dp))
+            LinearProgressIndicator(
+                progress = { if (usageLimit <= 0) 0f else (usageBytes.toFloat() / usageLimit).coerceIn(0f, 1f) },
+                modifier = Modifier.fillMaxWidth().height(3.dp).clip(CircleShape),
+                color = if (usageBytes > usageLimit) Rose else Violet,
+                trackColor = Line,
             )
+            Spacer(Modifier.height(7.dp))
         }
         if (imageError != null) {
-            Spacer(Modifier.height(4.dp))
-            Text(imageError, style = MaterialTheme.typography.labelSmall, color = Rose)
+            Text(
+                imageError,
+                style = MaterialTheme.typography.labelSmall,
+                color = Rose,
+                modifier = Modifier.padding(bottom = 5.dp),
+            )
         }
-        Spacer(Modifier.height(7.dp))
-        Row(verticalAlignment = Alignment.Bottom) {
-            Box(Modifier.size(38.dp).clip(CircleShape).background(Panel).clickable(enabled = !readOnly, onClick = onPickImage), contentAlignment = Alignment.Center) {
-                Icon(Icons.Outlined.Image, "添加图片", tint = TextMuted, modifier = Modifier.size(18.dp))
+        Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Box(
+                Modifier.size(31.dp).clip(RoundedCornerShape(9.dp))
+                    .background(Color.White.copy(alpha = 0.035f))
+                    .border(0.7.dp, Line, RoundedCornerShape(9.dp))
+                    .clickable(enabled = !readOnly, onClick = onPickImage),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(Icons.Outlined.AddPhotoAlternate, "添加图片", tint = if (readOnly) TextMuted.copy(alpha = 0.4f) else TextSecondary, modifier = Modifier.size(16.dp))
             }
-            Spacer(Modifier.width(8.dp))
             Box(
                 Modifier
                     .weight(1f)
                     .clip(RoundedCornerShape(19.dp))
-                    .background(Panel)
-                    .border(0.7.dp, Line, RoundedCornerShape(19.dp))
-                    .padding(horizontal = 13.dp, vertical = 11.dp),
+                    .background(Brush.verticalGradient(listOf(Surface3, Surface2)))
+                    .border(0.8.dp, LineStrong, RoundedCornerShape(19.dp))
+                    .padding(horizontal = 13.dp, vertical = 9.dp),
             ) {
                 if (text.isBlank()) {
                     Text(
                         if (readOnly) "该会话已迁移，只读"
-                        else if (running) "插入一条消息 / 输入指令…" else "发消息给 pi，/ 唤起命令…",
+                        else if (running) "插入一条消息 / 输入指令…" else "给 pi 发消息… 输入 / 唤起命令",
                         style = MaterialTheme.typography.bodyMedium, color = TextMuted,
                     )
                 }
                 BasicTextField(
                     value = text,
-                    onValueChange = onText,
+                    onValueChange = { value ->
+                        if (value == "/" && text.isBlank()) onCommands() else onText(value)
+                    },
                     enabled = !readOnly,
-                    textStyle = TextStyle(color = TextPrimary, fontSize = 14.sp, lineHeight = 20.sp, fontFamily = FontFamily.SansSerif),
+                    textStyle = MaterialTheme.typography.bodyMedium.copy(color = TextPrimary, fontSize = 13.sp, lineHeight = 21.sp),
                     cursorBrush = SolidColor(Violet),
                     maxLines = 5,
                     modifier = Modifier.fillMaxWidth(),
                 )
             }
-            Spacer(Modifier.width(8.dp))
-            // 空输入且不在运行时发送按钮应为置灰禁用态：可点但什么都不发生，
-            // 用户会以为“点了没反应/消息丢了”。
-            val idleEmpty = readOnly || (!running && text.isBlank() && pendingImages.isEmpty())
             Box(
                 Modifier
-                    .size(40.dp)
-                    .clip(CircleShape)
+                    .size(32.dp)
+                    .clip(RoundedCornerShape(10.dp))
                     .background(
-                        when {
-                            running && text.isBlank() -> Rose
-                            idleEmpty -> PanelHigh
-                            else -> Violet
-                        }
+                        if (canSend) Brush.linearGradient(listOf(Violet, VioletSoft))
+                        else Brush.linearGradient(listOf(TextMuted.copy(alpha = 0.14f), TextMuted.copy(alpha = 0.10f)))
                     )
-                    .clickable(enabled = !idleEmpty) { if (running && text.isBlank()) onStop() else onSend() },
+                    .clickable(enabled = canSend, onClick = onSend),
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
-                    if (running && text.isBlank()) Icons.Outlined.StopCircle else Icons.Outlined.ArrowUpward,
-                    if (running && text.isBlank()) "停止" else "发送",
-                    tint = if (idleEmpty) TextMuted else Color.White,
-                    modifier = Modifier.size(20.dp),
+                    Icons.Outlined.ArrowUpward,
+                    "发送",
+                    tint = if (canSend) Color.White else TextMuted,
+                    modifier = Modifier.size(17.dp),
                 )
             }
+        }
+        if (readOnly) {
+            Spacer(Modifier.height(5.dp))
+            Text("只读会话 · 图片与消息发送已禁用", style = MaterialTheme.typography.labelSmall, color = Amber)
+        }
+    }
+}
+
+@Composable
+private fun StreamModeButton(
+    label: String,
+    active: Boolean,
+    modifier: Modifier = Modifier,
+    danger: Boolean = false,
+    icon: androidx.compose.ui.graphics.vector.ImageVector? = null,
+    onClick: () -> Unit,
+) {
+    val color = if (danger) Rose else if (active) VioletSoft else TextMuted
+    Box(
+        modifier.height(26.dp)
+            .clip(RoundedCornerShape(6.dp))
+            .background(if (active) Violet.copy(alpha = 0.18f) else Color.Transparent)
+            .border(0.7.dp, if (active) Violet.copy(alpha = 0.35f) else Color.Transparent, RoundedCornerShape(6.dp))
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+            if (icon != null) Icon(icon, null, tint = color, modifier = Modifier.size(11.dp))
+            Text(label, style = MaterialTheme.typography.labelSmall, color = color)
+        }
+    }
+}
+
+@Composable
+private fun OutgoingThumb(
+    item: OutgoingImage,
+    index: Int,
+    onRemove: () -> Unit,
+    onRetry: () -> Unit,
+) {
+    val bitmap by produceState<android.graphics.Bitmap?>(null, item.id, item.bytes.size) {
+        value = if (item.bytes.isEmpty()) null else withContext(Dispatchers.IO) {
+            runCatching {
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeByteArray(item.bytes, 0, item.bytes.size, bounds)
+                val opts = BitmapFactory.Options().apply {
+                    inSampleSize = computeSampleSize(bounds.outWidth, bounds.outHeight, 240)
+                }
+                BitmapFactory.decodeByteArray(item.bytes, 0, item.bytes.size, opts)
+            }.getOrNull()
+        }
+    }
+    Box(
+        Modifier.size(76.dp).clip(RoundedCornerShape(9.dp))
+            .background(Surface2)
+            .border(0.7.dp, if (item.error != null) Rose.copy(alpha = 0.7f) else LineStrong, RoundedCornerShape(9.dp)),
+    ) {
+        val image = bitmap
+        if (image != null) {
+            androidx.compose.foundation.Image(
+                bitmap = image.asImageBitmap(),
+                contentDescription = "待发送图片 ${index + 1}",
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+        } else {
+            Icon(
+                Icons.Outlined.Image,
+                null,
+                tint = TextMuted,
+                modifier = Modifier.align(Alignment.Center).size(19.dp),
+            )
+        }
+        Box(
+            Modifier.align(Alignment.BottomStart).fillMaxWidth()
+                .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.72f))))
+                .padding(start = 5.dp, end = 5.dp, top = 8.dp, bottom = 3.dp),
+        ) {
+            Text(
+                formatImageSize(item.size),
+                style = MaterialTheme.typography.labelSmall.copy(fontSize = 7.sp),
+                color = Color.White.copy(alpha = 0.86f),
+                maxLines = 1,
+            )
+        }
+        if (item.uploading) {
+            LinearProgressIndicator(
+                progress = { item.progress },
+                modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(2.dp),
+                color = Violet,
+                trackColor = Color.Black.copy(alpha = 0.35f),
+            )
+        }
+        if (item.error != null) {
+            Box(
+                Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.58f)).clickable(onClick = onRetry),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text("重试", style = MaterialTheme.typography.labelMedium, color = Rose)
+            }
+        } else if (!item.uploading && item.blobId != null) {
+            Box(
+                Modifier.align(Alignment.BottomEnd).padding(4.dp).size(14.dp).clip(CircleShape).background(Mint.copy(alpha = 0.9f)),
+                contentAlignment = Alignment.Center,
+            ) { Icon(Icons.Outlined.Check, null, tint = Ink, modifier = Modifier.size(9.dp)) }
+        }
+        // 17dp 的移除按钮点不到：外面套 44dp 的可点区域，圆形仍按 17dp 绘制（BUG-020）。
+        Box(
+            Modifier.align(Alignment.TopEnd).size(44.dp).clickable(onClick = onRemove),
+            contentAlignment = Alignment.TopEnd,
+        ) {
+            Box(
+                Modifier.padding(top = 3.dp, end = 3.dp).size(17.dp).clip(CircleShape)
+                    .background(Color.Black.copy(alpha = 0.58f)),
+                contentAlignment = Alignment.Center,
+            ) { Icon(Icons.Outlined.Close, "移除图片", tint = Color.White, modifier = Modifier.size(11.dp)) }
         }
     }
 }
@@ -1674,6 +2174,7 @@ private fun ModelSheet(
     currentProvider: String,
     currentModelId: String,
     currentThinking: String,
+    onClose: () -> Unit,
 ) {
     val prefsKey = remember(nodeId) { modelPrefsKey(nodeId) }
     var prefs by remember(prefsKey) { mutableStateOf(ModelPrefsCodec.decode(repo.settingString(prefsKey, ""))) }
@@ -1710,14 +2211,17 @@ private fun ModelSheet(
     fun pruned(p: ModelPrefs): ModelPrefs = if (available == null) p else p.prune(available)
 
     if (groups.isEmpty()) {
-        Column(Modifier.fillMaxWidth().fillMaxHeight(0.5f).padding(horizontal = 18.dp)) {
-            Text("模型与思考等级", style = MaterialTheme.typography.headlineMedium, color = TextPrimary)
+        Column(Modifier.fillMaxWidth().fillMaxHeight(0.5f)) {
+            CarrySheetGrabber()
+            CarrySheetHeader(title = "模型与思考等级", subtitle = "切换只影响下一次运行，不会中断当前生成。", onClose = onClose)
+            Column(Modifier.padding(horizontal = 18.dp)) {
             Spacer(Modifier.height(10.dp))
             Text(
                 "节点没有返回可用模型，请确认 pi 已登录并检查网络后重试。",
                 style = MaterialTheme.typography.bodySmall,
-                color = TextMuted,
-            )
+                    color = TextMuted,
+                )
+            }
         }
         return
     }
@@ -1888,12 +2392,9 @@ private fun ModelSheet(
             .fillMaxHeight(0.82f)
             .padding(bottom = 20.dp),
     ) {
-        Column(Modifier.padding(horizontal = 18.dp)) {
-            Text("模型与思考等级", style = MaterialTheme.typography.headlineMedium, color = TextPrimary)
-            Spacer(Modifier.height(4.dp))
-            Text("切换只影响下一次运行，不会中断当前生成。", style = MaterialTheme.typography.bodySmall, color = TextMuted)
-        }
-        Spacer(Modifier.height(10.dp))
+        CarrySheetGrabber()
+        CarrySheetHeader(title = "模型与思考等级", subtitle = "切换只影响下一次运行，不会中断当前生成。", onClose = onClose)
+        Spacer(Modifier.height(2.dp))
 
         // 顶部供应商条：顺序固定为 models.list 首次出现顺序，不因当前选择重排。
         LazyRow(
@@ -2185,15 +2686,12 @@ private fun TurnSummaryRow(turn: Turn, onClick: () -> Unit) {
 
 /** 轨迹面板：字段缺失一律显示 `—`，不拿 0 冒充真实值。 */
 @Composable
-private fun TurnDetailSheet(turn: Turn) {
-    Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp).padding(bottom = 28.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("本轮轨迹", style = MaterialTheme.typography.headlineMedium, color = TextPrimary)
-            Spacer(Modifier.weight(1f))
-            if (turn.aborted) Pill("已中断", Amber, filled = true)
-        }
-        Spacer(Modifier.height(4.dp))
-        MonoLabel(if (turn.model.isBlank()) "MODEL —" else "MODEL ${turn.model}", color = TextMuted)
+private fun TurnDetailSheet(turn: Turn, onClose: () -> Unit) {
+    Column(Modifier.fillMaxWidth()) {
+        CarrySheetGrabber()
+        CarrySheetHeader(title = "本轮轨迹", subtitle = if (turn.aborted) "已中断" else null, onClose = onClose)
+        Column(Modifier.padding(horizontal = 18.dp).padding(bottom = 28.dp)) {
+        MonoLabel(if (turn.model.isBlank()) "MODEL —" else "MODEL " + turn.model, color = TextMuted)
         Spacer(Modifier.height(14.dp))
         KeyValue("请求数", if (turn.requests > 0) "${turn.requests}" else "—")
         KeyValue("本轮用时", turn.durationText)
@@ -2211,20 +2709,16 @@ private fun TurnDetailSheet(turn: Turn) {
             style = MaterialTheme.typography.bodySmall,
             color = TextMuted,
         )
+        }
     }
 }
 
 @Composable
-private fun CommandSheet(onPick: (CommandItem) -> Unit) {
-    Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp).padding(bottom = 28.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("命令面板", style = MaterialTheme.typography.headlineMedium, color = TextPrimary)
-            Spacer(Modifier.weight(1f))
-            MonoLabel("COMMANDS", color = TextMuted)
-        }
-        Spacer(Modifier.height(4.dp))
-        Text("由 pi 扩展、prompt 模板与 skill 提供。", style = MaterialTheme.typography.bodySmall, color = TextMuted)
-        Spacer(Modifier.height(12.dp))
+private fun CommandSheet(onClose: () -> Unit, onPick: (CommandItem) -> Unit) {
+    Column(Modifier.fillMaxWidth()) {
+        CarrySheetGrabber()
+        CarrySheetHeader(title = "命令面板", subtitle = "由 pi 扩展、prompt 模板与 skill 提供。", onClose = onClose)
+        Column(Modifier.padding(horizontal = 18.dp).padding(bottom = 28.dp)) {
         commands.forEach { cmd ->
             Row(
                 Modifier
@@ -2245,6 +2739,7 @@ private fun CommandSheet(onPick: (CommandItem) -> Unit) {
                 Pill(cmd.source, TextMuted)
             }
             HorizontalDivider(color = Line.copy(alpha = 0.5f))
+        }
         }
     }
 }

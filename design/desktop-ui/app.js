@@ -13,7 +13,9 @@
     info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>',
     trash: '<path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/>',
     link: '<path d="M10 13a5 5 0 0 0 7 0l2-2a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-2 2a5 5 0 0 0 7 7l1-1"/>',
-    phone2: '<rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/>'
+    phone2: '<rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/>',
+    download: '<path d="M12 4v11M7 11l5 5 5-5M5 20h14"/>',
+    alert: '<path d="M12 4l9 16H3z"/><path d="M12 10v4M12 17h.01"/>'
   };
 
   const $ = (sel, root = document) => root.querySelector(sel);
@@ -40,6 +42,17 @@
   let settingsBannerMessage = null;
   const settingsBannerDefault = '修改 relay、节点名或 pi 路径后需要重启桥接服务才能生效。审批超时与权限默认值可即时保存。';
   const systemTheme = window.matchMedia('(prefers-color-scheme: dark)');
+  // 0.3.0 新增状态：更新、自检、深链预填。横幅/对话框/设置卡都从这一份状态渲染，
+  // 避免三处各自判断「有没有新版本」而给出互相矛盾的说法。
+  let updateState = null;        // 最近一次 check_update / get_last_update 的 payload
+  let updatePhase = null;        // null | downloading | installing | installed
+  let updateProgress = { downloaded: 0, total: null };
+  let updateError = null;        // { kind, message }
+  let updateCheckError = '';     // 最近一次检查失败的原因，显示在设置卡里
+  let suppressedVisible = false; // 仅手动检查或恢复上次结果时展示「已暂停提示」
+  let manualCheckAt = 0;         // 手动检查时间点：事件随后回放时据此区分手动/自动
+  let selfCheck = null;          // self_check 结果
+  let pendingPair = null;        // 深链预填 payload
 
   const titles = {
     overview: ['概览', '本机桥接与连接状态'],
@@ -350,9 +363,14 @@
       $('#set-relay-urls').value = (settings.transport?.relayUrls || []).join('\n');
       $('#set-close-tray').classList.toggle('on', !!settings.closeToTray);
       $('#set-autostart').classList.toggle('on', !!settings.service?.autostart);
+      $('#set-start-minimized').classList.toggle('on', !!settings.service?.startMinimized);
+      const logLevel = String(settings.service?.logLevel || '');
+      $('#set-log-level').value = ['error', 'warn', 'info', 'debug', 'trace'].includes(logLevel) ? logLevel : 'info';
       $('#data-dir').textContent = settings.dataDir || '—';
       selectSegment('set-relay', settings.transport?.relayMode || 'n0');
       selectSegment('set-capability', settings.sessions?.defaultCapability || 'full');
+      selectSegment('set-update-channel', settings.updates?.channel === 'beta' ? 'beta' : 'stable');
+      renderUpdateSettings();
       applyTheme(settings.ui?.theme || 'auto', false);
       updateRelayHint();
       bannerSettingsError = settings.bridgeError || null;
@@ -414,6 +432,8 @@
       relayUrls: urls,
       closeToTray: $('#set-close-tray').classList.contains('on'),
       autoStart: $('#set-autostart').classList.contains('on'),
+      startMinimized: $('#set-start-minimized').classList.contains('on'),
+      logLevel: $('#set-log-level').value,
       defaultCapability: segmentValue('set-capability'),
       theme: themeMode,
     };
@@ -477,6 +497,435 @@
     } catch { toast('复制失败', true); }
   }
 
+  // ── 0.3.0 新增：自动更新 / 首启自检 / 密钥降级 / 深链预填 ──
+
+  function fmtBytes(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n < 0) return '—';
+    if (n < 1024) return `${Math.round(n)} B`;
+    if (n < 1048576) return `${(n / 1024).toFixed(1)} KB`;
+    return `${(n / 1048576).toFixed(1)} MB`;
+  }
+
+  function versionText(version) {
+    const text = String(version ?? '').trim();
+    if (!text) return '';
+    return text.startsWith('v') ? text : `v${text}`;
+  }
+
+  function firstLine(text) {
+    return String(text ?? '').split('\n').map((line) => line.trim()).filter(Boolean)[0] || '';
+  }
+
+  function progressLabel() {
+    if (updateProgress.retry) {
+      const { attempt, delaySeconds } = updateProgress.retry;
+      return `下载中断，${delaySeconds} 秒后重试（第 ${attempt}/3 次重试）`;
+    }
+    const { downloaded, total } = updateProgress;
+    if (total) {
+      const pct = Math.min(100, Math.round((downloaded / total) * 100));
+      return `已下载 ${fmtBytes(downloaded)} / ${fmtBytes(total)}（${pct}%）`;
+    }
+    return `已下载 ${fmtBytes(downloaded)}`;
+  }
+
+  /** 概览页更新横幅。状态优先级：错误 > 进行中 > 已安装 > 无更新 > 被抑制 > 可用。 */
+  function renderUpdateBanner() {
+    const el = $('#update-banner');
+    if (!el) return;
+    const payload = updateState;
+    const version = versionText(payload?.version);
+    let tone = 'violet';
+    let iconName = 'download';
+    let body = '';
+    let actions = '';
+
+    if (updateError && updateError.kind === 'check') {
+      // 检查失败只在设置页提示：静默检查的网络抖动不该变成概览上的红横幅。
+      el.hidden = true;
+      return;
+    }
+    if (updateError) {
+      const signature = updateError.kind === 'signature';
+      tone = signature ? 'rose' : '';
+      iconName = signature ? 'alert' : 'info';
+      body = `<b>${signature ? '更新包签名校验失败，已阻止安装' : '更新安装失败'}</b>`
+        + `<div class="update-meta">${esc(updateError.message || '未知错误')}</div>`;
+      actions = (signature ? '<button class="btn ghost" data-update-act="logs">查看日志</button>' : '')
+        + '<button class="btn" data-update-act="download">手动下载</button>';
+    } else if (updatePhase === 'downloading' || updatePhase === 'installing') {
+      if (updatePhase === 'installing') {
+        body = '<b>正在安装更新…</b>'
+          + `<div class="update-meta">${esc(version ? `${version} 已下载，正在校验并安装` : '正在校验并安装')}</div>`;
+      } else {
+        const pct = updateProgress.total
+          ? Math.min(100, Math.round((updateProgress.downloaded / updateProgress.total) * 100))
+          : 0;
+        body = `<b>正在下载更新${version ? ` ${esc(version)}` : ''}</b>`
+          + `<div class="progress"><i style="width:${pct}%"></i></div>`
+          + `<div class="update-meta" data-progress-text>${esc(progressLabel())}</div>`;
+      }
+      // 安装阶段已交给系统安装器，取消只会掩盖进度；只有下载阶段提供取消。
+      actions = updatePhase === 'installing'
+        ? '<button class="btn primary" disabled>安装中…</button>'
+        : '<button class="btn primary" disabled>更新中…</button>'
+          + '<button class="btn ghost" data-update-act="cancel">取消</button>';
+    } else if (updatePhase === 'installed') {
+      body = '<b>更新已安装，重启后生效</b>'
+        + `<div class="update-meta">${esc(version ? `新版本 ${version} 已就绪，重启 pi carry 后启用。` : '重启 pi carry 后启用新版本。')}</div>`;
+      actions = '<button class="btn primary" data-update-act="restart">立即重启</button>';
+    } else if (!payload || !payload.available) {
+      el.hidden = true;
+      return;
+    } else if (payload.suppressed && !suppressedVisible) {
+      // 自动检查到「刚安装失败过的版本」时完全安静，只在设置卡里留一行说明。
+      el.hidden = true;
+      return;
+    } else if (payload.suppressed) {
+      tone = '';
+      iconName = 'info';
+      body = '<b>上次安装该版本失败，已暂停自动提示</b>'
+        + `<div class="update-meta">${esc(version ? `${version} 未通过校验或安装；可手动检查，或直接下载安装包。` : '可手动检查，或直接下载安装包。')}</div>`;
+      actions = '<button class="btn ghost" data-update-act="details">查看详情</button>'
+        + '<button class="btn" data-update-act="download">手动下载</button>';
+    } else if (payload.portable) {
+      const note = firstLine(payload.notes);
+      body = `<b>发现新版本 ${esc(version || '新版本')}（便携版）</b>`
+        + (note ? `<div class="update-meta">${esc(note)}</div>` : '');
+      actions = '<button class="btn primary" data-update-act="download">下载新版本</button>'
+        + '<button class="btn ghost" data-update-act="details">查看详情</button>';
+    } else {
+      const note = firstLine(payload.notes);
+      body = `<b>发现新版本 ${esc(version || '新版本')}</b>`
+        + (note ? `<div class="update-meta">${esc(note)}</div>` : '');
+      actions = '<button class="btn primary" data-update-act="install">立即更新</button>'
+        + '<button class="btn ghost" data-update-act="details">查看详情</button>'
+        + '<button class="btn ghost" data-update-act="later">稍后</button>';
+    }
+    el.className = `banner ${tone}`.trim();
+    el.innerHTML = `${icon(iconName, 17)}<div class="grow">${body}</div><div class="actions">${actions}</div>`;
+    el.hidden = false;
+  }
+
+  /** 下载进度很密，只改进度条和文字，不重建整个横幅（重建会让进度条闪回 0）。 */
+  function renderUpdateProgress() {
+    // 进度条在横幅内部动态生成，用后代选择器取，不再为它多占一个全局 id。
+    const bar = $('#update-banner .progress > i');
+    const text = $('#update-banner [data-progress-text]');
+    if (!bar || !text) return;
+    const { downloaded, total } = updateProgress;
+    bar.style.width = total ? `${Math.min(100, Math.round((downloaded / total) * 100))}%` : '0%';
+    text.textContent = progressLabel();
+  }
+
+  /** manual 决定 suppressed 是否可见：自动检查到的「失败版本」应该完全安静。 */
+  function applyUpdateCheck(payload, opts = {}) {
+    updateState = payload && typeof payload === 'object' ? payload : null;
+    updatePhase = null;
+    updateError = null;
+    updateCheckError = '';
+    updateProgress = { downloaded: 0, total: null };
+    suppressedVisible = !!payload?.available && !!payload?.suppressed && !!(opts.manual || opts.restore);
+    renderUpdateBanner();
+    renderUpdateSettings();
+  }
+
+  function applyUpdateProgress(payload) {
+    const phase = String(payload?.phase || '');
+    if (phase === 'downloading') {
+      const wasDownloading = updatePhase === 'downloading';
+      updatePhase = 'downloading';
+      updateError = null;
+      updateProgress = {
+        downloaded: Number(payload.downloaded) || 0,
+        total: payload.total == null ? null : Number(payload.total) || null,
+      };
+      if (wasDownloading) renderUpdateProgress();
+      else renderUpdateBanner();
+      return;
+    }
+    if (phase === 'retrying') {
+      // 后端只对网络失败重试；这里保留下载态，文案告诉用户为什么进度不动。
+      updatePhase = 'downloading';
+      updateError = null;
+      updateProgress = {
+        downloaded: 0,
+        total: null,
+        retry: {
+          attempt: Number(payload?.attempt) || 2,
+          delaySeconds: Number(payload?.delaySeconds) || 2,
+        },
+      };
+      renderUpdateBanner();
+      return;
+    }
+    if (phase === 'installing') {
+      updatePhase = 'installing';
+      updateError = null;
+      renderUpdateBanner();
+      return;
+    }
+    if (phase === 'installed') {
+      updatePhase = 'installed';
+      updateError = null;
+      if (payload?.version) updateState = { ...(updateState || {}), version: payload.version };
+      renderUpdateBanner();
+      renderUpdateSettings();
+    }
+  }
+
+  function applyUpdateError(payload) {
+    const kind = String(payload?.kind || 'install');
+    const message = String(payload?.message || '更新失败');
+    if (kind === 'check') {
+      // 后台托盘触发的检查会先切到设置页（后端 emit navigate），因此这里始终落到设置卡上。
+      updateCheckError = message;
+      renderUpdateSettings();
+      toast(message, true);
+      return;
+    }
+    updatePhase = null;
+    updateError = { kind, message };
+    renderUpdateBanner();
+  }
+
+  function openUpdatePage() {
+    const url = String(updateState?.pageUrl || '');
+    if (!/^https?:\/\//i.test(url)) { toast('没有可用的下载页地址', true); return; }
+    if (!invoke) return;
+    invoke('open_external', { url }).catch((err) => toast(String(err), true));
+  }
+
+  async function startInstall() {
+    if (!invoke) return;
+    closeUpdateOverlay();
+    updatePhase = 'downloading';
+    updateError = null;
+    updateProgress = { downloaded: 0, total: null };
+    renderUpdateBanner();
+    try {
+      const result = await invoke('install_update');
+      if (result?.cancelled) {
+        updatePhase = null;
+        updateProgress = { downloaded: 0, total: null };
+        renderUpdateBanner();
+        toast('已取消下载');
+        return;
+      }
+      updatePhase = 'installed';
+      if (result?.version) updateState = { ...(updateState || {}), version: result.version };
+      renderUpdateBanner();
+      renderUpdateSettings();
+      toast('更新已安装，重启后生效');
+    } catch (err) {
+      updatePhase = null;
+      // update-error 事件可能已给出更精确的原因（例如签名校验失败），不要被通用 reject 覆盖。
+      if (!updateError) updateError = { kind: 'install', message: String(err) };
+      renderUpdateBanner();
+      toast(String(err), true);
+    }
+  }
+
+  function cancelInstall() {
+    if (!invoke) return;
+    invoke('cancel_update').catch((err) => toast(String(err), true));
+  }
+
+  function restartForUpdate() {
+    if (!invoke) return;
+    invoke('restart_app').catch((err) => toast(String(err), true));
+  }
+
+  function handleUpdateAction(action) {
+    if (action === 'install') { startInstall(); return; }
+    if (action === 'cancel') { cancelInstall(); return; }
+    if (action === 'download') { openUpdatePage(); return; }
+    if (action === 'details') { openUpdateOverlay(); return; }
+    if (action === 'restart') { restartForUpdate(); return; }
+    if (action === 'later') { const el = $('#update-banner'); if (el) el.hidden = true; return; }
+    if (action === 'logs') {
+      // 先打开日志目录再切到日志页：目录没打开也要能看到应用内的日志列表。
+      if (!invoke) { go('logs'); return; }
+      invoke('open_logs_dir').catch((err) => toast(String(err), true)).then(() => go('logs'));
+    }
+  }
+
+  function openUpdateOverlay() {
+    if (!updateState || !updateState.available) { toast('没有可用的更新信息', true); return; }
+    const overlay = $('#update-overlay');
+    const version = versionText(updateState.version);
+    $('#update-title').textContent = `发现新版本 ${version || ''}`.trim();
+    $('#update-sub').textContent = `当前 ${versionText(updateState.currentVersion) || '—'} · ${updateState.channel || 'stable'}`;
+    const date = String(updateState.date || '').slice(0, 10);
+    $('#update-date').hidden = !date;
+    $('#update-date').textContent = date ? `发布于 ${date}` : '';
+    $('#update-notes').innerHTML = esc(String(updateState.notes || '').trim() || '本次更新没有提供变更说明。');
+    const portable = !!updateState.portable || !!selfCheck?.portable;
+    $('#update-install').textContent = portable ? '下载新版本' : '立即更新';
+    overlay.hidden = false;
+    overlay.classList.add('show');
+  }
+
+  function closeUpdateOverlay() {
+    const overlay = $('#update-overlay');
+    if (!overlay) return;
+    overlay.classList.remove('show');
+    overlay.hidden = true;
+  }
+
+  function renderSecretBanner() {
+    const el = $('#secret-banner');
+    if (!el) return;
+    // 桥接未就绪时 secretBackend 为 null：既不报错也不误报，等 bridge-status 再刷新。
+    el.hidden = selfCheck?.secretBackend !== 'file';
+  }
+
+  function renderSelfCheck() {
+    const el = $('#selfcheck-card');
+    if (!el) return;
+    const rows = [];
+    if (selfCheck) {
+      if (!selfCheck.piInstalled) {
+        rows.push({ tone: 'rose', title: '未找到 pi 可执行文件', detail: selfCheck.piError || '请在设置里填写 pi 的绝对路径。', action: true });
+      }
+      if (!selfCheck.tray) {
+        rows.push({ tone: 'amber', title: '系统托盘不可用，关闭窗口将直接退出', detail: '当前桌面环境没有提供托盘实现；需要常驻时请保持窗口打开。', action: false });
+      }
+      if (selfCheck.configError) {
+        rows.push({ tone: 'rose', title: '配置文件读取失败', detail: String(selfCheck.configError), action: false });
+      }
+      // secretBackend === 'file' 由全局密钥横幅负责，这里不重复。
+    }
+    if (!rows.length) { el.hidden = true; return; }
+    $('#selfcheck-list').innerHTML = rows.map((row) => `<div class="sc-row ${row.tone}">`
+      + icon(row.tone === 'rose' ? 'alert' : 'info', 16)
+      + `<div class="sc-main"><b>${esc(row.title)}</b><span>${esc(row.detail)}</span></div>`
+      + (row.action ? '<button class="btn ghost" data-selfcheck-act="settings">去设置</button>' : '')
+      + '</div>').join('');
+    el.hidden = false;
+  }
+
+  async function loadSelfCheck() {
+    if (!invoke) return;
+    try {
+      selfCheck = await invoke('self_check');
+      renderSecretBanner();
+      renderSelfCheck();
+      renderUpdateSettings();
+    } catch (err) { console.error(err); }
+  }
+
+  /** 设置页「更新」卡。settings 或 selfCheck 都可能还没回来，每个字段各自兜底。 */
+  function renderUpdateSettings() {
+    const current = $('#update-current-version');
+    if (!current) return;
+    const version = selfCheck?.version || status?.version || '';
+    current.textContent = version ? `当前 ${versionText(version)}` : '当前版本 —';
+    const lastChecked = updateState?.checkedAt || settings?.updates?.lastCheckedAt || '';
+    $('#update-last-checked').textContent = lastChecked ? relTime(lastChecked) : '从未检查';
+    const failed = String(settings?.updates?.lastFailedVersion || '').trim();
+    const failedEl = $('#update-last-failed');
+    const detail = updateCheckError || (failed ? `${versionText(failed)} 安装失败，已暂停自动提示` : '');
+    failedEl.hidden = !detail;
+    failedEl.textContent = detail;   // 检查失败优先显示原因，其次才是上次安装失败的版本
+    $('#update-portable-hint').hidden = !selfCheck?.portable;
+    if (settings) $('#set-check-update').classList.toggle('on', !!settings.updates?.checkOnStartup);
+  }
+
+  async function checkUpdateManually() {
+    if (!invoke) return;
+    const btn = $('#btn-check-update');
+    if (btn.disabled) return;
+    const original = btn.innerHTML;
+    btn.disabled = true;
+    btn.textContent = '检查中…';
+    manualCheckAt = Date.now();
+    try {
+      const result = await invoke('check_update', { manual: true });
+      applyUpdateCheck(result, { manual: true });
+      if (settings) settings.updates = { ...(settings.updates || {}), lastCheckedAt: result?.checkedAt || '' };
+      renderUpdateSettings();
+      if (!result || !result.available) { toast('已是最新版本'); return; }
+      if (result.portable) toast('便携版只提示下载，不自动替换');
+      openUpdateOverlay();
+    } catch (err) {
+      toast(String(err), true);
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = original;
+    }
+  }
+
+  async function changeUpdateChannel(value) {
+    const previous = segmentValue('set-update-channel') || 'stable';
+    if (!invoke || !value || value === previous) return;
+    selectSegment('set-update-channel', value);
+    try {
+      await invoke('update_settings', { values: { updateChannel: value } });
+      if (settings?.updates) settings.updates.channel = value;
+      toast(value === 'beta' ? '已切换到 beta 通道' : '已切换到 stable 通道');
+    } catch (err) {
+      // 写盘失败时不能把界面留在「已切换」状态，否则用户以为下次会检查 beta。
+      selectSegment('set-update-channel', previous);
+      toast(String(err), true);
+    }
+  }
+
+  function renderPairPrefill() {
+    const el = $('#pair-prefill');
+    if (!el) return;
+    const payload = pendingPair;
+    if (!payload || payload.valid === undefined) { el.hidden = true; return; }
+    const body = $('#pair-prefill-body');
+    const actions = $('#pair-prefill-actions');
+    el.hidden = false;
+    el.classList.toggle('violet', !!payload.valid);
+    el.classList.toggle('rose', !payload.valid);
+    if (!payload.valid) {
+      body.innerHTML = '<b>配对链接无效</b>'
+        + `<div class="prefill-note">${esc(payload.error || '无法解析这条配对链接，请让手机端重新生成。')}</div>`;
+      actions.innerHTML = '<button class="btn ghost" data-pair-act="dismiss">忽略</button>';
+      return;
+    }
+    const rows = [
+      `<div class="prefill-row"><span class="k">Endpoint</span><span class="v">${esc(payload.endpointId || '—')}</span></div>`,
+    ];
+    if (payload.name) rows.push(`<div class="prefill-row"><span class="k">名称</span><span class="v">${esc(payload.name)}</span></div>`);
+    if (payload.relay) rows.push(`<div class="prefill-row"><span class="k">Relay</span><span class="v">${esc(payload.relay)}</span></div>`);
+    if (payload.addr) rows.push(`<div class="prefill-row"><span class="k">直连</span><span class="v">${esc(payload.addr)}</span></div>`);
+    body.innerHTML = '<b>来自外部链接的配对邀请</b>'
+      + rows.join('')
+      + `<details><summary>查看完整链接</summary><div class="prefill-uri">${esc(payload.uri || '')}</div></details>`
+      + '<div class="prefill-note">链接只用于核对信息，不会自动开始或确认配对。请在本机点击「生成二维码」，'
+      + '由手机扫码并在手机上完成确认。</div>';
+    actions.innerHTML = '<button class="btn ghost" data-pair-act="dismiss">忽略</button>';
+  }
+
+  function dismissPairPrefill() {
+    pendingPair = null;
+    renderPairPrefill();
+  }
+
+  async function restoreLastUpdate() {
+    if (!invoke) return;
+    try {
+      const payload = await invoke('get_last_update');
+      // 恢复的是本次运行里已有的检查结果：磁盘上没有记录，首次启动时直接为 null。
+      // 不算手动检查：被签名失败抑制的版本在页面重载后也不应自己弹出来。
+      if (payload) applyUpdateCheck(payload);
+    } catch (err) { console.error(err); }
+  }
+
+  async function restorePendingPair() {
+    if (!invoke) return;
+    try {
+      // 该命令取一次即消费，页面重载后不会重复弹出同一封邀请。
+      const payload = await invoke('get_pending_pair');
+      if (payload) { pendingPair = payload; renderPairPrefill(); }
+    } catch (err) { console.error(err); }
+  }
+
   function bind() {
     $$('[data-icon]').forEach((el) => { el.innerHTML = icon(el.dataset.icon, el.dataset.size || 16); });
     $$('.nav button').forEach((b) => b.addEventListener('click', () => go(b.dataset.page)));
@@ -498,9 +947,66 @@
     systemTheme.addEventListener('change', () => { if (themeMode === 'auto') applyTheme('auto', false); });
     $('#set-close-tray').addEventListener('click', () => persistSwitch('set-close-tray', 'closeToTray'));
     $('#set-autostart').addEventListener('click', () => persistSwitch('set-autostart', 'autoStart'));
+    // 开机静默启动与日志级别只在「保存设置」时落盘（与现有表单一致），这里只切类名。
+    $('#set-start-minimized').addEventListener('click', () => $('#set-start-minimized').classList.toggle('on'));
+    $('#btn-open-logs').addEventListener('click', () => invoke('open_logs_dir').catch((e) => toast(String(e), true)));
+
+    // 0.3.0 新增控件：用事件委托 + 每处只注册一次，避免反复渲染后监听器累加。
+    $('#update-banner').addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-update-act]');
+      if (btn) handleUpdateAction(btn.dataset.updateAct);
+    });
+    $('#secret-banner').addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-secret-act]');
+      if (!btn) return;
+      if (btn.dataset.secretAct === 'settings') go('settings');
+      if (btn.dataset.secretAct === 'risk') toast('同机的其他用户或备份工具可以直接读取明文密钥；启用系统钥匙串后 pi carry 会自动改用加密存储。');
+    });
+    $('#selfcheck-card').addEventListener('click', (e) => {
+      if (e.target.closest('[data-selfcheck-act="settings"]')) go('settings');
+    });
+    $('#pair-prefill').addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-pair-act]');
+      if (!btn) return;
+      if (btn.dataset.pairAct === 'dismiss') dismissPairPrefill();
+    });
+    $('#btn-check-update').addEventListener('click', checkUpdateManually);
+    $$('#set-update-channel button').forEach((b) => b.addEventListener('click', () => changeUpdateChannel(b.dataset.value)));
+    $('#set-check-update').addEventListener('click', async () => {
+      // persistSwitch 失败时会自行回滚类名，这里在之后同步本地 settings，
+      // 否则后面任何一次 renderUpdateSettings 都会把开关刷回旧值。
+      await persistSwitch('set-check-update', 'checkOnStartup');
+      if (settings?.updates) settings.updates.checkOnStartup = $('#set-check-update').classList.contains('on');
+    });
+
+    const updateOverlay = $('#update-overlay');
+    $('#update-cancel').addEventListener('click', closeUpdateOverlay);
+    $('#update-download').addEventListener('click', openUpdatePage);
+    $('#update-install').addEventListener('click', () => {
+      if (updateState?.portable || selfCheck?.portable) { openUpdatePage(); closeUpdateOverlay(); return; }
+      startInstall();
+    });
+    updateOverlay.addEventListener('click', (e) => { if (e.target === updateOverlay) closeUpdateOverlay(); });
+    // Esc 只关自己这层：confirm-overlay 的 Esc 由 askConfirm 自行注册与回收。
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && updateOverlay.classList.contains('show')) closeUpdateOverlay();
+    });
+
     if (listen) {
       listen('navigate', (event) => go(event.payload)).catch(() => {});
-      listen('bridge-status', () => refresh()).catch(() => {});
+      // 启动时桥接可能还没就绪（secretBackend 为 null），就绪后重新自检一次。
+      listen('bridge-status', () => { refresh(); loadSelfCheck(); }).catch(() => {});
+      listen('update-check', (event) => {
+        // 手动检查的回包与事件会先后到达；3 秒内的事件按手动处理，否则 suppressed 横幅会被关掉。
+        applyUpdateCheck(event.payload, { manual: Date.now() - manualCheckAt < 3000 });
+      }).catch(() => {});
+      listen('update-progress', (event) => applyUpdateProgress(event.payload)).catch(() => {});
+      listen('update-error', (event) => applyUpdateError(event.payload)).catch(() => {});
+      listen('pair-uri', (event) => {
+        // 有效时后端已额外 emit navigate('pairing')，这里不重复跳页。
+        pendingPair = event.payload || null;
+        renderPairPrefill();
+      }).catch(() => {});
     }
   }
 
@@ -509,5 +1015,9 @@
   invoke?.('get_settings').then((s) => applyTheme(s.ui?.theme || 'auto', false)).catch(() => {});
   refresh();
   pollTimer = setInterval(refresh, 5000);
+  // 页面可能在事件之后才加载完：从后端把上次检查结果、深链预填和自检状态取回来。
+  restoreLastUpdate();
+  restorePendingPair();
+  loadSelfCheck();
   window.addEventListener('beforeunload', () => clearInterval(pollTimer));
 })();
