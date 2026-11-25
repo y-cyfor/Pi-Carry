@@ -3069,6 +3069,9 @@ mod tests {
         );
         let mut config = Config::default();
         config.sessions.dir = dir.display().to_string();
+        // 单测用的临时目录在 Linux 上位于 /tmp，不在默认根（HOME + cwd）内；
+        // 显式把临时目录设为唯一允许根，cwd 归一化/拒绝测试才与真实配置一致。
+        config.sessions.allowed_roots = vec![dir.display().to_string()];
         SessionManager::new(
             config,
             Paths::at(dir.to_path_buf()),
