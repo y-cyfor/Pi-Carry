@@ -755,6 +755,7 @@ pub(crate) fn open_path(path: &std::path::Path) -> Result<(), String> {
 
 /// 开机自启命令行：路径必须带引号（含空格时 reg/launchd 才会当成一个参数），
 /// `--minimized` 只在托盘可用时追加，否则开机后窗口永远不出现。
+#[cfg(windows)]
 fn autostart_command(exe: &std::path::Path, minimized: bool) -> String {
     let mut command = format!("\"{}\"", exe.display());
     if minimized {
@@ -1233,18 +1234,13 @@ fn spawn_show_listener(app: tauri::AppHandle) {
     };
     std::thread::spawn(move || {
         use std::io::Read;
-        loop {
-            match listener.accept() {
-                Ok((mut stream, _)) => {
-                    let mut buf = [0u8; 16];
-                    let n = stream.read(&mut buf).unwrap_or(0);
-                    if &buf[..n] == SHOW_MESSAGE.as_bytes() {
-                        deeplink::consume_pending(&app);
-                        show_main(&app);
-                    }
-                }
-                // 单实例监听不该失败；失败还硬循环会空转，直接退出线程由下一次启动重建。
-                Err(_) => break,
+        // 单实例监听不该失败；accept 出错即退出线程，由下一次启动重建。
+        while let Ok((mut stream, _)) = listener.accept() {
+            let mut buf = [0u8; 16];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            if &buf[..n] == SHOW_MESSAGE.as_bytes() {
+                deeplink::consume_pending(&app);
+                show_main(&app);
             }
         }
     });
@@ -1870,6 +1866,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn autostart_command_quotes_path_and_appends_minimized() {
         let exe = std::path::PathBuf::from(r"C:\Program Files\pi carry\pi-carry-desktop.exe");
         assert_eq!(
