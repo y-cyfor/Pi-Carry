@@ -104,7 +104,8 @@ if [[ "$SKIP_BUILD" -eq 0 ]]; then
         build_args+=(--config '{"bundle":{"createUpdaterArtifacts":false}}')
     fi
     echo "== 构建 Universal DMG：${tauri_cli[*]} ${build_args[*]} =="
-    "${tauri_cli[@]}" "${build_args[@]}"
+    # tauri.conf.json 在 crates/desktop，Tauri CLI 没有 --project-dir，必须从该目录运行。
+    ( cd "$ROOT/crates/desktop" && "${tauri_cli[@]}" "${build_args[@]}" )
 else
     echo "== --skip-build：使用已有 target/$TARGET/release/bundle 产物 =="
 fi
@@ -139,11 +140,23 @@ if [[ -n "$app_archive_src" ]]; then
     if [[ -f "$app_archive_src.sig" ]]; then
         cp -f "$app_archive_src.sig" "$archive_out.sig"
         artifacts+=("$archive_out.sig")
-    else
+    elif [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
         echo "提示：缺少更新签名 $app_archive_src.sig（未注入 TAURI_SIGNING_PRIVATE_KEY 时属正常，updater 将不可用）" >&2
     fi
 else
     echo "提示：未找到 .app.tar.gz（$bundle_root/macos/*.app.tar.gz），latest.json 将缺少 macOS 更新条目" >&2
+fi
+
+# 注入了签名私钥就必须同时产出 .app.tar.gz 与 .sig，否则 macOS 就地更新不可用。
+if [[ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
+    if [[ -z "$app_archive_src" ]]; then
+        echo "已注入 TAURI_SIGNING_PRIVATE_KEY，但未找到 .app.tar.gz（$bundle_root/macos/*.app.tar.gz），macOS 更新包缺失。" >&2
+        exit 1
+    fi
+    if [[ ! -f "$app_archive_src.sig" ]]; then
+        echo "已注入 TAURI_SIGNING_PRIVATE_KEY，但缺少更新签名 $app_archive_src.sig。" >&2
+        exit 1
+    fi
 fi
 
 # DMG 完整性：损坏的镜像必须在本地就拦下来，不能上传到 Release。

@@ -51,7 +51,7 @@ Pi Carry는 pi 코딩 에이전트의 원격 제어 계층입니다. pi는 컴�
 
 세션을 복제하지 않고 클라우드 계정도 필요 없습니다. 브리지는 트레이 앱 또는 CLI로 실행되며 pi의 RPC 모드로 통신합니다. 휴대폰은 여러 노드를 저장할 수 있고 LAN에서는 직접 연결하며 NAT 통과가 필요하면 n0 relay 또는 자체 호스팅 relay를 사용합니다. 도구 호출은 pi 확장이 가로채고 브리지가 중재합니다. 승인은 시간 초과 시 거부됩니다. 책상에서 벗어나 긴 작업을 따라가기 위한 도구이며, 코드나 세션, 자격 증명을 제3자 서비스에 넘기기 위한 것이 아닙니다.
 
-현재 버전은 `0.3.0`입니다. Windows 10/11 x64가 주요 검증 대상입니다. macOS 11+ Universal과 Linux x64/arm64 패키지는 릴리스 파이프라인에서 빌드되지만 실제 기기 인수 테스트는 아직 완전하지 않습니다. macOS 빌드는 **서명과 공증이 모두 되어 있지 않습니다**. 절차는 [서명되지 않은 빌드 설치](#서명되지-않은-빌드-설치)를 참고하세요.
+현재 버전은 `0.3.1`입니다. Windows 10/11 x64가 주요 검증 대상입니다. macOS 11+ Universal과 Linux x64/arm64 패키지는 릴리스 파이프라인에서 빌드되지만 실제 기기 인수 테스트는 아직 완전하지 않습니다. macOS 빌드는 **서명과 공증이 모두 되어 있지 않습니다**. 절차는 [서명되지 않은 빌드 설치](#서명되지-않은-빌드-설치)를 참고하세요.
 
 ## 설치
 
@@ -70,16 +70,16 @@ Pi Carry는 pi, Node.js, 모델 자격 증명을 함께 배포하지 않습니�
 
 ### 다운로드
 
-릴리스 자산 이름은 고정되어 있습니다. `0.3.0` 예시:
+릴리스 자산 이름은 고정되어 있습니다. `0.3.1` 예시:
 
 | 자산 | 용도 |
 | --- | --- |
-| `pi-carry-windows-10-x64-0.3.0-setup.exe` | Windows 설치 프로그램(NSIS, 현재 사용자 설치, 관리자 권한 불필요) |
-| `pi-carry-windows-10-x64-0.3.0.zip` | Windows 포터블 빌드 |
-| `pi-carry-macos-11-universal-0.3.0.dmg` | macOS Universal 디스크 이미지 |
-| `pi-carry-macos-11-universal-0.3.0.app.tar.gz`(및 `.sig`) | 업데이터 산출물. 수동 설치에는 불필요 |
-| `pi-carry-linux-22.04-x64-0.3.0.deb` / `.rpm` | Linux x64 패키지 |
-| `pi-carry-linux-24.04-arm64-0.3.0.deb` / `.rpm` | Linux arm64 패키지(24.04에서 빌드) |
+| `pi-carry-windows-10-x64-0.3.1-setup.exe` | Windows 설치 프로그램(NSIS, 현재 사용자 설치, 관리자 권한 불필요) |
+| `pi-carry-windows-10-x64-0.3.1.zip` | Windows 포터블 빌드 |
+| `pi-carry-macos-11-universal-0.3.1.dmg` | macOS Universal 디스크 이미지 |
+| `pi-carry-macos-11-universal-0.3.1.app.tar.gz`(및 `.sig`) | 업데이터 산출물. 수동 설치에는 불필요 |
+| `pi-carry-linux-22.04-x64-0.3.1.deb` / `.rpm` | Linux x64 패키지 |
+| `pi-carry-linux-24.04-arm64-0.3.1.deb` / `.rpm` | Linux arm64 패키지(24.04에서 빌드) |
 | `latest.json` | 내장 업데이터가 사용하는 매니페스트 |
 | `SHA256SUMS.txt` | 모든 자산의 체크섬 |
 
@@ -87,9 +87,9 @@ CI는 버전 태그에서 이 자산들을 빌드하고 **초안** GitHub Releas
 
 ### Windows
 
-`pi-carry-windows-10-x64-0.3.0-setup.exe`를 실행합니다. 설치 프로그램은 현재 사용자 기준이며 관리자 권한이 필요 없습니다. 시작 메뉴 항목을 만들고 `pi-carry://` 딥링크를 등록합니다.
+`pi-carry-windows-10-x64-0.3.1-setup.exe`를 실행합니다. 설치 프로그램은 현재 사용자 기준이며 관리자 권한이 필요 없습니다. 시작 메뉴 항목을 만들고 `pi-carry://` 딥링크를 등록합니다.
 
-포터블 빌드는 `pi-carry-windows-10-x64-0.3.0.zip`을 원하는 폴더에 풀고 `pi-carry-desktop.exe`와 `WebView2Loader.dll`을 같은 폴더에 둔 뒤 exe를 실행합니다. 기본적으로 창을 닫으면 트레이로 숨습니다. 포터블 빌드에는 제거 프로그램이 없습니다. 처음 실행하면 설치 프로그램과 마찬가지로 `pi-carry://` 딥링크를 등록합니다. ‘앱 및 기능’의 제거 항목이 필요하면 설치 프로그램을 사용하세요.
+포터블 빌드는 `pi-carry-windows-10-x64-0.3.1.zip`을 원하는 폴더에 풀고 `pi-carry-desktop.exe`와 `WebView2Loader.dll`을 같은 폴더에 둔 뒤 exe를 실행합니다. 기본적으로 창을 닫으면 트레이로 숨습니다. 포터블 빌드에는 제거 프로그램이 없습니다. 처음 실행하면 설치 프로그램과 마찬가지로 `pi-carry://` 딥링크를 등록합니다. ‘앱 및 기능’의 제거 항목이 필요하면 설치 프로그램을 사용하세요.
 
 두 형태 모두 설정, 키, 상태, 로그를 `%USERPROFILE%\.pi-carry`에 저장합니다. 자동 시작은 기본으로 꺼져 있으며, 설정에서 켜면 현재 사용자 자동 시작 항목(`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, 값 이름 `pi-carry`)을 등록합니다.
 
@@ -97,7 +97,7 @@ WebView2 Runtime이 없으면 Microsoft의 Evergreen Runtime을 설치한 뒤 Pi
 
 ### macOS
 
-`pi-carry-macos-11-universal-0.3.0.dmg`를 열고 **pi carry**를 **응용 프로그램**으로 끌어다 놓은 뒤 이미지를 배출하고 실행합니다. Universal 빌드라 Intel과 Apple Silicon 모두에서 네이티브로 동작합니다.
+`pi-carry-macos-11-universal-0.3.1.dmg`를 열고 **pi carry**를 **응용 프로그램**으로 끌어다 놓은 뒤 이미지를 배출하고 실행합니다. Universal 빌드라 Intel과 Apple Silicon 모두에서 네이티브로 동작합니다.
 
 서명과 공증이 없어 첫 실행은 Gatekeeper에 의해 차단됩니다. [서명되지 않은 빌드 설치](#서명되지-않은-빌드-설치)를 참고하세요. 첫 실행 시 `~/.pi-carry/config.toml`, 로컬 상태 데이터베이스, 페어링 비밀 키용 키체인 항목이 생성됩니다.
 
@@ -107,10 +107,10 @@ WebView2 Runtime이 없으면 Microsoft의 Evergreen Runtime을 설치한 뒤 Pi
 
 ```bash
 # Debian / Ubuntu x64
-sudo apt install ./pi-carry-linux-22.04-x64-0.3.0.deb
+sudo apt install ./pi-carry-linux-22.04-x64-0.3.1.deb
 
 # Fedora / RHEL x64
-sudo dnf install ./pi-carry-linux-22.04-x64-0.3.0.rpm
+sudo dnf install ./pi-carry-linux-22.04-x64-0.3.1.rpm
 ```
 
 arm64에서는 파일 이름의 `x64`를 `arm64`로 바꿉니다. 패키지가 선언하는 런타임 의존성:
@@ -127,7 +127,7 @@ Windows 코드 서명 인증서는 아직 없고 SignPath Foundation 신청도 �
 **Windows SmartScreen.** 첫 실행 시 "Windows에서 PC를 보호했습니다"가 표시될 수 있습니다. **추가 정보 → 실행**을 클릭합니다. 먼저 다운로드를 검증하세요:
 
 ```powershell
-Get-FileHash .\pi-carry-windows-10-x64-0.3.0-setup.exe -Algorithm SHA256
+Get-FileHash .\pi-carry-windows-10-x64-0.3.1-setup.exe -Algorithm SHA256
 # SHA256SUMS.txt의 해당 줄과 비교
 ```
 
@@ -335,8 +335,8 @@ bash scripts/package-macos.sh
 스크립트는 버전이 붙은 자산과 `SHA256SUMS.txt`를 `dist/`에 기록합니다. 릴리스용 업데이트 매니페스트 생성:
 
 ```bash
-node scripts/gen-latest-json.mjs --dir dist --version 0.3.0 \
-  --base-url https://github.com/y-cyfor/Pi-Carry/releases/download/v0.3.0
+node scripts/gen-latest-json.mjs --dir dist --version 0.3.1 \
+  --base-url https://github.com/y-cyfor/Pi-Carry/releases/download/v0.3.1
 ```
 
 `scripts/package.ps1`은 정식 서명된 Android APK를 함께 패키징하며, 서명 APK가 없으면 디버그 APK로 대체하지 않고 실패합니다. PowerShell 7을 권장하지만 Windows PowerShell 5.1에서도 동작합니다(SHA-256은 `System.Security.Cryptography`로 계산하며 `Get-FileHash`에 의존하지 않습니다).

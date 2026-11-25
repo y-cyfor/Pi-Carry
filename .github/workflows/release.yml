@@ -70,6 +70,9 @@ jobs:
         run: cargo test --workspace --locked
       - name: 版本号一致性
         run: node scripts/set-version.mjs --check
+      - name: 发布清单生成器测试
+        # latest.json 的 target 键由生成器决定；键错了 updater 会静默失效，必须在门禁里跑。
+        run: node --test scripts/gen-latest-json.test.mjs
 
   android-unit:
     name: Android 单元测试
@@ -204,6 +207,19 @@ jobs:
       - name: 构建两个 ABI 的 release APK
         run: ./gradlew assembleRelease --no-daemon
         working-directory: android
+      # 下一步的打包脚本用 shell: pwsh；Ubuntu runner 自带 PowerShell 7，缺失时按 plan 兜底安装。
+      - name: 预检 pwsh
+        run: |
+          set -euo pipefail
+          if ! command -v pwsh >/dev/null 2>&1; then
+            echo "未找到 pwsh，尝试安装 PowerShell 7（build-android 的打包 step 依赖它）" >&2
+            sudo apt-get update
+            if ! sudo apt-get install -y --no-install-recommends powershell; then
+              echo "安装 PowerShell 失败：build-android 的「打包进 dist」step 需要 pwsh，无法继续。" >&2
+              exit 1
+            fi
+          fi
+          pwsh --version
       # 复用桌面打包脚本的命名与校验和逻辑（AGENTS.md §2：每架构独立 APK，不压缩）。
       - name: 打包进 dist
         run: ./scripts/package.ps1 -SkipDesktop
@@ -249,6 +265,8 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-nsis-
       - name: 安装 tauri-cli
+        # tauri crate 是 2.12.7，但 crates.io 上没有 tauri-cli 2.12.7（404），最新 2.x 是 2.12.6；
+        # 按 plan 回退 ^2 取最新 2.x，版本错配由下面的构建日志门禁拦截。
         run: cargo install tauri-cli --version "^2" --locked
       - name: 构建 NSIS 安装器
         env:
@@ -256,14 +274,39 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ github.event_name != 'pull_request' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
         shell: pwsh
+        # tauri.conf.json 在 crates/desktop，Tauri CLI 没有 --project-dir，必须从该目录运行。
+        working-directory: crates/desktop
         run: |
+          $log = Join-Path $env:RUNNER_TEMP 'tauri-build-windows.log'
           if ([string]::IsNullOrEmpty($env:TAURI_SIGNING_PRIVATE_KEY)) {
             Write-Host "未注入签名私钥：关闭 updater 签名产物（PR / 本地构建）"
-            cargo tauri build --bundles nsis --config '{"bundle":{"createUpdaterArtifacts":false}}'
+            cargo tauri build --bundles nsis --config '{"bundle":{"createUpdaterArtifacts":false}}' *> $log
           } else {
-            cargo tauri build --bundles nsis
+            cargo tauri build --bundles nsis *> $log
           }
+          $buildExit = $LASTEXITCODE
+          if ($null -eq $buildExit) { $buildExit = 1 }
+          Write-Host "== cargo tauri build 日志（$log）=="
+          Get-Content -LiteralPath $log -ErrorAction SilentlyContinue
+          if ($buildExit -ne 0) {
+            Write-Host "cargo tauri build 失败（退出码 $buildExit）。"
+            exit $buildExit
+          }
+          # tauri-cli 与 tauri crate 版本错配时 CLI 只警告，updater 会拿不到 bundle type（-nsis）。
+          $bundleTypeIssues = Select-String -LiteralPath $log -SimpleMatch 'Failed to add bundler type' -ErrorAction SilentlyContinue
+          if ($bundleTypeIssues) {
+            Write-Host "构建日志出现 'Failed to add bundler type'：tauri-cli 与 tauri crate 版本不匹配，"
+            Write-Host "updater 拿不到 nsis bundle type，latest.json 的 -nsis 键会失效，拒绝继续。"
+            $bundleTypeIssues | ForEach-Object { Write-Host "  $($_.LineNumber): $($_.Line)" }
+            Write-Host "修复：对齐 tauri-cli 与 crates/desktop/Cargo.toml 的 tauri crate 版本后重跑。"
+            exit 1
+          }
+          Write-Host "构建日志未出现 'Failed to add bundler type'，bundle type 检查通过。"
       - name: 打包 dist（跳过 Android）
+        env:
+          # package.ps1 在注入私钥时强制要求 setup.exe.sig，这里必须把私钥传给打包 step。
+          TAURI_SIGNING_PRIVATE_KEY: ${{ github.event_name != 'pull_request' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
         run: ./scripts/package.ps1 -SkipAndroid
         shell: pwsh
       - name: 上传 Windows 产物
@@ -304,13 +347,22 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-universal-
       - name: 安装 tauri-cli
+        # tauri crate 是 2.12.7，但 crates.io 上没有 tauri-cli 2.12.7（404），最新 2.x 是 2.12.6；
+        # 按 plan 回退 ^2 取最新 2.x，版本错配由构建日志门禁 + .sig 检查兜底。
         run: cargo install tauri-cli --version "^2" --locked
       - name: 构建并打包 Universal DMG
         env:
           # 本版不做 Apple 签名与公证；只有注入了私钥才生成 updater 的 .sig。
           TAURI_SIGNING_PRIVATE_KEY: ${{ github.event_name != 'pull_request' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
-        run: bash scripts/package-macos.sh
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/tauri-build-macos.log"
+          bash scripts/package-macos.sh 2>&1 | tee "$log"
+          if grep -qF 'Failed to add bundler type' "$log"; then
+            echo "Tauri 构建出现 'Failed to add bundler type'：tauri-cli 与 tauri crate 版本不匹配，拒绝产出 updater 资产。" >&2
+            exit 1
+          fi
       - name: 上传 macOS 产物
         uses: actions/upload-artifact@v4 # 可替换为 commit SHA
         with:
@@ -353,12 +405,21 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-deb-x64-
       - name: 安装 tauri-cli
+        # tauri crate 是 2.12.7，但 crates.io 上没有 tauri-cli 2.12.7（404），最新 2.x 是 2.12.6；
+        # 按 plan 回退 ^2 取最新 2.x，版本错配由构建日志门禁 + .sig 检查兜底。
         run: cargo install tauri-cli --version "^2" --locked
       - name: 构建并打包 deb/rpm
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ github.event_name != 'pull_request' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
-        run: bash scripts/package-linux.sh
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/tauri-build-linux-x64.log"
+          bash scripts/package-linux.sh 2>&1 | tee "$log"
+          if grep -qF 'Failed to add bundler type' "$log"; then
+            echo "Tauri 构建出现 'Failed to add bundler type'：tauri-cli 与 tauri crate 版本不匹配，拒绝产出 updater 资产。" >&2
+            exit 1
+          fi
       - name: 上传 Linux x64 产物
         uses: actions/upload-artifact@v4 # 可替换为 commit SHA
         with:
@@ -402,12 +463,21 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-cargo-deb-arm64-
       - name: 安装 tauri-cli
+        # tauri crate 是 2.12.7，但 crates.io 上没有 tauri-cli 2.12.7（404），最新 2.x 是 2.12.6；
+        # 按 plan 回退 ^2 取最新 2.x，版本错配由构建日志门禁 + .sig 检查兜底。
         run: cargo install tauri-cli --version "^2" --locked
       - name: 构建并打包 deb/rpm
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ github.event_name != 'pull_request' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
-        run: bash scripts/package-linux.sh
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/tauri-build-linux-arm64.log"
+          bash scripts/package-linux.sh 2>&1 | tee "$log"
+          if grep -qF 'Failed to add bundler type' "$log"; then
+            echo "Tauri 构建出现 'Failed to add bundler type'：tauri-cli 与 tauri crate 版本不匹配，拒绝产出 updater 资产。" >&2
+            exit 1
+          fi
       - name: 上传 Linux arm64 产物
         uses: actions/upload-artifact@v4 # 可替换为 commit SHA
         with:
@@ -484,17 +554,70 @@ jobs:
             --dir dist \
             --version "${GITHUB_REF_NAME#v}" \
             --base-url "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}"
-          # 断言两架构 × deb/rpm 都在清单里：Linux 产物名带构建机发行版版本（x64=22.04、arm64=24.04），
-          # 少了任何一个用户就收不到更新，而脚本的 --allow-missing 会让它静默通过（BUG-029）。
+          # 断言 8 个平台键 + portable：Linux 产物名带构建机发行版版本（x64=22.04、arm64=24.04），
+          # 少一个用户就收不到更新；gen-latest-json 的 --allow-missing 会让缺失静默通过（BUG-029）。
+          export TAG_VERSION="${GITHUB_REF_NAME#v}"
           node -e '
+            const fs = require("node:fs")
             const m = require("./dist/latest.json")
-            const need = ["windows-x86_64-nsis","macos-universal","linux-x86_64-deb","linux-x86_64-rpm","linux-aarch64-deb","linux-aarch64-rpm"]
-            const miss = need.filter((k) => !(k in m.platforms))
-            if (miss.length) {
-              console.error(`latest.json 缺少平台：${miss.join(", ")}`)
+            const need = [
+              "windows-x86_64-nsis","windows-x86_64",
+              "darwin-x86_64","darwin-aarch64",
+              "linux-x86_64-deb","linux-x86_64-rpm",
+              "linux-aarch64-deb","linux-aarch64-rpm",
+            ]
+            const problems = []
+            const platforms = m.platforms || {}
+            for (const key of need) if (!(key in platforms)) problems.push(`platforms 缺少键 ${key}`)
+            const extra = Object.keys(platforms).filter((key) => !need.includes(key))
+            if (extra.length) problems.push(`platforms 出现契约外的键：${extra.join(", ")}`)
+            const fileName = (url) => {
+              const last = String(url).split("?")[0].split("#")[0].split("/").pop() || ""
+              try { return decodeURIComponent(last) } catch { return last }
+            }
+            const checkUrl = (label, url) => {
+              if (typeof url !== "string" || !/^https?:\/\//.test(url)) {
+                problems.push(`${label}: url 不是 http(s)：${url}`)
+                return
+              }
+              const name = fileName(url)
+              if (!name) {
+                problems.push(`${label}: 无法从 url 解析文件名：${url}`)
+              } else if (!fs.existsSync(`dist/${name}`)) {
+                problems.push(`${label}: dist 缺少文件 ${name}`)
+              }
+            }
+            for (const [key, entry] of Object.entries(platforms)) {
+              if (!entry || typeof entry.signature !== "string" || entry.signature.trim() === "") {
+                problems.push(`${key}: signature 为空`)
+              }
+              if (entry) checkUrl(key, entry.url)
+            }
+            const sameUrl = (a, b) => platforms[a] && platforms[b] && platforms[a].url === platforms[b].url
+            if (platforms["windows-x86_64-nsis"] && platforms["windows-x86_64"] && !sameUrl("windows-x86_64-nsis", "windows-x86_64")) {
+              problems.push("windows-x86_64-nsis 与 windows-x86_64 必须指向同一个 setup.exe")
+            }
+            if (platforms["darwin-x86_64"] && platforms["darwin-aarch64"] && !sameUrl("darwin-x86_64", "darwin-aarch64")) {
+              problems.push("darwin-x86_64 与 darwin-aarch64 必须指向同一个 .app.tar.gz")
+            }
+            const portable = (m.portable || {})["windows-x86_64"]
+            if (!portable) {
+              problems.push("缺少 portable.windows-x86_64（Windows 便携 zip）")
+            } else {
+              checkUrl("portable.windows-x86_64", portable.url)
+              if (!/^[0-9a-f]{64}$/.test(String(portable.sha256 || ""))) {
+                problems.push("portable.windows-x86_64: sha256 不是 64 位小写 hex")
+              }
+            }
+            if (m.version !== process.env.TAG_VERSION) {
+              problems.push(`manifest.version=${m.version} 与 tag 版本 ${process.env.TAG_VERSION} 不一致`)
+            }
+            if (problems.length) {
+              console.error("latest.json 断言失败：")
+              for (const line of problems) console.error(`  - ${line}`)
               process.exit(1)
             }
-            console.log(`latest.json 平台齐全：${need.join(", ")}`)
+            console.log(`latest.json 校验通过：version ${m.version}，platforms ${Object.keys(platforms).length} 个，portable.windows-x86_64 就绪`)
           '
       - name: 创建草稿 Release 并上传资产
         env:

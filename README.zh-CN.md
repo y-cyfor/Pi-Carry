@@ -51,7 +51,7 @@ Pi Carry 是 pi 编程智能体的远程控制层。pi 仍在电脑上运行，�
 
 它不创建会话副本，也不依赖云端账号。桌面受控端以系统托盘应用或 CLI 运行，通过 pi 的 RPC 与本地会话协作；手机可以保存多个节点，在局域网内直连，必要时经 n0 或自托管 relay 穿透 NAT。工具调用通过 pi 扩展拦截后交给桥接核心仲裁，审批超时默认拒绝，桌面端没有审批入口。它适合在离开电脑时继续跟进长任务，而不是把代码、会话或密钥交给第三方服务。
 
-当前版本 `0.3.0`。Windows 10/11 x64 是主要验证平台；macOS 11+ Universal 与 Linux x64/arm64 安装包由发布流程构建，但尚未完成全部真机验收。macOS 构建**未签名、未公证**，安装方式见[安装未签名版本](#安装未签名版本)。
+当前版本 `0.3.1`。Windows 10/11 x64 是主要验证平台；macOS 11+ Universal 与 Linux x64/arm64 安装包由发布流程构建，但尚未完成全部真机验收。macOS 构建**未签名、未公证**，安装方式见[安装未签名版本](#安装未签名版本)。
 
 ## 安装
 
@@ -70,16 +70,16 @@ Pi Carry 不捆绑 pi、Node.js 或模型凭据。请先确认在终端中可以
 
 ### 下载
 
-发布资产使用固定命名。以 `0.3.0` 为例：
+发布资产使用固定命名。以 `0.3.1` 为例：
 
 | 资产 | 用途 |
 | --- | --- |
-| `pi-carry-windows-10-x64-0.3.0-setup.exe` | Windows 安装器（NSIS，当前用户安装，不需要管理员权限） |
-| `pi-carry-windows-10-x64-0.3.0.zip` | Windows 便携包 |
-| `pi-carry-macos-11-universal-0.3.0.dmg` | macOS Universal 镜像 |
-| `pi-carry-macos-11-universal-0.3.0.app.tar.gz`（含 `.sig`） | 更新器产物，手动安装不需要 |
-| `pi-carry-linux-22.04-x64-0.3.0.deb` / `.rpm` | Linux x64 安装包 |
-| `pi-carry-linux-24.04-arm64-0.3.0.deb` / `.rpm` | Linux arm64 安装包（在 24.04 上构建） |
+| `pi-carry-windows-10-x64-0.3.1-setup.exe` | Windows 安装器（NSIS，当前用户安装，不需要管理员权限） |
+| `pi-carry-windows-10-x64-0.3.1.zip` | Windows 便携包 |
+| `pi-carry-macos-11-universal-0.3.1.dmg` | macOS Universal 镜像 |
+| `pi-carry-macos-11-universal-0.3.1.app.tar.gz`（含 `.sig`） | 更新器产物，手动安装不需要 |
+| `pi-carry-linux-22.04-x64-0.3.1.deb` / `.rpm` | Linux x64 安装包 |
+| `pi-carry-linux-24.04-arm64-0.3.1.deb` / `.rpm` | Linux arm64 安装包（在 24.04 上构建） |
 | `latest.json` | 内置更新器使用的清单 |
 | `SHA256SUMS.txt` | 所有资产的校验和 |
 
@@ -87,9 +87,9 @@ CI 在版本 tag 上构建这些资产，并创建**草稿** GitHub Release；�
 
 ### Windows
 
-运行 `pi-carry-windows-10-x64-0.3.0-setup.exe`。安装器按当前用户安装，不需要管理员权限，会创建开始菜单项并注册 `pi-carry://` 深链。
+运行 `pi-carry-windows-10-x64-0.3.1-setup.exe`。安装器按当前用户安装，不需要管理员权限，会创建开始菜单项并注册 `pi-carry://` 深链。
 
-便携版解压 `pi-carry-windows-10-x64-0.3.0.zip` 到任意目录，保持 `pi-carry-desktop.exe` 与 `WebView2Loader.dll` 在同一个文件夹，然后运行 exe。默认关闭窗口会隐藏到托盘。便携版没有卸载器；首次运行时和安装器一样会注册 `pi-carry://` 深链。需要“应用和功能”里的卸载入口时请使用安装器。
+便携版解压 `pi-carry-windows-10-x64-0.3.1.zip` 到任意目录，保持 `pi-carry-desktop.exe` 与 `WebView2Loader.dll` 在同一个文件夹，然后运行 exe。默认关闭窗口会隐藏到托盘。便携版没有卸载器；首次运行时和安装器一样会注册 `pi-carry://` 深链。需要“应用和功能”里的卸载入口时请使用安装器。
 
 两种形态都使用 `%USERPROFILE%\.pi-carry` 保存配置、密钥、状态和日志。开机自启默认关闭；在设置中启用后，会写入当前用户自启项（`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`，值名 `pi-carry`）。
 
@@ -97,7 +97,7 @@ CI 在版本 tag 上构建这些资产，并创建**草稿** GitHub Release；�
 
 ### macOS
 
-打开 `pi-carry-macos-11-universal-0.3.0.dmg`，把 **pi carry** 拖入“应用程序”，推出镜像，然后从“应用程序”启动。构建为 Universal，在 Intel 和 Apple Silicon 上原生运行。
+打开 `pi-carry-macos-11-universal-0.3.1.dmg`，把 **pi carry** 拖入“应用程序”，推出镜像，然后从“应用程序”启动。构建为 Universal，在 Intel 和 Apple Silicon 上原生运行。
 
 应用未签名、未公证，首次启动会被 Gatekeeper 拦截，处理方式见[安装未签名版本](#安装未签名版本)。首次启动会创建 `~/.pi-carry/config.toml`、本地状态数据库，以及用于保存配对密钥的钥匙串条目。
 
@@ -107,10 +107,10 @@ CI 在版本 tag 上构建这些资产，并创建**草稿** GitHub Release；�
 
 ```bash
 # Debian / Ubuntu x64
-sudo apt install ./pi-carry-linux-22.04-x64-0.3.0.deb
+sudo apt install ./pi-carry-linux-22.04-x64-0.3.1.deb
 
 # Fedora / RHEL x64
-sudo dnf install ./pi-carry-linux-22.04-x64-0.3.0.rpm
+sudo dnf install ./pi-carry-linux-22.04-x64-0.3.1.rpm
 ```
 
 arm64 机器把文件名中的 `x64` 换成 `arm64`。安装包声明的运行时依赖：
@@ -127,7 +127,7 @@ GNOME 默认不显示托盘图标；如果托盘图标没有出现，请安装 A
 **Windows SmartScreen。** 首次启动可能提示“Windows 已保护你的电脑”。点击**更多信息 → 仍要运行**。下载后先校验：
 
 ```powershell
-Get-FileHash .\pi-carry-windows-10-x64-0.3.0-setup.exe -Algorithm SHA256
+Get-FileHash .\pi-carry-windows-10-x64-0.3.1-setup.exe -Algorithm SHA256
 # 与 SHA256SUMS.txt 中对应行比较
 ```
 
@@ -335,8 +335,8 @@ bash scripts/package-macos.sh
 脚本会把带版本号的资产和 `SHA256SUMS.txt` 写入 `dist/`。生成发布用更新清单：
 
 ```bash
-node scripts/gen-latest-json.mjs --dir dist --version 0.3.0 \
-  --base-url https://github.com/y-cyfor/Pi-Carry/releases/download/v0.3.0
+node scripts/gen-latest-json.mjs --dir dist --version 0.3.1 \
+  --base-url https://github.com/y-cyfor/Pi-Carry/releases/download/v0.3.1
 ```
 
 `scripts/package.ps1` 会一并打包正式签名的 Android APK；缺少签名 APK 时会直接失败，不会用 debug APK 代替。推荐 PowerShell 7，Windows PowerShell 5.1 也可用（脚本用 `System.Security.Cryptography` 计算 SHA-256，不依赖 `Get-FileHash`）。

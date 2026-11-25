@@ -74,13 +74,13 @@ if (-not $SkipDesktop) {
     $dllPath = 'target/release/WebView2Loader.dll'
     foreach ($required in @($exePath, $dllPath)) {
         if (-not (Test-Path $required)) {
-            throw "缺少 $required，请先运行 cargo tauri build --bundles nsis 构建 Windows 产物。"
+            throw "缺少 $required，请先在 crates/desktop 下运行 cargo tauri build --bundles nsis 构建 Windows 产物。"
         }
     }
 
     $setups = @(Get-ChildItem 'target/release/bundle/nsis' -Filter '*setup.exe' -File -ErrorAction SilentlyContinue)
     if ($setups.Count -eq 0) {
-        throw "缺少 NSIS 安装器，请先运行 cargo tauri build --bundles nsis。"
+        throw "缺少 NSIS 安装器，请先在 crates/desktop 下运行 cargo tauri build --bundles nsis。"
     }
     # 优先取版本号与本仓库一致的安装器，避免误把旧版安装器打进本次资产。
     $matched = @($setups | Where-Object { $_.Name -like "*$version*" })
@@ -123,8 +123,10 @@ if (-not $SkipDesktop) {
     if (Test-Path $setupSigSource) {
         Copy-Item $setupSigSource "$setupTarget.sig" -Force
         $artifacts.Add("$setupTarget.sig")
-    } else {
+    } elseif ([string]::IsNullOrEmpty($env:TAURI_SIGNING_PRIVATE_KEY)) {
         Write-Warning "缺少 NSIS 更新签名 $setupSigSource（未注入 TAURI_SIGNING_PRIVATE_KEY 时属正常），latest.json 将缺少 Windows 安装器签名。"
+    } else {
+        throw "已注入 TAURI_SIGNING_PRIVATE_KEY，但缺少 NSIS 更新签名：$setupSigSource。请在 crates/desktop 下运行 cargo tauri build --bundles nsis（保持 createUpdaterArtifacts=true），或确认 tauri-cli 与 tauri crate 版本匹配（版本错配会让日志出现 Failed to add bundler type）。"
     }
 }
 

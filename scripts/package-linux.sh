@@ -119,7 +119,8 @@ if [[ "$SKIP_BUILD" -eq 0 ]]; then
         build_args+=(--config '{"bundle":{"createUpdaterArtifacts":false}}')
     fi
     echo "== 构建 deb/rpm：${tauri_cli[*]} ${build_args[*]} =="
-    "${tauri_cli[@]}" "${build_args[@]}"
+    # tauri.conf.json 在 crates/desktop，Tauri CLI 没有 --project-dir，必须从该目录运行。
+    ( cd "$ROOT/crates/desktop" && "${tauri_cli[@]}" "${build_args[@]}" )
 else
     echo "== --skip-build：使用已有 target/release/bundle 产物 =="
 fi
@@ -153,7 +154,7 @@ copy_with_sig() {
     if [[ -f "$src.sig" ]]; then
         cp -f "$src.sig" "$dst.sig"
         artifacts+=("$dst.sig")
-    else
+    elif [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
         echo "提示：缺少更新签名 $src.sig（未注入 TAURI_SIGNING_PRIVATE_KEY 时属正常，updater 将不可用）" >&2
     fi
 }
@@ -162,6 +163,20 @@ deb_out="$OUT_DIR/pi-carry-linux-$os_label-$arch-$version.deb"
 rpm_out="$OUT_DIR/pi-carry-linux-$os_label-$arch-$version.rpm"
 copy_with_sig "$deb_src" "$deb_out"
 copy_with_sig "$rpm_src" "$rpm_out"
+
+# 注入了签名私钥就必须同时产出 deb/rpm 的 .sig，否则 latest.json 缺 Linux 平台、updater 失效。
+if [[ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
+    missing_sigs=()
+    for sig in "$deb_out.sig" "$rpm_out.sig"; do
+        [[ -f "$sig" ]] || missing_sigs+=("$sig")
+    done
+    if [[ ${#missing_sigs[@]} -gt 0 ]]; then
+        echo "已注入 TAURI_SIGNING_PRIVATE_KEY，但缺少 updater 签名：" >&2
+        printf '  - %s\n' "${missing_sigs[@]}" >&2
+        echo "请在 crates/desktop 下用 cargo tauri build --bundles deb,rpm 重新构建（保持 createUpdaterArtifacts=true）。" >&2
+        exit 1
+    fi
+fi
 
 # 依赖声明检查：托盘依赖必须显式声明，否则装上了也没有图标。
 missing=()

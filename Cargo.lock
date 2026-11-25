@@ -4586,7 +4586,7 @@ dependencies = [
 
 [[package]]
 name = "pi-carry-cli"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4601,7 +4601,7 @@ dependencies = [
 
 [[package]]
 name = "pi-carry-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "argon2",
@@ -4632,7 +4632,7 @@ dependencies = [
 
 [[package]]
 name = "pi-carry-desktop"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "chrono",
  "pi-carry-core",
@@ -4652,7 +4652,7 @@ dependencies = [
 
 [[package]]
 name = "pi-carry-e2e-client"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -4666,7 +4666,7 @@ dependencies = [
 
 [[package]]
 name = "pi-carry-fake-pi"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "pi-carry-core",
@@ -4676,7 +4676,7 @@ dependencies = [
 
 [[package]]
 name = "pi-carry-protocol"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "serde",
  "serde_json",

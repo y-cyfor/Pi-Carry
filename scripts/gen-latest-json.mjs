@@ -1,9 +1,20 @@
 // 生成 tauri-plugin-updater 用的 latest.json（纯 Node，无依赖）。
 //
+// target 键必须符合 Tauri updater 的解析规则：
+//   1. 先找 `{os}-{arch}-{bundle_type}`，例如 windows-x86_64-nsis、linux-x86_64-deb；
+//   2. 找不到再回退 `{os}-{arch}`，例如 windows-x86_64、darwin-aarch64。
+// 各平台因此这样写：
+//   - Windows：主用 `-nsis`，同时保留 `windows-x86_64` 回退（防 CLI/crate 版本错配
+//     导致 bundle type 探测失败）；
+//   - macOS：bundle type 是 `app`，Universal 包无法区分 Intel/Apple Silicon，
+//     所以用 `darwin-x86_64` / `darwin-aarch64` 两个基础键指向同一个 `.app.tar.gz`；
+//     旧版写死的 `macos-universal` 不是合法 target，updater 永远匹配不到，已删除。
+//   - Linux：`linux-{arch}-deb` / `linux-{arch}-rpm`。
+//
 // 用法：
-//   node scripts/gen-latest-json.mjs --dir dist --version 0.3.0 \
+//   node scripts/gen-latest-json.mjs --dir dist --version 0.3.1 \
 //     --notes-file .tmp/notes.md --out dist/latest.json \
-//     --base-url https://github.com/y-cyfor/Pi-Carry/releases/download/v0.3.0
+//     --base-url https://github.com/y-cyfor/Pi-Carry/releases/download/v0.3.1
 //
 // 参数：
 //   --dir          产物目录，默认 dist
@@ -42,7 +53,7 @@ const HELP = `生成 tauri 自动更新清单 latest.json
   --notes-file <文件>   可选，更新说明（保留换行）
   --pub-date <RFC3339>  可选，默认当前 UTC YYYY-MM-DDTHH:MM:SSZ
   --out <文件>          可选，默认 <dir>/latest.json
-  --base-url <前缀>     必填，如 https://github.com/y-cyfor/Pi-Carry/releases/download/v0.3.0
+  --base-url <前缀>     必填，如 https://github.com/y-cyfor/Pi-Carry/releases/download/v0.3.1
   --channel <通道>      stable | beta，默认 stable
   --allow-missing       缺资产或 .sig 时跳过并警告，而不是报错退出
   --help
@@ -100,7 +111,8 @@ const notesFile = opts.get('notes-file')
 const notes = notesFile === undefined ? '' : readFileSync(resolve(notesFile), 'utf8')
 
 // 资产名固定规则：项目-系统-系统版本-架构-项目版本[后缀]。
-// target 键与 tauri-plugin-updater 在存在多种包类型时追加 {bundle_type} 的规则一致。
+// 一个物理文件可以服务多个 target 键（见文件头的 Tauri 解析规则），所以这里按
+// 「文件 + targets」建模：文件与 .sig 各只检查一次，缺失项去重后再报。
 //
 // Linux 的「系统版本」不是常量：`scripts/package-linux.sh` 取构建机的
 // `/etc/os-release` VERSION_ID（x64 = 22.04，arm64 = 24.04），所以这里按
@@ -113,9 +125,18 @@ const LINUX_INSTALLERS = [
   ['linux-aarch64-rpm', 'arm64', 'rpm'],
 ]
 const FIXED_INSTALLERS = [
-  ['windows-x86_64-nsis', (v) => `pi-carry-windows-10-x64-${v}-setup.exe`],
-  // macOS 就地更新包必须是 .app.tar.gz：updater 会解压替换 .app，DMG 只作为人工安装资产。
-  ['macos-universal', (v) => `pi-carry-macos-11-universal-${v}.app.tar.gz`],
+  {
+    // updater 先按 `windows-x86_64-nsis` 查；基础键 `windows-x86_64` 是回退，
+    // 两者必须指向同一个安装器和同一个 .sig。
+    targets: ['windows-x86_64-nsis', 'windows-x86_64'],
+    file: (v) => `pi-carry-windows-10-x64-${v}-setup.exe`,
+  },
+  {
+    // macOS 就地更新包必须是 .app.tar.gz：updater 会解压替换 .app，DMG 只作为人工安装资产。
+    // bundle type 是 `app`，最终回退到 darwin-{arch} 基础键；Universal 包两个键同 URL。
+    targets: ['darwin-x86_64', 'darwin-aarch64'],
+    file: (v) => `pi-carry-macos-11-universal-${v}.app.tar.gz`,
+  },
 ]
 const PORTABLE_TARGET = 'windows-x86_64'
 const portableFile = `pi-carry-windows-10-x64-${version}.zip`
@@ -132,9 +153,12 @@ const sha256 = (path) =>
   })
 
 const main = async () => {
-  // Linux 产物先按「架构 + 扩展名 + 版本」发现，缺/重都一次性报清楚，绝不猜。
+  // Linux 产物先按「架构 + 扩展名 + 版本」发现：缺失与歧义分开收集。
+  // 缺失可以按 --allow-missing 跳过；歧义（同一架构多个发行版标签）绝不能跳过，
+  // 否则会静默生成少一个平台键的清单。
   const discovered = new Map()
-  const discoveryProblems = []
+  const duplicates = []
+  const missing = []
   for (const [target, arch, ext] of LINUX_INSTALLERS) {
     const suffix = `-${arch}-${version}.${ext}`
     const matches = existsSync(dir)
@@ -143,49 +167,67 @@ const main = async () => {
     if (matches.length === 1) {
       discovered.set(target, matches[0])
     } else if (matches.length === 0) {
-      discoveryProblems.push(`未找到 pi-carry-linux-*-${arch}-${version}.${ext}（Linux ${arch} ${ext}）`)
+      missing.push(`未找到 pi-carry-linux-*-${arch}-${version}.${ext}（Linux ${arch} ${ext}）`)
     } else {
       // 同一架构出现两个发行版标签（例如 22.04 与 24.04）时不能替用户挑一个。
-      discoveryProblems.push(`Linux ${arch} ${ext} 产物不唯一：${matches.join('、')}`)
+      duplicates.push(`Linux ${arch} ${ext} 产物不唯一：${matches.join('、')}`)
     }
   }
 
+  // 歧义不是「缺资产」：--allow-missing 只允许跳过缺失，不能吞掉歧义。
+  if (duplicates.length > 0) {
+    console.error(`Linux 产物有 ${duplicates.length} 处不唯一，无法确定该发布哪个文件：`)
+    for (const line of duplicates) console.error(`  ${line}`)
+    process.exit(1)
+  }
+
   // 先做存在性检查，缺什么一次性列清楚，避免「跑到一半才发现缺 .sig」。
-  const missing = [...discoveryProblems]
-  const present = []
-  for (const [target, nameOf] of FIXED_INSTALLERS) {
+  // 一个物理文件可能服务多个 target 键，因此文件与 .sig 各只检查一次，缺失项按文件去重。
+  // 这里的 missing 已包含发现阶段的「未找到」，但不含歧义（歧义在上面无条件失败）。
+  const assets = []
+  for (const { targets, file: nameOf } of FIXED_INSTALLERS) {
     const file = nameOf(version)
-    if (!existsSync(join(dir, file))) missing.push(file)
-    if (!existsSync(join(dir, `${file}.sig`))) missing.push(`${file}.sig`)
-    present.push({ target, file })
+    const hasFile = existsSync(join(dir, file))
+    const hasSig = existsSync(join(dir, `${file}.sig`))
+    if (!hasFile) missing.push(file)
+    if (!hasSig) missing.push(`${file}.sig`)
+    assets.push({ targets, file, ok: hasFile && hasSig })
   }
   for (const [target] of LINUX_INSTALLERS) {
     const file = discovered.get(target)
     if (!file) continue
-    if (!existsSync(join(dir, `${file}.sig`))) missing.push(`${file}.sig`)
-    present.push({ target, file })
+    const hasSig = existsSync(join(dir, `${file}.sig`))
+    if (!hasSig) missing.push(`${file}.sig`)
+    assets.push({ targets: [target], file, ok: hasSig })
   }
   if (!existsSync(join(dir, portableFile))) missing.push(portableFile)
+  const uniqueMissing = [...new Set(missing)]
 
-  if (missing.length > 0) {
+  if (uniqueMissing.length > 0) {
     if (!allowMissing) {
-      console.error(`缺少 ${missing.length} 个期望文件（目录 ${dir}）：`)
-      for (const name of missing) console.error(`  ${name}`)
+      console.error(`缺少 ${uniqueMissing.length} 个期望文件（目录 ${dir}）：`)
+      for (const name of uniqueMissing) console.error(`  ${name}`)
       console.error('如确有平台本次不发布，加 --allow-missing 跳过。')
       process.exit(1)
     }
-    console.error(`警告：--allow-missing，跳过 ${missing.length} 个缺失文件：`)
-    for (const name of missing) console.error(`  ${name}`)
+    console.error(`警告：--allow-missing，跳过 ${uniqueMissing.length} 个缺失文件：`)
+    for (const name of uniqueMissing) console.error(`  ${name}`)
   }
 
   const platforms = {}
   const summary = []
-  for (const { target, file } of present) {
-    const sigPath = join(dir, `${file}.sig`)
-    if (!existsSync(join(dir, file)) || !existsSync(sigPath)) continue
-    const signature = readFileSync(sigPath, 'utf8').trim()
-    platforms[target] = { signature, url: assetUrl(file) }
-    summary.push({ target, file, sigLength: signature.length })
+  const signatures = new Map()
+  for (const { targets, file, ok } of assets) {
+    if (!ok) continue
+    // 同一物理文件的 .sig 只读一次，多个 target 共用同一份签名。
+    if (!signatures.has(file)) {
+      signatures.set(file, readFileSync(join(dir, `${file}.sig`), 'utf8').trim())
+    }
+    const signature = signatures.get(file)
+    for (const target of targets) {
+      platforms[target] = { signature, url: assetUrl(file) }
+    }
+    summary.push({ targets, file, sigLength: signature.length })
   }
 
   const portable = {}
@@ -222,8 +264,8 @@ const main = async () => {
 
   writeFileSync(out, `${JSON.stringify(manifest, null, 2)}\n`)
 
-  for (const { target, file, sigLength } of summary) {
-    console.log(`target ${target}  文件 ${file}  signature ${sigLength} 字节`)
+  for (const { targets, file, sigLength } of summary) {
+    for (const target of targets) console.log(`target ${target}  文件 ${file}  signature ${sigLength} 字节`)
   }
   for (const [target, entry] of Object.entries(portable)) {
     console.log(`portable ${target}  文件 ${portableFile}  sha256 ${entry.sha256.slice(0, 12)}`)

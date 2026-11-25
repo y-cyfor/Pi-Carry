@@ -51,7 +51,7 @@ Pi Carry is a remote control layer for the pi coding agent. pi keeps running on 
 
 It does not copy sessions and does not require a cloud account. The bridge runs as a tray app or CLI and talks to pi over its RPC mode. The phone can store multiple nodes, connect directly on the LAN, and fall back to the n0 relay or a self-hosted relay when NAT traversal is required. Tool calls are intercepted by a pi extension and arbitrated by the bridge; approvals time out to deny. It is built for following long-running work while away from the desk — not for handing code, sessions, or credentials to a third-party service.
 
-Current release: `0.3.0`. Windows 10/11 x64 is the primary verified target. macOS 11+ Universal and Linux x64/arm64 packages are built by the release pipeline but have not completed full real-machine acceptance. The macOS build is **unsigned and not notarized**; see [Installing unsigned builds](#installing-unsigned-builds).
+Current release: `0.3.1`. Windows 10/11 x64 is the primary verified target. macOS 11+ Universal and Linux x64/arm64 packages are built by the release pipeline but have not completed full real-machine acceptance. The macOS build is **unsigned and not notarized**; see [Installing unsigned builds](#installing-unsigned-builds).
 
 ## Installation
 
@@ -70,16 +70,16 @@ Pi Carry does not bundle pi, Node.js, or model credentials. Make sure `pi --vers
 
 ### Download
 
-Release assets use a fixed naming scheme. For version `0.3.0`:
+Release assets use a fixed naming scheme. For version `0.3.1`:
 
 | Asset | Purpose |
 | --- | --- |
-| `pi-carry-windows-10-x64-0.3.0-setup.exe` | Windows installer (NSIS, current user, no administrator rights) |
-| `pi-carry-windows-10-x64-0.3.0.zip` | Windows portable build |
-| `pi-carry-macos-11-universal-0.3.0.dmg` | macOS Universal disk image |
-| `pi-carry-macos-11-universal-0.3.0.app.tar.gz` (+ `.sig`) | Updater artifact; not needed for manual installation |
-| `pi-carry-linux-22.04-x64-0.3.0.deb` / `.rpm` | Linux packages for x64 |
-| `pi-carry-linux-24.04-arm64-0.3.0.deb` / `.rpm` | Linux packages for arm64 (built on 24.04) |
+| `pi-carry-windows-10-x64-0.3.1-setup.exe` | Windows installer (NSIS, current user, no administrator rights) |
+| `pi-carry-windows-10-x64-0.3.1.zip` | Windows portable build |
+| `pi-carry-macos-11-universal-0.3.1.dmg` | macOS Universal disk image |
+| `pi-carry-macos-11-universal-0.3.1.app.tar.gz` (+ `.sig`) | Updater artifact; not needed for manual installation |
+| `pi-carry-linux-22.04-x64-0.3.1.deb` / `.rpm` | Linux packages for x64 |
+| `pi-carry-linux-24.04-arm64-0.3.1.deb` / `.rpm` | Linux packages for arm64 (built on 24.04) |
 | `latest.json` | Update manifest used by the built-in updater |
 | `SHA256SUMS.txt` | Checksums for every release asset |
 
@@ -87,9 +87,9 @@ CI builds these assets on version tags and creates a **draft** GitHub Release. A
 
 ### Windows
 
-Run `pi-carry-windows-10-x64-0.3.0-setup.exe`. The installer is per-user and does not require administrator rights. It installs the desktop app, creates Start Menu entries, and registers the `pi-carry://` deep-link scheme.
+Run `pi-carry-windows-10-x64-0.3.1-setup.exe`. The installer is per-user and does not require administrator rights. It installs the desktop app, creates Start Menu entries, and registers the `pi-carry://` deep-link scheme.
 
-For the portable build, extract `pi-carry-windows-10-x64-0.3.0.zip` anywhere, keep `pi-carry-desktop.exe` and `WebView2Loader.dll` in the same folder, and run the exe. By default the window closes to the tray. The portable build has no uninstaller; like the installer, it registers the `pi-carry://` handler on first launch. Use the installer if you want an entry in Apps & features.
+For the portable build, extract `pi-carry-windows-10-x64-0.3.1.zip` anywhere, keep `pi-carry-desktop.exe` and `WebView2Loader.dll` in the same folder, and run the exe. By default the window closes to the tray. The portable build has no uninstaller; like the installer, it registers the `pi-carry://` handler on first launch. Use the installer if you want an entry in Apps & features.
 
 Both forms use `%USERPROFILE%\.pi-carry` for configuration, keys, state, and logs. Autostart is off by default; enabling it in Settings registers a per-user entry (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `pi-carry`).
 
@@ -97,7 +97,7 @@ If WebView2 Runtime is missing, install the Evergreen Runtime from Microsoft and
 
 ### macOS
 
-Open `pi-carry-macos-11-universal-0.3.0.dmg`, drag **pi carry** into **Applications**, eject the disk image, and launch the app from Applications. The build is Universal and runs natively on Intel and Apple Silicon.
+Open `pi-carry-macos-11-universal-0.3.1.dmg`, drag **pi carry** into **Applications**, eject the disk image, and launch the app from Applications. The build is Universal and runs natively on Intel and Apple Silicon.
 
 The app is unsigned and not notarized, so Gatekeeper blocks the first launch. See [Installing unsigned builds](#installing-unsigned-builds). The first start creates `~/.pi-carry/config.toml`, the local state database, and the keychain entries used for pairing secrets.
 
@@ -107,10 +107,10 @@ Download the package that matches your architecture and install it with the dist
 
 ```bash
 # Debian / Ubuntu, x64
-sudo apt install ./pi-carry-linux-22.04-x64-0.3.0.deb
+sudo apt install ./pi-carry-linux-22.04-x64-0.3.1.deb
 
 # Fedora / RHEL, x64
-sudo dnf install ./pi-carry-linux-22.04-x64-0.3.0.rpm
+sudo dnf install ./pi-carry-linux-22.04-x64-0.3.1.rpm
 ```
 
 Replace `x64` with `arm64` on arm64 machines. The packages declare these runtime dependencies:
@@ -127,7 +127,7 @@ The project does not yet hold a Windows code-signing certificate; the SignPath F
 **Windows SmartScreen.** On first launch Windows may show “Windows protected your PC”. Click **More info → Run anyway**. Verify the download first:
 
 ```powershell
-Get-FileHash .\pi-carry-windows-10-x64-0.3.0-setup.exe -Algorithm SHA256
+Get-FileHash .\pi-carry-windows-10-x64-0.3.1-setup.exe -Algorithm SHA256
 # compare with the matching line in SHA256SUMS.txt
 ```
 
@@ -335,8 +335,8 @@ bash scripts/package-macos.sh
 The scripts write versioned assets and `SHA256SUMS.txt` to `dist/`. Generate the updater manifest for a release with:
 
 ```bash
-node scripts/gen-latest-json.mjs --dir dist --version 0.3.0 \
-  --base-url https://github.com/y-cyfor/Pi-Carry/releases/download/v0.3.0
+node scripts/gen-latest-json.mjs --dir dist --version 0.3.1 \
+  --base-url https://github.com/y-cyfor/Pi-Carry/releases/download/v0.3.1
 ```
 
 `scripts/package.ps1` packs the release-signed Android APK together with the Windows assets; it fails rather than substituting a debug APK. PowerShell 7 is recommended; Windows PowerShell 5.1 also works — the script derives SHA-256 with `System.Security.Cryptography` and does not rely on `Get-FileHash`.
