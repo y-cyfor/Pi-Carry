@@ -4,678 +4,650 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>pi carry</title>
-<style>
-  :root {
-    --ink: #05050a;
-    --ink-2: #0a0a13;
-    --panel: #10101b;
-    --panel-2: #151522;
-    --line: #232333;
-    --line-soft: rgba(255,255,255,.055);
-    --text: #f2f1fa;
-    --text-2: #9c9aae;
-    --muted: #858296;
-    --violet: #7c6bff;
-    --violet-soft: rgba(124,107,255,.14);
-    --cyan: #45d9d0;
-    --rose: #ff6b85;
-    --amber: #ffb86b;
-    --mint: #5be7a9;
-    --radius: 18px;
-  }
-  * { box-sizing: border-box; }
-  html, body { height: 100%; }
-  body {
-    margin: 0;
-    background: var(--ink);
-    color: var(--text);
-    font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
-    font-size: 14px;
-    -webkit-font-smoothing: antialiased;
-    overflow: hidden;
-  }
-  body::before {
-    content: ""; position: fixed; inset: 0; pointer-events: none;
-    background:
-      radial-gradient(900px 500px at 78% -10%, rgba(124,107,255,.13), transparent 62%),
-      radial-gradient(700px 420px at 4% 106%, rgba(69,217,208,.055), transparent 65%);
-  }
-  button, input, select, textarea { font: inherit; color: inherit; }
-  button { cursor: pointer; }
-  .app { display: flex; height: 100vh; position: relative; z-index: 1; }
-
-  /* 侧栏 */
-  .sidebar {
-    width: 228px; flex: 0 0 228px; border-right: 1px solid var(--line-soft);
-    background: rgba(8,8,15,.72); backdrop-filter: blur(22px);
-    display: flex; flex-direction: column; padding: 22px 14px 14px;
-  }
-  .brand { display: flex; align-items: center; gap: 11px; padding: 0 10px 24px; }
-  .brand-mark {
-    width: 36px; height: 36px; border-radius: 12px; display: grid; place-items: center;
-    background: linear-gradient(145deg, #8c7dff, #5a47e8);
-    box-shadow: 0 8px 24px rgba(124,107,255,.30);
-    font-family: "Cascadia Code", Consolas, monospace; font-size: 20px; font-weight: 600;
-  }
-  .brand-name { font-size: 16px; font-weight: 650; letter-spacing: -.2px; }
-  .brand-sub { font-size: 10px; color: var(--muted); letter-spacing: .16em; text-transform: uppercase; margin-top: 2px; }
-  .nav-label { font-size: 10px; color: var(--muted); letter-spacing: .16em; padding: 8px 12px; }
-  .nav { display: flex; flex-direction: column; gap: 3px; }
-  .nav button {
-    border: 0; background: transparent; color: var(--text-2); text-align: left;
-    display: flex; align-items: center; gap: 11px; padding: 10px 12px; border-radius: 11px;
-    font-size: 13.5px; transition: .16s ease;
-  }
-  .nav button:hover { background: rgba(255,255,255,.035); color: var(--text); }
-  .nav button.active { background: var(--violet-soft); color: #bdb4ff; }
-  .nav button.active .ico { color: var(--violet); }
-  .nav .ico { width: 17px; height: 17px; color: var(--muted); display: inline-flex; }
-  .nav .badge { margin-left: auto; font-size: 10px; padding: 2px 7px; border-radius: 20px; background: rgba(255,255,255,.06); color: var(--text-2); }
-  .side-foot { margin-top: auto; border-top: 1px solid var(--line-soft); padding: 14px 10px 4px; }
-  .side-status { display: flex; align-items: center; gap: 9px; font-size: 12px; color: var(--text-2); }
-  .side-status b { color: var(--text); font-weight: 550; }
-  .side-meta { margin-top: 9px; font: 10.5px/1.5 "Cascadia Code", Consolas, monospace; color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
-  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: 0 0 auto; }
-  .dot.on { background: var(--mint); box-shadow: 0 0 10px rgba(91,231,169,.7); }
-  .dot.warn { background: var(--amber); }
-  .dot.err { background: var(--rose); }
-
-  /* 主区 */
-  .main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-  .topbar {
-    height: 66px; flex: 0 0 66px; border-bottom: 1px solid var(--line-soft);
-    display: flex; align-items: center; gap: 14px; padding: 0 30px;
-    background: rgba(5,5,10,.55); backdrop-filter: blur(16px);
-  }
-  .topbar h1 { font-size: 17px; font-weight: 600; margin: 0; letter-spacing: -.2px; }
-  .topbar .sub { color: var(--muted); font-size: 12px; margin-left: 4px; }
-  .top-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
-  .pill {
-    display: inline-flex; align-items: center; gap: 6px; padding: 4px 9px; border-radius: 30px;
-    border: 1px solid var(--line); background: rgba(255,255,255,.025);
-    font-size: 10.5px; color: var(--text-2); font-family: "Cascadia Code", Consolas, monospace;
-  }
-  .pill.violet { color: #bdb4ff; border-color: rgba(124,107,255,.35); background: var(--violet-soft); }
-  .pill.green { color: var(--mint); border-color: rgba(91,231,169,.28); background: rgba(91,231,169,.08); }
-  .pill.rose { color: var(--rose); border-color: rgba(255,107,133,.30); background: rgba(255,107,133,.08); }
-  .pill.amber { color: var(--amber); border-color: rgba(255,184,107,.28); background: rgba(255,184,107,.07); }
-  .btn {
-    border: 1px solid var(--line); background: rgba(255,255,255,.035); color: var(--text-2);
-    padding: 8px 13px; border-radius: 10px; display: inline-flex; align-items: center; gap: 7px;
-    font-size: 12.5px; transition: .16s ease; white-space: nowrap;
-  }
-  .btn:hover { border-color: rgba(255,255,255,.18); color: var(--text); background: rgba(255,255,255,.06); }
-  .btn.primary { background: linear-gradient(145deg, #8b7cff, #6350ee); border-color: transparent; color: #fff; box-shadow: 0 8px 22px rgba(124,107,255,.24); }
-  .btn.primary:hover { filter: brightness(1.08); }
-  .btn.danger { color: var(--rose); border-color: rgba(255,107,133,.25); background: rgba(255,107,133,.06); }
-  .btn.ghost { border-color: transparent; background: transparent; }
-  .btn:disabled { opacity: .45; cursor: not-allowed; }
-  .btn .ico { width: 15px; height: 15px; }
-
-  .content { flex: 1; overflow: auto; padding: 26px 30px 42px; scroll-behavior: smooth; }
-  .page { display: none; max-width: 1080px; margin: 0 auto; animation: enter .22s ease both; }
-  .page.active { display: block; }
-  @keyframes enter { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
-
-  .grid { display: grid; gap: 14px; }
-  .g2 { grid-template-columns: 1.55fr 1fr; }
-  .g3 { grid-template-columns: repeat(3, 1fr); }
-  .g4 { grid-template-columns: repeat(4, 1fr); }
-  .card {
-    background: linear-gradient(165deg, rgba(19,19,32,.86), rgba(12,12,22,.90));
-    border: 1px solid var(--line-soft); border-radius: var(--radius);
-    padding: 20px; position: relative; overflow: hidden;
-  }
-  .card::after {
-    content: ""; position: absolute; inset: 0; pointer-events: none; border-radius: inherit;
-    background: linear-gradient(150deg, rgba(255,255,255,.035), transparent 38%);
-  }
-  .card h3 { margin: 0; font-size: 13px; font-weight: 600; color: var(--text); }
-  .card .caption { color: var(--muted); font-size: 11.5px; margin-top: 4px; line-height: 1.55; }
-  .mono { font-family: "Cascadia Code", Consolas, monospace; }
-  .muted { color: var(--muted); }
-  .secondary { color: var(--text-2); }
-  .eyebrow { font: 10px/1 "Cascadia Code", Consolas, monospace; letter-spacing: .15em; color: var(--muted); text-transform: uppercase; }
-  .hero { display: flex; align-items: flex-start; gap: 18px; padding: 24px; }
-  .hero-orb {
-    width: 54px; height: 54px; border-radius: 17px; flex: 0 0 54px; display: grid; place-items: center;
-    background: radial-gradient(circle at 32% 28%, rgba(124,107,255,.35), rgba(124,107,255,.04) 70%);
-    border: 1px solid rgba(124,107,255,.30); font-family: "Cascadia Code", monospace; font-size: 27px; color: #c6beff;
-    box-shadow: inset 0 0 24px rgba(124,107,255,.12);
-  }
-  .hero h2 { font-size: 25px; letter-spacing: -.6px; margin: 3px 0 5px; font-weight: 650; }
-  .hero p { margin: 0; color: var(--text-2); font-size: 12.5px; }
-  .hero-side { margin-left: auto; text-align: right; }
-  .hero-main { min-width: 0; flex: 1; }
-  .endpoint {
-    display: flex; gap: 9px; align-items: center; margin-top: 14px; padding: 9px 11px;
-    border: 1px solid var(--line); border-radius: 10px; background: rgba(0,0,0,.22);
-    font-family: "Cascadia Code", Consolas, monospace; font-size: 11.5px; color: #c7c3db;
-    overflow: hidden;
-  }
-  .endpoint span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .metric { padding: 17px 18px; }
-  .metric .num { font-size: 27px; font-weight: 600; letter-spacing: -.8px; margin-top: 12px; }
-  .metric .num small { font-size: 12px; color: var(--muted); font-weight: 400; margin-left: 5px; }
-  .metric .foot { margin-top: 6px; color: var(--muted); font-size: 11px; }
-  .addresses { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 6px; }
-  .address { font: 10.5px/1.4 "Cascadia Code", Consolas, monospace; color: var(--text-2); padding: 4px 7px; border-radius: 6px; background: rgba(255,255,255,.035); border: 1px solid var(--line-soft); }
-  .section-head { display: flex; align-items: center; gap: 10px; margin: 26px 0 12px; }
-  .section-head h3 { margin: 0; font-size: 13.5px; font-weight: 600; }
-  .section-head .caption { margin: 0; color: var(--muted); font-size: 11.5px; }
-  .section-head .right { margin-left: auto; }
-  .list { display: flex; flex-direction: column; gap: 8px; }
-  .row {
-    display: flex; align-items: center; gap: 12px; padding: 12px 14px; border: 1px solid var(--line-soft);
-    border-radius: 12px; background: rgba(16,16,27,.55); transition: .15s ease;
-  }
-  .row:hover { border-color: rgba(255,255,255,.10); background: rgba(22,22,36,.66); }
-  .row .main-col { min-width: 0; flex: 1; }
-  .row .title { font-size: 12.5px; font-weight: 550; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .row .meta { font: 10.5px/1.5 "Cascadia Code", Consolas, monospace; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 3px; }
-  .row .time { color: var(--muted); font-size: 11px; white-space: nowrap; }
-  .avatar {
-    width: 34px; height: 34px; border-radius: 10px; flex: 0 0 34px; display: grid; place-items: center;
-    background: rgba(124,107,255,.12); color: #b7adff; font-size: 12px; font-weight: 600;
-  }
-  .avatar.cyan { background: rgba(69,217,208,.10); color: var(--cyan); }
-  .empty { padding: 34px 20px; text-align: center; color: var(--muted); font-size: 12px; }
-  .empty b { display: block; color: var(--text-2); font-weight: 500; margin-bottom: 4px; }
-  .banner {
-    display: flex; align-items: flex-start; gap: 10px; padding: 11px 13px; border-radius: 11px;
-    border: 1px solid rgba(255,184,107,.20); background: rgba(255,184,107,.055);
-    color: #e8c69e; font-size: 11.5px; line-height: 1.6; margin-bottom: 15px;
-  }
-  .banner.rose { border-color: rgba(255,107,133,.22); background: rgba(255,107,133,.055); color: #f3adb9; }
-  .banner.violet { border-color: rgba(124,107,255,.22); background: rgba(124,107,255,.055); color: #c4bdfa; }
-
-  /* 配对 */
-  .pair-grid { display: grid; grid-template-columns: 360px 1fr; gap: 18px; align-items: start; }
-  .qr-card { padding: 22px; text-align: center; }
-  .qr-frame {
-    background: #fff; border-radius: 16px; padding: 14px; width: 100%; aspect-ratio: 1;
-    display: grid; place-items: center; overflow: hidden;
-  }
-  .qr-frame svg { width: 100%; height: 100%; display: block; }
-  .qr-placeholder { color: #5a5870; font-size: 12px; display: flex; flex-direction: column; align-items: center; gap: 10px; }
-  .code-row { display: flex; gap: 7px; justify-content: center; margin-top: 16px; }
-  .code-digit {
-    width: 39px; height: 48px; display: grid; place-items: center; border-radius: 10px;
-    border: 1px solid rgba(124,107,255,.35); background: rgba(124,107,255,.09);
-    font: 600 21px/1 "Cascadia Code", Consolas, monospace; color: #d8d3ff;
-  }
-  .code-hint { margin-top: 10px; color: var(--muted); font-size: 11px; }
-  .steps { display: flex; flex-direction: column; gap: 11px; }
-  .step { display: flex; gap: 12px; padding: 13px 14px; border-radius: 12px; border: 1px solid var(--line-soft); background: rgba(16,16,27,.5); }
-  .step-num { width: 22px; height: 22px; flex: 0 0 22px; border-radius: 50%; display: grid; place-items: center; font: 10px "Cascadia Code", monospace; color: var(--text-2); border: 1px solid var(--line); }
-  .step b { display: block; font-size: 12px; font-weight: 550; margin-bottom: 3px; }
-  .step p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.6; }
-  .pair-status { display: flex; align-items: center; gap: 8px; margin-top: 4px; font-size: 11.5px; color: var(--text-2); }
-  .safety { margin-top: 14px; padding: 12px 13px; border-radius: 11px; border: 1px solid rgba(69,217,208,.16); background: rgba(69,217,208,.045); color: #9fc9c6; font-size: 11px; line-height: 1.65; }
-
-  /* 设备/会话 */
-  .devices { display: flex; flex-direction: column; gap: 9px; }
-  .device {
-    display: flex; align-items: center; gap: 13px; padding: 15px 16px; border: 1px solid var(--line-soft);
-    border-radius: 13px; background: rgba(16,16,27,.52);
-  }
-  .device .name { font-size: 13px; font-weight: 550; }
-  .device .id { font: 10.5px "Cascadia Code", Consolas, monospace; color: var(--muted); margin-top: 3px; }
-  .device .right { margin-left: auto; display: flex; align-items: center; gap: 9px; }
-  .sessions-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 11px; }
-  .session-card { padding: 15px; border: 1px solid var(--line-soft); border-radius: 13px; background: rgba(16,16,27,.52); }
-  .session-card .top { display: flex; align-items: center; gap: 8px; }
-  .session-card .title { font-size: 12.5px; font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .session-card .cwd { font: 10.5px/1.5 "Cascadia Code", Consolas, monospace; color: var(--muted); margin-top: 7px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .session-card .foot { display: flex; gap: 10px; align-items: center; margin-top: 9px; font-size: 10.5px; color: var(--muted); }
-
-  /* 设置 */
-  .form { display: flex; flex-direction: column; gap: 15px; }
-  .field { display: flex; flex-direction: column; gap: 6px; }
-  .field label { font-size: 11.5px; color: var(--text-2); }
-  .field .hint { font-size: 10.5px; color: var(--muted); line-height: 1.5; }
-  .input, .select, .textarea {
-    width: 100%; border: 1px solid var(--line); background: rgba(5,5,10,.45); border-radius: 10px;
-    padding: 9px 11px; color: var(--text); outline: none; transition: .15s ease; font-size: 12.5px;
-  }
-  .input:focus, .select:focus, .textarea:focus { border-color: rgba(124,107,255,.55); box-shadow: 0 0 0 3px rgba(124,107,255,.10); }
-  .textarea { min-height: 72px; resize: vertical; font-family: "Cascadia Code", Consolas, monospace; font-size: 11.5px; }
-  .segment { display: flex; gap: 4px; padding: 4px; border-radius: 10px; border: 1px solid var(--line); background: rgba(5,5,10,.4); width: fit-content; }
-  .segment button { border: 0; background: transparent; color: var(--muted); padding: 6px 13px; border-radius: 7px; font-size: 11.5px; }
-  .segment button.active { background: var(--violet-soft); color: #c3bbff; }
-  #set-relay { width: 100%; }
-  #set-relay button { flex: 1; white-space: nowrap; padding-left: 6px; padding-right: 6px; }
-  .switch-row { display: flex; align-items: center; gap: 12px; padding: 11px 12px; border: 1px solid var(--line-soft); border-radius: 10px; background: rgba(16,16,27,.4); }
-  .switch-row .main-col { flex: 1; }
-  .switch-row b { display: block; font-size: 12px; font-weight: 500; }
-  .switch-row span { display: block; color: var(--muted); font-size: 10.5px; margin-top: 3px; line-height: 1.5; }
-  .switch { width: 36px; height: 21px; border-radius: 20px; background: #2b2a3b; border: 1px solid var(--line); position: relative; flex: 0 0 36px; transition: .18s ease; }
-  .switch::after { content: ""; position: absolute; width: 15px; height: 15px; border-radius: 50%; background: #a5a2b8; top: 2px; left: 2px; transition: .18s ease; }
-  .switch.on { background: rgba(124,107,255,.45); border-color: rgba(124,107,255,.6); }
-  .switch.on::after { left: 17px; background: #fff; }
-  .settings-actions { display: flex; gap: 9px; justify-content: flex-end; margin-top: 4px; }
-
-  /* 日志 */
-  .log {
-    background: #07070d; border: 1px solid var(--line); border-radius: 12px; padding: 15px;
-    font: 11px/1.75 "Cascadia Code", Consolas, monospace; color: #b9b5cc; max-height: calc(100vh - 260px);
-    overflow: auto; white-space: pre-wrap; word-break: break-word;
-  }
-  .log .warn { color: var(--amber); }
-  .toast {
-    position: fixed; right: 24px; bottom: 22px; z-index: 20; padding: 10px 14px; border-radius: 11px;
-    border: 1px solid rgba(124,107,255,.35); background: #17152a; color: #ded9ff; font-size: 12px;
-    box-shadow: 0 16px 40px rgba(0,0,0,.45); opacity: 0; transform: translateY(8px); transition: .2s ease; pointer-events: none;
-  }
-  .toast.show { opacity: 1; transform: none; }
-  .toast.err { border-color: rgba(255,107,133,.4); color: #ffc4cf; }
-  /* 应用内确认弹窗：部分 WebView（尤其 macOS/Linux）里同步 window.confirm()
-     会被静默忽略，吊销/重启这类不可撤销操作会变成“点了没反应”的直接执行。 */
-  .confirm-overlay {
-    position: fixed; inset: 0; z-index: 40; display: none; place-items: center;
-    background: rgba(4,4,10,.62); backdrop-filter: blur(6px);
-  }
-  .confirm-overlay.show { display: grid; }
-  .confirm-box {
-    width: min(420px, calc(100vw - 48px)); border-radius: 16px; padding: 20px;
-    border: 1px solid rgba(124,107,255,.28); background: var(--panel-2);
-    box-shadow: 0 26px 70px rgba(0,0,0,.55);
-  }
-  .confirm-title { font-size: 15px; font-weight: 650; margin-bottom: 8px; }
-  .confirm-body { font-size: 12.5px; line-height: 1.7; color: var(--text-2); }
-  .confirm-actions { display: flex; gap: 9px; justify-content: flex-end; margin-top: 18px; }
-  .link { color: #b6adff; text-decoration: none; cursor: pointer; }
-  .divider { height: 1px; background: var(--line-soft); margin: 18px 0; }
-  @media (max-width: 1050px) {
-    .g4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .g2, .pair-grid { grid-template-columns: 1fr; }
-    .content { padding: 20px 20px 34px; }
-    .hero { flex-wrap: wrap; }
-    .hero-main { flex-basis: calc(100% - 72px); }
-    .hero-side { margin-left: 72px; text-align: left; width: 100%; }
-  }
-  @media (max-width: 900px) {
-    .g3, .sessions-grid { grid-template-columns: 1fr; }
-    .g4 { grid-template-columns: 1fr; }
-    .sidebar { width: 190px; flex-basis: 190px; }
-  }
-
-  /* ── 白色主题：同一套深空语言的纸白翻译，保留电紫/青/玫瑰强调色 ── */
-  html[data-theme="light"] {
-    --ink: #f6f5fb;
-    --ink-2: #ffffff;
-    --panel: #ffffff;
-    --panel-2: #f0eef8;
-    --line: #dcd9e8;
-    --line-soft: rgba(27,24,38,.08);
-    --text: #1b1826;
-    --text-2: #5e5a70;
-    --muted: #6f6b80;
-    --violet: #5b4be8;
-    --violet-soft: rgba(91,75,232,.10);
-    --cyan: #0b7f79;
-    --rose: #c73552;
-    --amber: #9a5b00;
-    --mint: #0a7b52;
-    color-scheme: light;
-  }
-  html[data-theme="light"] body { background: var(--ink); }
-  html[data-theme="light"] body::before {
-    background:
-      radial-gradient(900px 500px at 78% -10%, rgba(91,75,232,.10), transparent 62%),
-      radial-gradient(700px 420px at 4% 106%, rgba(11,127,121,.05), transparent 65%);
-  }
-  html[data-theme="light"] .sidebar { background: rgba(249,248,254,.84); border-right-color: var(--line-soft); }
-  html[data-theme="light"] .topbar { background: rgba(255,255,255,.72); border-bottom-color: var(--line-soft); }
-  html[data-theme="light"] .nav button:hover { background: rgba(27,24,38,.045); }
-  html[data-theme="light"] .nav button.active { background: var(--violet-soft); color: #4d3bd6; }
-  html[data-theme="light"] .nav .badge { background: rgba(27,24,38,.06); }
-  html[data-theme="light"] .pill { color: #464254; background: rgba(27,24,38,.045); border-color: var(--line); }
-  html[data-theme="light"] .pill.violet { color: #4d3bd6; border-color: rgba(91,75,232,.26); background: rgba(91,75,232,.075); }
-  html[data-theme="light"] .pill.green { border-color: rgba(10,123,82,.22); background: rgba(10,123,82,.07); }
-  html[data-theme="light"] .pill.rose { border-color: rgba(199,53,82,.22); background: rgba(199,53,82,.06); }
-  html[data-theme="light"] .pill.amber { border-color: rgba(154,91,0,.22); background: rgba(154,91,0,.06); }
-  html[data-theme="light"] .btn { background: #fff; border-color: var(--line); color: var(--text-2); box-shadow: 0 1px 2px rgba(20,18,40,.04); }
-  html[data-theme="light"] .btn:hover { background: #f8f7fd; border-color: rgba(27,24,38,.18); color: var(--text); }
-  html[data-theme="light"] .btn.primary { background: linear-gradient(145deg,#6c5bf0,#5140d8); color: #fff; box-shadow: 0 8px 22px rgba(91,75,232,.20); }
-  html[data-theme="light"] .btn.danger { color: var(--rose); border-color: rgba(199,53,82,.22); background: rgba(199,53,82,.05); }
-  html[data-theme="light"] .btn.ghost { background: transparent; box-shadow: none; }
-  html[data-theme="light"] .card {
-    background: linear-gradient(165deg,#ffffff,#fcfbff);
-    border-color: rgba(27,24,38,.075);
-    box-shadow: 0 1px 3px rgba(20,18,40,.05), 0 8px 24px rgba(20,18,40,.03);
-  }
-  html[data-theme="light"] .card::after { background: linear-gradient(150deg,rgba(255,255,255,.65),transparent 40%); }
-  html[data-theme="light"] .hero-orb {
-    background: radial-gradient(circle at 32% 28%, rgba(91,75,232,.16), rgba(91,75,232,.03) 70%);
-    border-color: rgba(91,75,232,.22); color: #4d3bd6; box-shadow: inset 0 0 24px rgba(91,75,232,.06);
-  }
-  html[data-theme="light"] .endpoint { background: #f7f6fc; color: #4b475c; border-color: var(--line); }
-  html[data-theme="light"] .address { background: #f8f7fc; border-color: var(--line); }
-  html[data-theme="light"] .row,
-  html[data-theme="light"] .device,
-  html[data-theme="light"] .session-card,
-  html[data-theme="light"] .step { background: #fff; border-color: rgba(27,24,38,.07); }
-  html[data-theme="light"] .row:hover { background: #faf9fe; border-color: rgba(27,24,38,.13); }
-  html[data-theme="light"] .avatar { background: rgba(91,75,232,.09); color: #4d3bd6; }
-  html[data-theme="light"] .banner { color: #7a4a00; background: rgba(154,91,0,.055); border-color: rgba(154,91,0,.18); }
-  html[data-theme="light"] .banner.rose { color: #9e1f38; background: rgba(199,53,82,.05); border-color: rgba(199,53,82,.18); }
-  html[data-theme="light"] .banner.violet { color: #4333b8; background: rgba(91,75,232,.05); border-color: rgba(91,75,232,.16); }
-  html[data-theme="light"] .code-digit { background: rgba(91,75,232,.06); border-color: rgba(91,75,232,.24); color: #4333b8; }
-  html[data-theme="light"] .safety { color: #0b5f5a; background: rgba(11,127,121,.045); border-color: rgba(11,127,121,.16); }
-  html[data-theme="light"] .input,
-  html[data-theme="light"] .select,
-  html[data-theme="light"] .textarea { background: #fbfaff; border-color: var(--line); color: var(--text); }
-  html[data-theme="light"] .segment { background: #f3f1fa; border-color: var(--line); }
-  html[data-theme="light"] .segment button.active { background: #fff; color: #4333b8; box-shadow: 0 1px 2px rgba(20,18,40,.08); }
-  html[data-theme="light"] .switch-row { background: #fbfaff; border-color: rgba(27,24,38,.07); }
-  html[data-theme="light"] .switch { background: #e5e2ee; border-color: var(--line); }
-  html[data-theme="light"] .switch::after { background: #8b879c; }
-  html[data-theme="light"] .switch.on { background: rgba(91,75,232,.32); border-color: rgba(91,75,232,.46); }
-  html[data-theme="light"] .switch.on::after { background: #fff; }
-  html[data-theme="light"] .log { background: #fbfaff; color: #3b384a; border-color: var(--line); }
-  html[data-theme="light"] .toast { background: #fff; color: #2a215e; border-color: rgba(91,75,232,.24); box-shadow: 0 16px 40px rgba(20,18,40,.15); }
-  html[data-theme="light"] .toast.err { color: #9e1f38; border-color: rgba(199,53,82,.3); }
-  html[data-theme="light"] .link { color: #4d3bd6; }
-  html[data-theme="light"] .qr-placeholder { color: #5a5870; }
-  html[data-theme="light"] .qr-frame { border: 1px solid rgba(27,24,38,.06); }
-</style>
 <link rel="stylesheet" href="style.css" />
 <script src="theme-init.js"></script>
 </head>
 <body>
+<!--
+  0.3.2 桌面 UI（对齐 plan/0.3.2_design.md D 章）
+  结构约束：app.js 依赖的所有 id/data-* 选择器必须保留（见 .tmp/ui032/desktop-dom.md）。
+  本文件只提供静态结构与状态容器；交互由 Phase B 绑定，本轮不改 app.js。
+-->
 <div class="app">
+  <!-- ── 侧栏 DE-02..DE-05 ───────────────────────────────────────────── -->
   <aside class="sidebar">
     <div class="brand">
-      <div class="brand-mark">π</div>
-      <div>
+      <div class="brand-mark" aria-hidden="true">π</div>
+      <div class="brand-text">
         <div class="brand-name">pi carry</div>
-        <div class="brand-sub">local bridge</div>
+        <div class="brand-sub">LOCAL BRIDGE</div>
       </div>
     </div>
-    <div class="nav-label">控制台</div>
-    <nav class="nav">
-      <button data-page="overview" class="active"><span class="ico" data-icon="grid"></span>概览</button>
-      <button data-page="pairing"><span class="ico" data-icon="qr"></span>配对手机</button>
-      <button data-page="devices"><span class="ico" data-icon="phone"></span>设备<span class="badge" id="nav-devices">0</span></button>
-      <button data-page="sessions"><span class="ico" data-icon="chat"></span>会话<span class="badge" id="nav-sessions">0</span></button>
-      <button data-page="settings"><span class="ico" data-icon="sliders"></span>设置</button>
-      <button data-page="logs"><span class="ico" data-icon="terminal"></span>诊断日志</button>
+
+    <nav class="nav" aria-label="主导航">
+      <button type="button" data-page="overview" class="active" aria-current="page"><span class="ico" data-icon="grid" data-size="15"></span><span class="label">概览</span></button>
+      <button type="button" data-page="devices"><span class="ico" data-icon="phone" data-size="15"></span><span class="label">设备</span><span class="n" id="nav-devices">0</span></button>
+      <button type="button" data-page="sessions"><span class="ico" data-icon="chat" data-size="15"></span><span class="label">会话</span><span class="n" id="nav-sessions">0</span></button>
+      <button type="button" data-page="pairing"><span class="ico" data-icon="qr" data-size="15"></span><span class="label">配对</span></button>
+      <button type="button" data-page="settings"><span class="ico" data-icon="sliders" data-size="15"></span><span class="label">设置</span></button>
+      <button type="button" data-page="logs"><span class="ico" data-icon="terminal" data-size="15"></span><span class="label">日志</span></button>
     </nav>
-    <div class="side-foot">
-      <div class="side-status"><span class="dot" id="side-dot"></span><span id="side-state">正在启动…</span></div>
-      <div class="side-meta" id="side-endpoint">—</div>
-    </div>
+
+    <!-- DE-05：单行节点状态，整行可点进设置。状态文案由 app.js 的 #side-state 承担；
+         #side-endpoint 保留给 app.js 写入，本轮视觉隐藏（Phase B 决定去处）。 -->
+    <footer class="side-foot">
+      <button type="button" class="side-node" data-go="settings" aria-label="节点状态，打开设置">
+        <span class="dot" id="side-dot"></span>
+        <span class="side-state" id="side-state">节点在线</span>
+        <span class="side-node-ver mono">0.3.2</span>
+        <span class="side-endpoint mono" id="side-endpoint" hidden></span>
+      </button>
+    </footer>
   </aside>
 
   <main class="main">
-    <header class="topbar">
+    <!-- ── 顶栏 DE-06 / DE-81 / DE-120 ───────────────────────────────── -->
+    <header class="topbar" data-tauri-drag-region>
       <h1 id="page-title">概览</h1>
-      <span class="sub" id="page-sub">本机桥接与连接状态</span>
+      <!-- app.js 每次导航都会写入这里；视觉上不再显示副标题（DE-06） -->
+      <span class="sr-only" id="page-sub"></span>
       <div class="top-actions">
-        <span class="pill" id="top-relay">relay · —</span>
-        <span class="pill green" id="top-pi">pi · 检测中</span>
-        <button class="btn primary" data-go="pairing"><span class="ico" data-icon="qr"></span>配对手机</button>
+        <button type="button" class="pill update-pill" id="update-pill" hidden data-update-act="details">更新可用</button>
+        <button type="button" class="pill secret-pill" id="secret-pill" hidden data-secret-act="settings">密钥保护已降级</button>
       </div>
     </header>
 
-    <div class="content">
-      <!-- 密钥降级横幅：所有页面共用，密钥后端落到明文文件时出现 -->
-      <div class="banner" id="secret-banner" hidden>
-        <span class="ico" data-icon="shield" style="width:17px;height:17px"></span>
-        <div class="grow"><b>密钥未加密：</b>系统钥匙串不可用，配对密钥以明文保存在本机。</div>
-        <div class="actions">
-          <button class="btn ghost" data-secret-act="settings">查看设置</button>
-          <button class="btn ghost" data-secret-act="risk">了解风险</button>
-        </div>
-      </div>
-      <!-- 概览 -->
+    <div class="content" id="content">
+      <!-- ── 概览 DE-20..DE-27 ──────────────────────────────────────── -->
       <section class="page active" id="page-overview">
-        <!-- 更新横幅：可用 / 便携版 / 已抑制 / 下载中 / 安装中 / 已安装 / 失败，由 app.js 渲染 -->
-        <div class="banner violet" id="update-banner" hidden></div>
-        <div class="card hero">
-          <div class="hero-orb">π</div>
-          <div class="hero-main">
-            <div class="eyebrow">NODE STATUS</div>
-            <h2 id="hero-title">正在启动桥接服务</h2>
-            <p id="hero-sub">正在读取本机配置并初始化 iroh endpoint…</p>
-            <div class="endpoint"><span class="mono" id="hero-endpoint">—</span><button class="btn ghost" id="copy-endpoint" title="复制 Endpoint ID"><span class="ico" data-icon="copy"></span></button></div>
-          </div>
-          <div class="hero-side">
-            <div class="pill green" id="hero-state">● 启动中</div>
-            <div class="caption" style="margin-top:9px" id="hero-version"></div>
+        <!-- 更新横幅（DE-82..DE-84）：由 app.js 重建内容，静态骨架只用于预览/样式 -->
+        <div class="banner violet" id="update-banner" role="status" aria-live="polite" hidden></div>
+
+        <!-- 密钥降级横幅（DE-121）：概览顶部、更新横幅下方 -->
+        <div class="banner amber" id="secret-banner" hidden>
+          <span class="banner-icon" aria-hidden="true"><span data-icon="shield" data-size="14"></span></span>
+          <div class="grow"><b>中继密钥以文件形式保存</b><div class="banner-sub">本机其他账户可能读取；建议迁移到系统钥匙串。</div></div>
+          <div class="actions">
+            <button type="button" class="btn ghost" data-secret-act="settings">查看设置</button>
+            <button type="button" class="icon-btn" data-secret-act="dismiss" aria-label="关闭"><span class="icon-x" aria-hidden="true"></span></button>
           </div>
         </div>
 
-        <!-- 首启自检：pi 未找到 / 托盘不可用 / 配置读取失败时才出现 -->
-        <div class="card" id="selfcheck-card" style="margin-top:14px" hidden>
+        <div class="card hero">
+          <div class="hero-orb" aria-hidden="true">π</div>
+          <div class="hero-main">
+            <h2 id="hero-title">把手机接到这台电脑的 pi</h2>
+            <p id="hero-sub">手机扫码后，可以在这里发起会话并处理审批。</p>
+            <div class="hero-endpoint">
+              <span class="mono endpoint-id" id="hero-endpoint">—</span>
+              <button type="button" class="icon-btn" id="copy-endpoint" aria-label="复制" title="复制"><span data-icon="copy" data-size="14"></span></button>
+            </div>
+            <div class="hero-actions">
+              <button type="button" class="btn primary lg" data-go="pairing"><span data-icon="qr" data-size="14"></span>扫码配对</button>
+              <button type="button" class="btn lg" data-go="settings">查看节点</button>
+            </div>
+          </div>
+          <div class="hero-side">
+            <div class="pill green" id="hero-state">● 运行中</div>
+            <div class="hero-tags">
+              <span class="pill violet" id="top-relay">relay · n0</span>
+              <span class="pill green" id="top-pi">pi · 已安装</span>
+            </div>
+            <div class="hero-version mono" id="hero-version">core 0.3.2</div>
+          </div>
+        </div>
+
+        <!-- DE-21 四指标单卡四列 -->
+        <div class="card metrics">
+          <div class="metric">
+            <div class="m-label">已配对</div>
+            <div class="m-value" id="m-devices">0<small>台</small></div>
+            <div class="m-foot">已授权设备</div>
+          </div>
+          <div class="metric">
+            <div class="m-label">在线</div>
+            <div class="m-value" id="m-online">0<small>台</small></div>
+            <div class="m-foot">当前在线</div>
+          </div>
+          <div class="metric">
+            <div class="m-label">会话</div>
+            <div class="m-value" id="m-sessions">0<small>个</small></div>
+            <div class="m-foot" id="m-running">0 个运行中</div>
+          </div>
+          <div class="metric">
+            <div class="m-label">待审批</div>
+            <div class="m-value" id="m-approvals">0<small>待处理</small></div>
+            <div class="m-foot">待处理请求</div>
+          </div>
+        </div>
+
+        <!-- DE-22/23/24 双栏 1.2fr .8fr -->
+        <div class="grid g2">
+          <div class="card transfer-card">
+            <div class="card-head">
+              <h3>传输</h3>
+              <span class="pill green" id="transfer-state">已连接</span>
+            </div>
+            <div class="kv-rows">
+              <div class="kv-row"><span class="k">直连</span><span class="v mono" id="addresses">—</span></div>
+              <div class="kv-row"><span class="k">中继</span><span class="v"><span class="pill amber" id="relay-pill">n0 relay</span></span></div>
+              <div class="kv-row"><span class="k">协议</span><span class="v mono">iroh QUIC · v1</span></div>
+            </div>
+            <div class="card-actions">
+              <button type="button" class="btn ghost" id="btn-restart"><span data-icon="refresh" data-size="14"></span>重启服务</button>
+              <button type="button" class="btn ghost" id="btn-data"><span data-icon="folder" data-size="14"></span>打开数据目录</button>
+            </div>
+          </div>
+
+          <div class="card pair-card">
+            <div class="card-head"><h3>配对</h3></div>
+            <p class="pair-line">二维码 5 分钟内有效</p>
+            <button type="button" class="btn primary lg full" data-go="pairing"><span data-icon="qr" data-size="14"></span>扫码配对</button>
+            <div class="pair-ep">
+              <span class="k">端点 ID</span>
+              <span class="mono ep-id" id="pair-card-endpoint">—</span>
+              <button type="button" class="icon-btn sm" data-copy="endpoint" aria-label="复制"><span data-icon="copy" data-size="13"></span></button>
+            </div>
+          </div>
+        </div>
+
+        <!-- DE-25 最近会话 -->
+        <div class="card recent-card">
+          <div class="card-head"><h3>最近会话</h3></div>
+          <div class="rows" id="recent-sessions">
+            <div class="empty"><div class="empty-icon"><span data-icon="chat" data-size="20"></span></div><b>还没有会话</b><p>在手机上发起，或打开 pi 终端。</p></div>
+          </div>
+          <div class="card-foot"><button type="button" class="link-btn" data-go="sessions">查看全部</button></div>
+        </div>
+
+        <!-- DE-27 版本页脚 -->
+        <div class="page-foot">
+          <button type="button" class="link-btn mono" data-copy="version" title="复制版本信息">pi carry 0.3.2 · pi 1.5.2</button>
+        </div>
+
+        <!-- app.js 契约占位：旧版自检卡（Phase B 由 #selfcheck-overlay 取代） -->
+        <div class="card sc-card" id="selfcheck-card" hidden>
           <div class="sc-head">
-            <span class="ico" data-icon="alert" style="width:17px;height:17px;color:var(--amber)"></span>
-            <div><h3>运行前检查</h3><div class="caption">以下问题会影响 pi carry 的正常使用。</div></div>
+            <span class="banner-icon amber" aria-hidden="true"><span data-icon="alert" data-size="14"></span></span>
+            <div><h3>运行前检查</h3></div>
           </div>
           <div class="sc-list" id="selfcheck-list"></div>
         </div>
-
-        <div class="grid g4" style="margin-top:14px">
-          <div class="card metric"><div class="eyebrow">PAIRED</div><div class="num" id="m-devices">0<small>台</small></div><div class="foot">已授权设备</div></div>
-          <div class="card metric"><div class="eyebrow">ONLINE</div><div class="num" id="m-online">0<small>台</small></div><div class="foot">当前在线</div></div>
-          <div class="card metric"><div class="eyebrow">SESSIONS</div><div class="num" id="m-sessions">0<small>个</small></div><div class="foot" id="m-running">0 个运行中</div></div>
-          <div class="card metric"><div class="eyebrow">APPROVALS</div><div class="num" id="m-approvals">0<small>待处理</small></div><div class="foot">手机端审批队列</div></div>
-        </div>
-
-        <div class="grid g2" style="margin-top:14px">
-          <div class="card">
-            <div style="display:flex;align-items:center"><div><h3>传输与直连</h3><div class="caption">iroh QUIC · 直连优先，失败自动回退 relay</div></div><span class="pill violet" id="relay-pill">—</span></div>
-            <div class="addresses" id="addresses"><span class="address">等待 endpoint 就绪…</span></div>
-            <div class="divider"></div>
-            <div style="display:flex;gap:8px;flex-wrap:wrap">
-              <button class="btn" id="btn-restart"><span class="ico" data-icon="refresh"></span>重启服务</button>
-              <button class="btn" id="btn-data"><span class="ico" data-icon="folder"></span>打开数据目录</button>
-              <button class="btn" data-go="settings"><span class="ico" data-icon="sliders"></span>连接设置</button>
-            </div>
-          </div>
-          <div class="card">
-            <div style="display:flex;align-items:center"><div><h3>配对入口</h3><div class="caption">二维码 10 分钟有效，一次性 token</div></div></div>
-            <div style="display:flex;align-items:center;gap:14px;margin-top:18px">
-              <div style="width:54px;height:54px;border-radius:14px;border:1px solid rgba(124,107,255,.3);display:grid;place-items:center;background:rgba(124,107,255,.08)"><span class="ico" data-icon="qr" style="width:26px;height:26px;color:#b7adff"></span></div>
-              <div style="flex:1"><div style="font-size:12.5px;font-weight:550">用手机扫描二维码</div><div class="caption">或手动输入 6 位码。配对在局域网内完成，不经过云端账号。</div></div>
-            </div>
-            <div style="margin-top:16px"><button class="btn primary" data-go="pairing" style="width:100%;justify-content:center">生成配对二维码</button></div>
-            <div class="safety">手机端默认 full 权限：可以发消息、审批、切换模型与节点设置；设备吊销仍只限本机。</div>
-          </div>
-        </div>
-
-        <div class="section-head"><h3>最近设备</h3><span class="caption">只显示已授权设备</span><span class="right"><button class="btn ghost" data-go="devices">查看全部 →</button></span></div>
-        <div class="list" id="recent-devices"><div class="empty"><b>还没有配对设备</b>打开配对页，用手机扫描二维码。</div></div>
-
-        <div class="section-head"><h3>会话索引</h3><span class="caption">来自本机 pi 会话文件，只读展示</span><span class="right"><button class="btn ghost" data-go="sessions">查看全部 →</button></span></div>
-        <div class="list" id="recent-sessions"><div class="empty"><b>暂无会话</b>手机端发起对话后，这里会出现索引。</div></div>
+        <!-- app.js 契约占位：概览不再展示最近设备（设备页承担），保留容器供渲染 -->
+        <div id="recent-devices" hidden></div>
       </section>
 
-      <!-- 配对 -->
+      <!-- ── 配对 DE-50..DE-59 ─────────────────────────────────────── -->
       <section class="page" id="page-pairing">
-        <!-- 深链预填：从 pi-carry://pair 链接带入的配对邀请，只预填不自动配对 -->
-        <div class="banner violet" id="pair-prefill" hidden>
-          <span class="ico" data-icon="link" style="width:17px;height:17px"></span>
+        <!-- 深链预填（DE-59）：app.js 渲染 #pair-prefill-body / -actions；独立于 360 列，避免文案被挤成多行 -->
+        <div class="banner violet" id="pair-prefill" role="status" aria-live="polite" hidden>
+          <span class="banner-icon" aria-hidden="true"><span data-icon="link" data-size="14"></span></span>
           <div class="grow" id="pair-prefill-body"></div>
           <div class="actions" id="pair-prefill-actions"></div>
         </div>
-        <div class="banner violet"><span class="ico" data-icon="shield" style="width:17px;height:17px"></span><div>二维码包含 endpoint ID、一次性 token 和局域网直连地址。请只给信任的设备扫描；配对成功后 token 立即失效。</div></div>
-        <div class="pair-grid">
+
+        <div class="pair-col">
+          <div class="pair-head">
+            <h1>配对</h1>
+            <span class="pill" id="pair-state-tag">未连接</span>
+          </div>
+
           <div class="card qr-card">
-            <div class="qr-frame" id="qr-frame"><div class="qr-placeholder"><span class="ico" data-icon="qr" style="width:40px;height:40px;color:#9892b5"></span><span>点击下方按钮生成二维码</span></div></div>
-            <div class="code-row" id="code-row"><div class="code-digit">·</div><div class="code-digit">·</div><div class="code-digit">·</div><div class="code-digit">·</div><div class="code-digit">·</div><div class="code-digit">·</div></div>
-            <div class="code-hint" id="pair-expiry">等待生成配对会话</div>
-            <div style="display:flex;gap:8px;margin-top:16px">
-              <button class="btn primary" id="btn-pair" style="flex:1;justify-content:center"><span class="ico" data-icon="qr"></span>生成二维码</button>
-              <button class="btn danger" id="btn-cancel-pair" disabled>取消</button>
-            </div>
-            <div style="margin-top:11px"><button class="btn ghost" id="copy-uri" style="width:100%;justify-content:center" disabled>复制配对链接</button></div>
-          </div>
-          <div>
-            <div class="card">
-              <h3>配对步骤</h3>
-              <div class="steps" style="margin-top:14px">
-                <div class="step"><div class="step-num">01</div><div><b>在手机上打开 pi carry</b><p>在「节点」页点击底部的「配对新节点」卡片（首台设备时是页面中间的「配对你的第一台电脑」），再选择“扫描二维码”。相机权限只用于扫码。</p></div></div>
-                <div class="step"><div class="step-num">02</div><div><b>扫描左侧二维码</b><p>二维码 10 分钟有效。也可以手动输入下方 6 位码，配合 Endpoint ID 使用。</p></div></div>
-                <div class="step"><div class="step-num">03</div><div><b>设备出现在列表即完成</b><p>手机端会显示“已配对”。默认 full 权限，可随时在本机吊销。</p></div></div>
+            <div class="qr-frame" id="qr-frame">
+              <div class="qr-placeholder">
+                <span class="ico" data-icon="qr" data-size="40"></span>
+                <span>扫码开始配对</span>
               </div>
-              <div class="divider"></div>
-              <div class="pair-status"><span class="dot" id="pair-dot"></span><span id="pair-status-text">没有进行中的配对</span></div>
-              <div class="mono muted" style="font-size:10.5px;margin-top:8px;line-height:1.7">Endpoint ID<br><span id="pair-endpoint" style="color:#c8c4da;word-break:break-all">—</span></div>
             </div>
-            <div class="safety" style="margin-top:13px">如果手机与电脑不在同一局域网，请先在设置中启用 relay，或填写自托管 relay 地址。二维码中的直连地址只在同一网络内有效。</div>
+            <div class="pair-expiry" id="pair-expiry">二维码 5 分钟内有效</div>
+            <div class="code-row" id="code-row" role="group" aria-label="配对码">
+              <div class="code-digit">·</div><div class="code-digit">·</div><div class="code-digit">·</div>
+              <div class="code-digit">·</div><div class="code-digit">·</div><div class="code-digit">·</div>
+            </div>
+            <div class="pair-status" aria-live="polite"><span class="dot" id="pair-dot"></span><span id="pair-status-text">等待手机扫码</span></div>
+            <p class="pair-foot">配对码由手机端输入核对，电脑端无需操作</p>
+            <button type="button" class="link-btn" id="btn-pair">扫码配对</button>
           </div>
+
+          <!-- DE-53 三步 -->
+          <div class="steps" aria-label="配对步骤">
+            <div class="step current"><span class="step-num mono">01</span><b>手机扫码</b></div>
+            <div class="step"><span class="step-num mono">02</span><b>核对 6 位码</b></div>
+            <div class="step"><span class="step-num mono">03</span><b>完成配对</b></div>
+          </div>
+
+          <!-- DE-54 底部按钮区（F-31：Phase B 绑定 confirm_pairing 前「完成配对」保持禁用） -->
+          <div class="pair-actions">
+            <button type="button" class="btn ghost xl" id="btn-cancel-pair" disabled>取消</button>
+            <button type="button" class="btn primary xl" id="btn-confirm-pair" disabled aria-describedby="pair-status-text">完成配对</button>
+          </div>
+          <!-- DE-55 三错锁定（静态状态） -->
+          <div class="pair-lock" id="pair-lock" hidden>
+            <span>尝试次数过多，<span class="mono" id="pair-lock-count">60</span> 秒后再试</span>
+          </div>
+
+          <!-- DE-57 手动连接折叠 -->
+          <details class="pair-details">
+            <summary>手动连接</summary>
+            <div class="detail-body">
+              <div class="kv-row">
+                <span class="k">端点 ID</span>
+                <span class="v mono ep-id" id="pair-endpoint">—</span>
+                <button type="button" class="icon-btn sm" data-copy="endpoint" aria-label="复制"><span data-icon="copy" data-size="13"></span></button>
+              </div>
+              <div class="kv-row"><span class="k">中继地址</span><span class="v mono">relay · n0</span></div>
+              <div class="kv-row">
+                <span class="k">配对链接</span>
+                <button type="button" class="btn ghost sm" id="copy-uri" disabled>复制配对链接</button>
+              </div>
+            </div>
+          </details>
+
+          <!-- DE-58 -->
+          <p class="pair-foot">配对后，该设备可发起会话并处理审批请求。</p>
         </div>
       </section>
 
-      <!-- 设备 -->
+      <!-- ── 设备 DE-30..DE-34 ─────────────────────────────────────── -->
       <section class="page" id="page-devices">
-        <div class="banner"><span class="ico" data-icon="shield" style="width:17px;height:17px"></span><div>设备权限分四级：read 只读、control 可发消息/审批、full 可改模型与设置、owner 可管理设备。</div></div>
-        <div class="section-head"><h3>已授权设备</h3><span class="caption" id="devices-caption">0 台</span></div>
-        <div class="devices" id="devices-list"><div class="empty"><b>还没有配对设备</b>打开配对页生成二维码。</div></div>
+        <div class="page-head">
+          <div class="page-head-main">
+            <h1>设备</h1>
+            <span class="count mono" id="devices-caption">0 台</span>
+          </div>
+          <button type="button" class="btn primary" data-go="pairing"><span data-icon="qr" data-size="14"></span>扫码配对</button>
+        </div>
+        <div class="devices" id="devices-list">
+          <div class="empty">
+            <div class="empty-icon"><span data-icon="phone" data-size="20"></span></div>
+            <b>还没有配对设备</b>
+            <p>配对后，这台手机的会话与审批会出现在这里。</p>
+            <button type="button" class="btn primary" data-go="pairing">扫码配对</button>
+          </div>
+        </div>
       </section>
 
-      <!-- 会话 -->
+      <!-- ── 会话 DE-40..DE-44 ─────────────────────────────────────── -->
       <section class="page" id="page-sessions">
-        <div class="section-head" style="margin-top:0"><h3>本机会话</h3><span class="caption">索引来自 pi 的 .jsonl 会话文件</span><span class="right"><button class="btn" id="btn-refresh-sessions"><span class="ico" data-icon="refresh"></span>刷新</button></span></div>
-        <div class="sessions-grid" id="sessions-list"><div class="empty" style="grid-column:1/-1"><b>暂无会话</b>从手机端发起对话后，这里会出现会话索引。</div></div>
+        <div class="page-head">
+          <div class="page-head-main"><h1>会话</h1></div>
+          <button type="button" class="btn" id="btn-refresh-sessions"><span data-icon="refresh" data-size="14"></span>刷新</button>
+        </div>
+        <div class="sessions-grid" id="sessions-list">
+          <div class="empty span-all">
+            <div class="empty-icon"><span data-icon="chat" data-size="20"></span></div>
+            <b>还没有会话</b>
+            <p>在手机上发起，或打开 pi 终端。</p>
+            <button type="button" class="btn primary" data-go="pairing">查看配对</button>
+          </div>
+        </div>
       </section>
 
-      <!-- 设置 -->
+      <!-- ── 设置 DE-60..DE-69 ─────────────────────────────────────── -->
       <section class="page" id="page-settings">
-        <div class="banner" id="settings-banner"><span class="ico" data-icon="info" style="width:17px;height:17px"></span><div>修改 relay、节点名或 pi 路径后需要重启桥接服务才能生效。审批超时与权限默认值可即时保存。</div></div>
-        <div class="card" style="margin-bottom:14px">
-          <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
-            <div style="flex:1;min-width:220px">
-              <h3>外观</h3>
-              <div class="caption">跟随 Windows 的黑夜 / 白天模式，或固定为黑色、白色。切换立即生效，并记住选择。</div>
-            </div>
-            <div class="segment" id="set-theme">
-              <button data-value="auto">自动</button>
-              <button data-value="dark">黑色</button>
-              <button data-value="light">白色</button>
-            </div>
-          </div>
-        </div>
-        <div class="grid g2">
-          <div class="card">
-            <h3>节点</h3>
-            <div class="caption">显示在手机节点列表中的名称，以及要托管的 pi 可执行文件。</div>
-            <div class="form" style="margin-top:16px">
-              <div class="field"><label>节点名称</label><input class="input" id="set-node-name" placeholder="STUDIO PC" /></div>
-              <div class="field"><label>pi 可执行文件</label><input class="input mono" id="set-pi-path" placeholder="pi" /><div class="hint">留空使用 PATH 中的 pi；也可以填写绝对路径。</div></div>
-              <div class="field"><label>新设备默认权限</label>
-                <div class="segment" id="set-capability"><button data-value="full">full</button><button data-value="control">control</button><button data-value="read">read</button></div>
-                <div class="hint">新设备默认 full：可发消息、审批、切换模型与节点设置；如需限制权限，请在本机修改配置。</div>
-              </div>
-              <div class="field"><label>审批超时（秒）</label><input class="input mono" id="set-approval-timeout" type="number" min="10" max="3600" /></div>
-              <div class="field"><label>工作目录根</label><textarea class="textarea mono" id="set-allowed-roots" placeholder="C:\Users\me\code" style="min-height:88px"></textarea><div class="hint">每行一个绝对路径。手机端新建会话只能在这些目录里选；留空为主目录加桥接启动目录。保存后需重启桥接服务生效。</div></div>
-            </div>
-          </div>
-          <div class="card">
-            <h3>传输</h3>
-            <div class="caption">直连优先；relay 只用于 NAT 穿透失败时中继加密流量。</div>
-            <div class="form" style="margin-top:16px">
-              <div class="field"><label>Relay 模式</label>
-                <div class="segment" id="set-relay"><button data-value="n0">n0 公共 relay</button><button data-value="disabled">禁用（仅局域网）</button><button data-value="custom">自托管</button></div>
-                <div class="hint" id="relay-hint">n0 提供开箱即用的穿透，但中继节点会看到连接元数据。</div>
-              </div>
-              <div class="field" id="relay-urls-field"><label>Relay URL</label><textarea class="textarea" id="set-relay-urls" placeholder="https://relay.example.com"></textarea><div class="hint">每行一个，仅“自托管”模式使用。</div></div>
-              <div class="switch-row"><div class="main-col"><b>局域网发现</b><span>配对二维码已包含局域网直连地址，无需额外 mDNS 服务。</span></div></div>
-            </div>
-          </div>
-        </div>
-        <div class="grid g2" style="margin-top:14px">
-          <div class="card">
-            <h3>托盘与启动</h3>
-            <div class="form" style="margin-top:14px">
-              <div class="switch-row"><div class="main-col"><b>关闭窗口时最小化到托盘</b><span>桥接服务继续运行，手机仍可连接。</span></div><div class="switch" id="set-close-tray"></div></div>
-              <div class="switch-row"><div class="main-col"><b>开机自动启动</b><span>登录 Windows 后在托盘启动 pi carry。</span></div><div class="switch" id="set-autostart"></div></div>
-              <div class="switch-row"><div class="main-col"><b>开机自启时静默启动（仅托盘）</b><span>自启时不弹主窗口，从托盘打开。托盘不可用时不生效，避免开机后没有任何入口。</span></div><div class="switch" id="set-start-minimized"></div></div>
-              <div class="field"><label>日志级别</label>
-                <select class="select" id="set-log-level">
-                  <option value="error">error</option>
-                  <option value="warn">warn</option>
-                  <option value="info">info</option>
-                  <option value="debug">debug</option>
-                  <option value="trace">trace</option>
-                </select>
-                <div class="hint">写入数据目录下的 desktop.log，默认 info。环境变量 PI_CARRY_LOG 优先；修改后需重启应用生效。</div>
+        <!-- app.js 契约占位：旧版设置横幅（DE-60 删除，Phase B 改为行内错误） -->
+        <div id="settings-banner" hidden></div>
+        <div class="page-head"><div class="page-head-main"><h1>设置</h1></div></div>
+
+        <div class="settings-group">
+          <div class="eyebrow-label">外观</div>
+          <div class="settings-card">
+            <div class="setting-row">
+              <span class="row-icon" aria-hidden="true"><span data-icon="sliders" data-size="14"></span></span>
+              <div class="row-main"><div class="row-title">主题</div></div>
+              <div class="segment equal three" id="set-theme" role="radiogroup" aria-label="主题">
+                <button type="button" data-value="auto" role="radio" aria-checked="true" class="active">跟随系统</button>
+                <button type="button" data-value="dark" role="radio" aria-checked="false">深色</button>
+                <button type="button" data-value="light" role="radio" aria-checked="false">浅色</button>
               </div>
             </div>
           </div>
-          <div class="card">
-            <h3>数据与诊断</h3>
-            <div class="caption">配置、密钥、SQLite 状态库与日志都在本机数据目录。</div>
-            <div class="addresses" style="margin-top:14px"><span class="address" id="data-dir">—</span></div>
-            <div style="display:flex;gap:8px;margin-top:16px;flex-wrap:wrap">
-              <button class="btn" id="btn-open-data"><span class="ico" data-icon="folder"></span>打开数据目录</button>
-              <button class="btn" id="btn-open-logs"><span class="ico" data-icon="folder"></span>打开日志目录</button>
-              <button class="btn" data-go="logs"><span class="ico" data-icon="terminal"></span>查看日志</button>
-            </div>
-          </div>
         </div>
-        <div class="card" style="margin-top:14px">
-          <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
-            <div style="flex:1;min-width:220px">
-              <h3>更新</h3>
-              <div class="caption">从 GitHub Releases 获取正式版本；安装前校验 minisign 签名。</div>
+
+        <div class="settings-group">
+          <div class="eyebrow-label">节点</div>
+          <div class="settings-card">
+            <div class="setting-row">
+              <span class="row-icon" aria-hidden="true"><span data-icon="shield" data-size="14"></span></span>
+              <div class="row-main"><div class="row-title">节点状态</div></div>
+              <span class="row-value"><span class="dot on"></span> 在线</span>
             </div>
-            <span class="pill violet" id="update-current-version">当前版本 —</span>
-          </div>
-          <div class="divider"></div>
-          <div class="grid g2" style="gap:14px">
-            <div class="form">
-              <div class="switch-row"><div class="main-col"><b>启动时自动检查更新</b><span>启动 30 秒后静默检查；检查失败不打扰。</span></div><div class="switch" id="set-check-update"></div></div>
-              <div class="field"><label>更新通道</label>
-                <div class="segment" id="set-update-channel"><button data-value="stable">stable</button><button data-value="beta">beta</button></div>
-                <div class="hint">beta 会收到预发布版本，可能不稳定。切换立即保存。</div>
+            <div class="setting-row">
+              <div class="row-main"><div class="row-title">端点 ID</div></div>
+              <span class="row-value mono ellipsis" id="set-endpoint-id">—</span>
+              <button type="button" class="icon-btn sm" data-copy="endpoint" aria-label="复制"><span data-icon="copy" data-size="13"></span></button>
+            </div>
+            <div class="setting-row"><div class="row-main"><div class="row-title">节点版本</div></div><span class="row-value mono">0.3.2</span></div>
+            <div class="setting-row"><div class="row-main"><div class="row-title">pi 版本</div></div><span class="row-value mono">1.5.2</span></div>
+            <div class="setting-row"><div class="row-main"><div class="row-title">中继</div></div><span class="row-value mono">n0</span></div>
+            <div class="setting-row">
+              <label class="row-main" for="set-node-name"><span class="row-title">节点名称</span></label>
+              <input class="input" id="set-node-name" placeholder="STUDIO PC" autocomplete="off" />
+            </div>
+            <div class="setting-row">
+              <label class="row-main" for="set-pi-path"><span class="row-title">pi 可执行文件</span></label>
+              <input class="input mono" id="set-pi-path" placeholder="pi" autocomplete="off" />
+            </div>
+            <div class="setting-row">
+              <div class="row-main"><div class="row-title">新设备默认权限</div></div>
+              <div class="segment" id="set-capability">
+                <button type="button" data-value="full" class="active">full</button>
+                <button type="button" data-value="control">control</button>
+                <button type="button" data-value="read">read</button>
               </div>
             </div>
-            <div class="form">
-              <div class="field"><label>上次检查</label><div class="caption" id="update-last-checked">从未检查</div></div>
-              <div class="hint" id="update-last-failed" hidden></div>
-              <div class="hint" id="update-portable-hint" hidden>便携版不会自动安装更新，请下载新版本压缩包覆盖并保留 %LOCALAPPDATA% 里的数据。</div>
-              <div><button class="btn" id="btn-check-update"><span class="ico" data-icon="refresh"></span>立即检查</button></div>
+            <div class="setting-row">
+              <label class="row-main" for="set-approval-timeout"><span class="row-title">审批超时</span><span class="row-sub mono">秒</span></label>
+              <input class="input mono narrow" id="set-approval-timeout" type="number" min="10" max="3600" />
+            </div>
+            <div class="setting-row block">
+              <label class="row-title" for="set-allowed-roots">工作目录根</label>
+              <textarea class="textarea mono" id="set-allowed-roots" placeholder="C:\Users\me\code" spellcheck="false"></textarea>
+            </div>
+            <div class="setting-row actions-row">
+              <div class="row-main"></div>
+              <button type="button" class="btn ghost" id="btn-reload-settings">重新读取</button>
+              <button type="button" class="btn primary" id="btn-save-settings">保存</button>
             </div>
           </div>
         </div>
-        <div class="settings-actions"><button class="btn" id="btn-reload-settings">重新读取</button><button class="btn primary" id="btn-save-settings">保存设置</button></div>
+
+        <div class="settings-group">
+          <div class="eyebrow-label">传输</div>
+          <div class="settings-card">
+            <div class="setting-row">
+              <div class="row-main"><div class="row-title">直连优先</div></div>
+              <div class="switch on" id="set-direct-priority" role="switch" aria-checked="true" tabindex="0"></div>
+            </div>
+            <div class="setting-row">
+              <div class="row-main">
+                <div class="row-title">中继</div>
+                <div class="row-sub" id="relay-hint">n0 提供开箱即用的穿透，但中继节点会看到连接元数据。</div>
+              </div>
+              <div class="row-controls">
+                <span class="pill amber" id="forced-relay-tag" hidden>强制中继</span>
+                <div class="segment" id="set-relay">
+                  <button type="button" data-value="n0" class="active">n0</button>
+                  <button type="button" data-value="disabled">禁用</button>
+                  <button type="button" data-value="custom">自托管</button>
+                </div>
+              </div>
+            </div>
+            <div class="setting-row block" id="relay-urls-field">
+              <label class="row-title" for="set-relay-urls">Relay URL</label>
+              <textarea class="textarea mono" id="set-relay-urls" placeholder="https://relay.example.com" spellcheck="false"></textarea>
+            </div>
+            <div class="setting-row"><div class="row-main"><div class="row-title">协议</div></div><span class="row-value mono cyan">iroh · v1</span></div>
+          </div>
+        </div>
+
+        <div class="settings-group">
+          <div class="eyebrow-label">托盘</div>
+          <div class="settings-card">
+            <div class="setting-row">
+              <div class="row-main"><div class="row-title">关闭窗口时最小化到托盘</div></div>
+              <div class="switch" id="set-close-tray" role="switch" aria-checked="false" tabindex="0"></div>
+            </div>
+            <div class="setting-row">
+              <div class="row-main"><div class="row-title">开机自启</div></div>
+              <div class="switch" id="set-autostart" role="switch" aria-checked="false" tabindex="0"></div>
+            </div>
+            <div class="setting-row">
+              <div class="row-main"><div class="row-title">开机时静默启动</div></div>
+              <div class="switch" id="set-start-minimized" role="switch" aria-checked="false" tabindex="0"></div>
+            </div>
+            <div class="setting-row">
+              <div class="row-main"><div class="row-title">暂停桥接</div><div class="row-sub">暂停后手机无法连接</div></div>
+              <div class="switch" id="set-pause-bridge" role="switch" aria-checked="false" tabindex="0"></div>
+            </div>
+            <div class="setting-row">
+              <label class="row-main" for="set-log-level"><span class="row-title">日志级别</span></label>
+              <select class="select" id="set-log-level">
+                <option value="error">error</option>
+                <option value="warn">warn</option>
+                <option value="info">info</option>
+                <option value="debug">debug</option>
+                <option value="trace">trace</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-group">
+          <div class="eyebrow-label">数据</div>
+          <div class="settings-card">
+            <div class="setting-row"><div class="row-main"><div class="row-title">数据目录</div></div><span class="row-value mono ellipsis" id="data-dir">—</span></div>
+            <div class="setting-row"><div class="row-main"><div class="row-title">打开数据目录</div></div><button type="button" class="btn ghost" id="btn-open-data"><span data-icon="folder" data-size="13"></span>打开</button></div>
+            <div class="setting-row"><div class="row-main"><div class="row-title">打开日志</div></div><button type="button" class="btn ghost" data-open-logs><span data-icon="folder" data-size="13"></span>打开</button></div>
+            <div class="setting-row">
+              <div class="row-main"><div class="row-title">清理缓存</div><div class="row-sub mono" id="cache-size">—</div></div>
+              <button type="button" class="btn danger" data-clean-cache>清理</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-group">
+          <div class="eyebrow-label">更新</div>
+          <div class="settings-card">
+            <div class="setting-row">
+              <div class="row-main"><div class="row-title">软件更新</div></div>
+              <span class="pill mono" id="update-current-version">当前版本 —</span>
+            </div>
+            <div class="setting-row">
+              <div class="row-main"><div class="row-title">自动检查更新</div></div>
+              <div class="switch" id="set-check-update" role="switch" aria-checked="false" tabindex="0"></div>
+            </div>
+            <div class="setting-row">
+              <div class="row-main"><div class="row-title">通道</div></div>
+              <div class="segment" id="set-update-channel">
+                <button type="button" data-value="stable" class="active">稳定</button>
+                <button type="button" data-value="beta">预览</button>
+              </div>
+            </div>
+            <div class="setting-row">
+              <div class="row-main"><div class="row-title">上次检查</div></div>
+              <span class="row-value mono" id="update-last-checked">尚未检查</span>
+            </div>
+            <div class="row-error" id="update-last-failed" hidden></div>
+            <div class="row-note amber" id="update-portable-hint" hidden>便携模式不自动更新，请手动下载。</div>
+            <div class="setting-row actions-row">
+              <div class="row-main"></div>
+              <button type="button" class="btn ghost" id="btn-check-update"><span data-icon="refresh" data-size="13"></span>立即检查</button>
+            </div>
+            <div class="setting-row" id="update-skipped-row" hidden>
+              <div class="row-main"><div class="row-sub">已跳过 0.3.2</div></div>
+              <button type="button" class="btn ghost" id="btn-unskip-version">取消跳过</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-group">
+          <div class="eyebrow-label">安全</div>
+          <div class="settings-card" id="security-card">
+            <div class="setting-row"><div class="row-main"><div class="row-title">密钥存储</div></div><span class="pill amber" id="secret-state-pill">文件</span></div>
+            <div class="setting-row"><span class="k">当前</span><span class="row-value mono">文件（权限 600）</span></div>
+            <div class="setting-row"><span class="k">推荐</span><span class="row-value mono">系统钥匙串</span></div>
+            <div class="setting-row"><span class="k">影响</span><span class="row-value amber">本机其他账户可能读取中继密钥</span></div>
+            <div class="setting-row actions-row">
+              <div class="row-main"></div>
+              <button type="button" class="btn primary" id="btn-migrate-secret">迁移到系统钥匙串</button>
+            </div>
+            <div class="row-note" id="security-unsupported" hidden>此系统不支持系统钥匙串</div>
+          </div>
+        </div>
       </section>
 
-      <!-- 日志 -->
+      <!-- ── 日志 DE-70..DE-75 ─────────────────────────────────────── -->
       <section class="page" id="page-logs">
-        <div class="section-head" style="margin-top:0"><h3>运行日志</h3><span class="caption" id="log-path">desktop.log</span><span class="right"><button class="btn" id="btn-refresh-logs"><span class="ico" data-icon="refresh"></span>刷新</button></span></div>
-        <div class="log" id="log-view">正在读取日志…</div>
+        <div class="log-toolbar">
+          <input class="input log-search" id="log-search" type="search" placeholder="搜索日志" aria-label="搜索日志" autocomplete="off" />
+          <div class="segment" id="log-level" role="radiogroup" aria-label="日志级别">
+            <button type="button" data-value="all" role="radio" aria-checked="true" class="active">全部</button>
+            <button type="button" data-value="info" role="radio" aria-checked="false">信息</button>
+            <button type="button" data-value="error" role="radio" aria-checked="false">错误</button>
+          </div>
+          <label class="auto-scroll"><span>自动滚动</span><span class="switch on" id="log-autoscroll" role="switch" aria-checked="true" tabindex="0"></span></label>
+          <span class="toolbar-spacer"></span>
+          <button type="button" class="icon-btn" id="log-copy" aria-label="复制"><span data-icon="copy" data-size="14"></span></button>
+          <button type="button" class="icon-btn" id="btn-open-logs" data-open-logs aria-label="打开目录"><span data-icon="folder" data-size="14"></span></button>
+          <button type="button" class="icon-btn" id="btn-refresh-logs" aria-label="刷新"><span data-icon="refresh" data-size="14"></span></button>
+        </div>
+        <div class="log-panel">
+          <div class="log" id="log-view"><div class="log-empty">暂无日志</div></div>
+        </div>
+        <div class="log-foot">
+          <span class="mono log-path ellipsis" id="log-path">desktop.log</span>
+          <span class="mono log-count" id="log-count">最近 5000 行</span>
+        </div>
       </section>
     </div>
   </main>
 </div>
-<div class="confirm-overlay" id="confirm-overlay">
-  <div class="confirm-box">
-    <div class="confirm-title" id="confirm-title">确认操作</div>
-    <div class="confirm-body" id="confirm-body"></div>
-    <div class="confirm-actions">
-      <button class="btn ghost" id="confirm-cancel">取消</button>
-      <button class="btn danger" id="confirm-ok">确定</button>
+
+<!-- ── 通用确认对话框（app.js askConfirm：撤销/重启等危险操作，DE-33/E.5） ── -->
+<div class="overlay" id="confirm-overlay">
+  <div class="dialog dialog-sm confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-body">
+    <div class="confirm-title" id="confirm-title">撤销设备？</div>
+    <div class="confirm-body" id="confirm-body">该设备将无法再连接；重新连接需要重新扫码配对。</div>
+    <div class="dialog-actions">
+      <button type="button" class="btn ghost" id="confirm-cancel">取消</button>
+      <button type="button" class="btn danger" id="confirm-ok">撤销</button>
     </div>
   </div>
 </div>
-<div class="confirm-overlay" id="update-overlay" hidden>
-  <div class="confirm-box" role="dialog" aria-modal="true" aria-labelledby="update-title">
-    <div class="confirm-title" id="update-title">发现新版本</div>
-    <div id="update-sub">当前 —</div>
-    <div id="update-date" hidden></div>
-    <div id="update-notes"></div>
-    <div class="confirm-actions">
-      <button class="btn ghost" id="update-cancel">取消</button>
-      <button class="btn ghost" id="update-download">手动下载</button>
-      <button class="btn primary" id="update-install">立即更新</button>
+
+<!-- ── 更新详情 DE-86..DE-97（540，role=dialog；app.js 写入 title/sub/date/notes） ── -->
+<div class="overlay" id="update-overlay" hidden>
+  <div class="dialog update-dialog" role="dialog" aria-modal="true" aria-labelledby="update-title" aria-describedby="update-sub">
+    <div class="dialog-head">
+      <span class="dialog-icon" aria-hidden="true"><span data-icon="download" data-size="18"></span></span>
+      <div class="dialog-titles">
+        <h3 id="update-title">发现新版本 0.3.2</h3>
+        <p id="update-sub">稳定通道 · 发布于 2026-11-20</p>
+        <p id="update-date" hidden></p>
+      </div>
+      <button type="button" class="icon-btn dialog-close" id="update-close" aria-label="关闭"><span class="icon-x" aria-hidden="true"></span></button>
+    </div>
+
+    <div class="notes-wrap">
+      <div class="eyebrow-label">本次更新</div>
+      <div class="notes" id="update-notes">
+        <ul>
+          <li>修复配对二维码偶发失效。</li>
+          <li>新增首次启动自检。</li>
+          <li>降低桥接常驻内存占用。</li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- DE-89 元信息（下载前不得显示「已校验」） -->
+    <div class="kv update-kv">
+      <span class="k">大小</span><span class="v mono">12.4 MB</span>
+      <span class="k">签名</span><span class="v mono">发布签名 · 下载后校验</span>
+      <span class="k">来源</span><span class="v mono">github.com/pi-carry/pi-carry</span>
+    </div>
+
+    <!-- DE-90 -->
+    <label class="check-row" for="update-restart">
+      <input type="checkbox" id="update-restart" checked />
+      <span class="box" aria-hidden="true"></span>
+      <span>安装完成后重启应用</span>
+    </label>
+
+    <!-- DE-93 三段阶段 -->
+    <div class="stages" id="update-stages" hidden>
+      <div class="stage done"><span class="stage-dot" aria-hidden="true"></span><span class="stage-label">下载</span><span class="stage-val mono">完成</span></div>
+      <div class="stage active"><span class="stage-dot" aria-hidden="true"></span><span class="stage-label">校验签名</span><span class="stage-val mono">进行中</span></div>
+      <div class="stage pending"><span class="stage-dot" aria-hidden="true"></span><span class="stage-label">安装</span><span class="stage-val mono">等待</span></div>
+    </div>
+
+    <!-- DE-94 进度条 -->
+    <div class="progress-block" id="update-progress" hidden>
+      <div class="progress" role="progressbar" aria-label="更新下载进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i></i></div>
+      <div class="progress-legend">
+        <span class="mono">1.2MB / 12.4MB</span>
+        <span class="mono">42% · 剩余 18s</span>
+      </div>
+      <button type="button" class="btn ghost" id="update-cancel-download">取消下载</button>
+    </div>
+
+    <div class="dialog-actions">
+      <button type="button" class="btn ghost" id="update-cancel">取消</button>
+      <button type="button" class="btn ghost" id="update-download">手动下载</button>
+      <button type="button" class="btn primary" id="update-install">立即安装</button>
+    </div>
+    <div class="skip-wrap"><button type="button" class="link-btn" id="update-skip">跳过此版本</button></div>
+  </div>
+</div>
+
+<!-- ── 验签失败 DE-98/DE-99（460，role=alertdialog；绝无「仍要安装」） ── -->
+<div class="overlay" id="sigfail-overlay" hidden>
+  <div class="dialog dialog-sm rose" role="alertdialog" aria-modal="true" aria-labelledby="sigfail-title" aria-describedby="sigfail-body">
+    <div class="dialog-head">
+      <span class="dialog-icon rose" aria-hidden="true"><span data-icon="alert" data-size="18"></span></span>
+      <div class="dialog-titles"><h3 id="sigfail-title">签名校验失败</h3></div>
+      <button type="button" class="icon-btn dialog-close" data-close="sigfail" aria-label="关闭"><span class="icon-x" aria-hidden="true"></span></button>
+    </div>
+    <p class="dialog-body" id="sigfail-body">下载文件与发布签名不匹配，已阻止安装。请重新检查或手动下载。</p>
+    <div class="kv">
+      <span class="k">版本</span><span class="v mono">0.3.2</span>
+      <span class="k">下载源</span><span class="v mono" title="github.com/pi-carry/pi-carry/releases/download/v0.3.2/pi-carry-windows-10-x64-0.3.2.zip">github.com/pi-carry/…</span>
+      <span class="k">期望签名</span><span class="v mono" title="RWT7kQ2exampleexpectedsignaturevalue">RWT7kQ2example…</span>
+      <span class="k">实际签名</span><span class="v mono" title="9f3a1c0exampleactualsignaturevalue">9f3a1c0example…</span>
+    </div>
+    <div class="dialog-actions">
+      <button type="button" class="btn ghost" data-open-logs>打开日志</button>
+      <button type="button" class="btn primary" data-retry-update>重新检查</button>
     </div>
   </div>
 </div>
-<div class="toast" id="toast"></div>
+
+<!-- ── 密钥迁移确认 DE-123（420，role=alertdialog） ── -->
+<div class="overlay" id="migrate-overlay" hidden>
+  <div class="dialog dialog-sm confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="migrate-title" aria-describedby="migrate-body">
+    <div class="dialog-titles"><h3 id="migrate-title">迁移到系统钥匙串？</h3></div>
+    <p class="dialog-body" id="migrate-body">迁移后旧文件会被删除；如果失败，原文件会保留。</p>
+    <div class="dialog-actions">
+      <button type="button" class="btn ghost" data-close="migrate">取消</button>
+      <button type="button" class="btn primary" id="btn-migrate-confirm">迁移</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── 首启自检 DE-110..DE-114（520，role=alertdialog；无「跳过」，Esc 不关闭） ── -->
+<div class="overlay selfcheck-overlay" id="selfcheck-overlay" hidden>
+  <div class="dialog selfcheck-dialog" role="alertdialog" aria-modal="true" aria-labelledby="selfcheck-title" aria-describedby="selfcheck-sub">
+    <h2 class="selfcheck-title" id="selfcheck-title">启动检查</h2>
+    <p class="selfcheck-sub" id="selfcheck-sub">pi carry 需要 pi 与 WebView2 才能运行。</p>
+    <div class="diag-list">
+      <div class="diag">
+        <span class="diag-icon" aria-hidden="true"><span data-icon="terminal" data-size="14"></span></span>
+        <div class="diag-main"><b>pi 可执行文件</b><span class="mono">未找到 pi 可执行文件</span></div>
+        <span class="pill rose">失败</span>
+        <button type="button" class="btn ghost sm" data-selfcheck-act="pick-pi">选择 pi</button>
+      </div>
+      <div class="diag">
+        <span class="diag-icon" aria-hidden="true"><span data-icon="grid" data-size="14"></span></span>
+        <div class="diag-main"><b>WebView2</b><span class="mono">未安装 WebView2 运行时</span></div>
+        <span class="pill amber">失败</span>
+        <button type="button" class="btn ghost sm" data-selfcheck-act="install-webview2">安装 WebView2</button>
+      </div>
+      <div class="diag">
+        <span class="diag-icon" aria-hidden="true"><span data-icon="folder" data-size="14"></span></span>
+        <div class="diag-main"><b>数据目录</b><span class="mono">数据目录不可写</span></div>
+        <span class="pill rose">失败</span>
+        <button type="button" class="btn ghost sm" data-selfcheck-act="open-data">打开目录</button>
+      </div>
+    </div>
+    <div class="selfcheck-actions">
+      <button type="button" class="btn primary" id="btn-recheck">重新检测</button>
+      <button type="button" class="btn ghost" data-open-logs>打开日志</button>
+      <button type="button" class="link-btn" id="btn-exit-app">退出</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <script src="app.js"></script>
 </body>

@@ -45,7 +45,8 @@ class UiScreenshotSmokeTest {
         shoot("02-sessions")
         compose.onNodeWithText("设置").performClick()
         compose.waitForIdle()
-        compose.onNodeWithText("传输、通知与安全边界").assertIsDisplayed()
+        // E.2.6：设置页头不再有副标题，改为校验首个分组标题「外观」仍正常渲染。
+        compose.onNodeWithText("外观").assertIsDisplayed()
         shoot("03-settings")
         compose.onNodeWithText("节点").performClick()
         compose.waitForIdle()

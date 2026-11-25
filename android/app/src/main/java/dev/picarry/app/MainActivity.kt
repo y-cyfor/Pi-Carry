@@ -1,19 +1,20 @@
 package dev.picarry.app
 
-import android.Manifest
 import android.content.Intent
 import android.content.res.Configuration
 import android.graphics.drawable.ColorDrawable
-import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -22,13 +23,13 @@ import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import androidx.compose.material.icons.outlined.Dns
@@ -41,12 +42,16 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -61,22 +66,26 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import dev.picarry.app.net.CarryService
 import dev.picarry.app.ui.components.CarryBackground
-import dev.picarry.app.ui.components.pressClickable
 import dev.picarry.app.ui.screens.ChatScreen
 import dev.picarry.app.ui.screens.NodesScreen
 import dev.picarry.app.ui.screens.PairingScreen
 import dev.picarry.app.ui.screens.SessionsScreen
 import dev.picarry.app.ui.screens.SettingsScreen
-import dev.picarry.app.ui.theme.Line
+import dev.picarry.app.ui.theme.CarryEase
 import dev.picarry.app.ui.theme.PiCarryTheme
+import dev.picarry.app.ui.theme.TabbarActiveBg
+import dev.picarry.app.ui.theme.TabbarActiveStroke
+import dev.picarry.app.ui.theme.TabbarEnd
+import dev.picarry.app.ui.theme.TabbarLine
+import dev.picarry.app.ui.theme.TabbarMid
 import dev.picarry.app.ui.theme.TextMuted
-import dev.picarry.app.ui.theme.Violet
 import dev.picarry.app.ui.theme.VioletSoft
+import dev.picarry.app.ui.theme.WindowBackgroundDark
+import dev.picarry.app.ui.theme.WindowBackgroundLight
 
 private const val KEY_PAIR_CONSUMED = "pair_consumed"
 
 class MainActivity : ComponentActivity() {
-    private val notifPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
     private var pairUri by mutableStateOf<String?>(null)
     private var pairConsumed = false
 
@@ -95,14 +104,13 @@ class MainActivity : ComponentActivity() {
             else -> (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
                 Configuration.UI_MODE_NIGHT_YES
         }
-        window.setBackgroundDrawable(ColorDrawable(if (startupDark) 0xFF05050A.toInt() else 0xFFF1F1F4.toInt()))
+        window.setBackgroundDrawable(ColorDrawable(if (startupDark) WindowBackgroundDark else WindowBackgroundLight))
         WindowCompat.getInsetsController(window, window.decorView).apply {
             isAppearanceLightStatusBars = !startupDark
             isAppearanceLightNavigationBars = !startupDark
         }
-        if (Build.VERSION.SDK_INT >= 33) {
-            notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
-        }
+        // C.9 MSY-04：冷启动不申请 POST_NOTIFICATIONS，等用户在设置页打开
+        // 「审批通知」开关时由 SettingsScreen 发起请求。
         ContextCompat.startForegroundService(this, Intent(this, CarryService::class.java))
         // 深链只消费一次：旋转/进程重建后不能再把用户拽回配对页。
         pairConsumed = savedInstanceState?.getBoolean(KEY_PAIR_CONSUMED) ?: false
@@ -190,14 +198,14 @@ fun PiCarryAppRoot(
 
     val route = backStack?.destination?.route ?: Routes.Nodes
     val showBar = route in setOf(Routes.Nodes, Routes.Sessions, Routes.SessionsByNode, Routes.Settings)
+    // MP-04：tabbar 绝对定位覆盖页面内容（页面内容滚动到渐变下面），不再占据布局高度。
     CarryBackground {
-        Column(Modifier.fillMaxSize()) {
-            Box(Modifier.weight(1f)) {
-                NavHost(
-                    navController = nav,
-                    startDestination = Routes.Nodes,
-                    modifier = Modifier.fillMaxSize(),
-                ) {
+        Box(Modifier.fillMaxSize()) {
+            NavHost(
+                navController = nav,
+                startDestination = Routes.Nodes,
+                modifier = Modifier.fillMaxSize(),
+            ) {
                     composable(Routes.Nodes) {
                         NodesScreen(
                             repo = repo,
@@ -265,46 +273,51 @@ fun PiCarryAppRoot(
                         )
                     }
                 }
-            }
-            if (showBar) BottomBar(nav, route)
+            if (showBar) BottomBar(nav, route, Modifier.align(Alignment.BottomCenter))
         }
     }
 }
 
 @Composable
-private fun BottomBar(nav: NavHostController, route: String) {
+private fun BottomBar(nav: NavHostController, route: String, modifier: Modifier = Modifier) {
     val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+    // MP-08：底部留白取 max(导航栏 inset, 22dp)。
     val safeBottom = maxOf(navBottom, 22.dp)
-    Column(
-        Modifier
+    // drawBehind 不是 @Composable，颜色 token 需先取出。
+    val tabbarLine = TabbarLine
+    Box(
+        modifier
             .fillMaxWidth()
             .height(64.dp + safeBottom)
             .background(
                 Brush.verticalGradient(
-                    listOf(androidx.compose.ui.graphics.Color.Transparent, dev.picarry.app.ui.theme.Ink.copy(alpha = 0.94f))
+                    0f to Color.Transparent,
+                    0.42f to TabbarMid,
+                    1f to TabbarEnd,
                 )
             )
-            .padding(bottom = safeBottom),
+            .drawBehind {
+                drawLine(
+                    color = tabbarLine,
+                    start = Offset(0f, 0.5.dp.toPx()),
+                    end = Offset(size.width, 0.5.dp.toPx()),
+                    strokeWidth = 1.dp.toPx(),
+                )
+            },
     ) {
-        Box(
-            Modifier.fillMaxSize(),
-            contentAlignment = Alignment.TopCenter,
+        Row(
+            Modifier.fillMaxSize().padding(start = 26.dp, end = 26.dp, top = 8.dp, bottom = safeBottom),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalAlignment = Alignment.Top,
         ) {
-            Box(Modifier.fillMaxWidth().height(0.7.dp).background(Line.copy(alpha = 0.7f)))
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 26.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                BarItem(Modifier.weight(1f), "节点", Icons.Outlined.Dns, route == Routes.Nodes) {
-                    nav.switchTab(Routes.Nodes)
-                }
-                BarItem(Modifier.weight(1f), "会话", Icons.Outlined.ChatBubbleOutline, route == Routes.Sessions || route == Routes.SessionsByNode) {
-                    nav.switchTab(Routes.Sessions)
-                }
-                BarItem(Modifier.weight(1f), "设置", Icons.Outlined.Settings, route == Routes.Settings) {
-                    nav.switchTab(Routes.Settings)
-                }
+            BarItem(Modifier.weight(1f), "节点", Icons.Outlined.Dns, route == Routes.Nodes) {
+                nav.switchTab(Routes.Nodes)
+            }
+            BarItem(Modifier.weight(1f), "会话", Icons.Outlined.ChatBubbleOutline, route == Routes.Sessions || route == Routes.SessionsByNode) {
+                nav.switchTab(Routes.Sessions)
+            }
+            BarItem(Modifier.weight(1f), "设置", Icons.Outlined.Settings, route == Routes.Settings) {
+                nav.switchTab(Routes.Settings)
             }
         }
     }
@@ -323,6 +336,7 @@ private fun NavHostController.switchTab(route: String) {
     }
 }
 
+/** MP-05/MP-06：图标 20dp、图标座 44×28、激活紫底 .14+内描边 .16，按压只缩图标座。 */
 @Composable
 private fun BarItem(
     modifier: Modifier,
@@ -331,22 +345,30 @@ private fun BarItem(
     active: Boolean,
     onClick: () -> Unit,
 ) {
+    val source = remember { MutableInteractionSource() }
+    val pressed by source.collectIsPressedAsState()
+    val seatScale by animateFloatAsState(
+        targetValue = if (pressed) 0.92f else 1f,
+        animationSpec = tween(durationMillis = 160, easing = CarryEase),
+        label = "tabSeatScale",
+    )
     Column(
         modifier
-            .clip(RoundedCornerShape(12.dp))
-            .pressClickable(onClick = onClick, scale = 0.94f)
-            .padding(vertical = 2.dp),
+            .fillMaxHeight()
+            .padding(top = 5.dp)
+            .clickable(interactionSource = source, indication = null, onClick = onClick),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Box(
             Modifier
                 .size(width = 44.dp, height = 28.dp)
+                .graphicsLayer { scaleX = seatScale; scaleY = seatScale }
                 .clip(RoundedCornerShape(9.dp))
-                .background(if (active) Violet.copy(alpha = 0.14f) else Color.Transparent)
-                .then(if (active) Modifier.border(0.7.dp, Violet.copy(alpha = 0.16f), RoundedCornerShape(9.dp)) else Modifier),
+                .background(if (active) TabbarActiveBg else Color.Transparent)
+                .then(if (active) Modifier.border(1.dp, TabbarActiveStroke, RoundedCornerShape(9.dp)) else Modifier),
             contentAlignment = Alignment.Center,
         ) {
-            Icon(icon, label, tint = if (active) VioletSoft else TextMuted, modifier = Modifier.size(18.dp))
+            Icon(icon, label, tint = if (active) VioletSoft else TextMuted, modifier = Modifier.size(20.dp))
         }
         Spacer(Modifier.height(3.dp))
         Text(

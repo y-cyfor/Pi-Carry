@@ -9,7 +9,7 @@ use crate::{now_rfc3339, AppState};
 use pi_carry_core::config::Config;
 use pi_carry_core::updatecheck::{self, PORTABLE_TARGET_WINDOWS};
 use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_updater::UpdaterExt;
 
 /// 手动下载页：稳定的 latest 永远指向最新正式版，beta 走固定 tag。
@@ -20,6 +20,16 @@ pub(crate) fn release_page(channel: &str) -> &'static str {
     match channel {
         "beta" => BETA_PAGE,
         _ => STABLE_PAGE,
+    }
+}
+
+/// DE-89：签名来源。桌面更新包只经 GitHub Releases 分发；
+/// 其它地址（内网镜像、代理）不能冒充官方来源，照实标成外部地址。
+fn update_source(url: &str) -> &'static str {
+    if url.contains("github.com") || url.contains("githubusercontent.com") {
+        "GitHub Releases"
+    } else {
+        "外部地址"
     }
 }
 
@@ -76,6 +86,8 @@ pub(crate) async fn check_update(
     tracing::info!(manual, channel = %channel, portable, available, suppressed, "更新检查完成");
     state.set_last_update(payload.clone());
     let _ = app.emit("update-check", payload.clone());
+    // DE-130：托盘菜单「检查更新（有更新）」与状态行要跟着本次结果变。
+    crate::refresh_tray(&app);
     Ok(payload)
 }
 
@@ -137,6 +149,7 @@ async fn check_installer(
     // 自动/手动的展示差异交给前端：自动检查按 suppressed 隐藏横幅，
     // 手动检查即使被抑制也展示版本与下载页。
     let suppressed = updatecheck::should_suppress(&update.version, last_failed);
+    let source = update_source(update.download_url.as_str());
     let payload = json!({
         "available": true,
         "portable": false,
@@ -150,6 +163,14 @@ async fn check_installer(
         "pageUrl": release_page(channel),
         "channel": channel,
         "checkedAt": checked_at,
+        // DE-89：检查阶段只声明「发布签名」，绝不提前声称已校验 ——
+        // 验签发生在下载完成之后（插件用内置公钥校验，见 install_update）。
+        "signatureAlgorithm": "ed25519",
+        "signature": update.signature,
+        "signatureVerified": false,
+        "source": source,
+        // latest.json 不带文件大小：未知就明确给 null，不编造数值。
+        "sizeBytes": Value::Null,
     });
     // 始终保留待安装槽：自动检查时前端按 suppressed 隐藏横幅，
     // 用户手动检查后仍可重试安装（例如上次只是取消授权）。
@@ -182,6 +203,7 @@ async fn check_portable(
             "checkedAt": checked_at,
         }));
     };
+    let source = update_source(&update.url);
     Ok(json!({
         "available": true,
         "portable": true,
@@ -194,6 +216,13 @@ async fn check_portable(
         "pageUrl": release_page(channel),
         "channel": channel,
         "checkedAt": checked_at,
+        // DE-89：便携版没有 ed25519 签名，只有发布清单里的 SHA-256；
+        // 与安装器一致，检查阶段绝不声称「已校验」。
+        "signatureAlgorithm": Value::Null,
+        "signature": Value::Null,
+        "signatureVerified": false,
+        "sizeBytes": Value::Null,
+        "source": source,
     }))
 }
 
@@ -213,8 +242,10 @@ pub(crate) async fn install_update(
         return Err("没有待安装的更新，请先检查更新".into());
     };
     let version = update.version.clone();
-    // 网络类失败按 2s/5s/15s 退避重试（plan §7.2）；签名、授权、安装失败不重试。
-    const BACKOFF_SECS: [u64; 3] = [2, 5, 15];
+    // R2-10：只有真正进入安装（插件回调 on_download_finish，验签已通过）才置 installing；
+    // 下载/校验阶段允许关窗，不能误拦成「安装中」。
+    // 网络类失败按 5s/15s/60s 退避重试（DE-96、plan §7.2）；签名、授权、安装失败不重试。
+    const BACKOFF_SECS: [u64; 3] = [5, 15, 60];
     let mut attempt = 0usize;
     let result = loop {
         attempt += 1;
@@ -224,6 +255,7 @@ pub(crate) async fn install_update(
                 "update-progress",
                 json!({ "phase": "cancelled", "version": version.clone() }),
             );
+            state.set_installing(false);
             return Ok(json!({
                 "installed": false,
                 "cancelled": true,
@@ -248,6 +280,8 @@ pub(crate) async fn install_update(
             },
             move || {
                 // 插件语义：下载完成且验签通过，接下来交给系统安装器。
+                // R2-10：到这一步才是真正的安装阶段，此后的关窗请求由主进程拦截（DESK-18）。
+                finishing.state::<AppState>().set_installing(true);
                 let _ = finishing.emit("update-progress", json!({ "phase": "installing" }));
             },
         );
@@ -262,6 +296,7 @@ pub(crate) async fn install_update(
                     "update-progress",
                     json!({ "phase": "cancelled", "version": version.clone() }),
                 );
+                state.set_installing(false);
                 return Ok(json!({
                     "installed": false,
                     "cancelled": true,
@@ -284,6 +319,7 @@ pub(crate) async fn install_update(
                         "update-progress",
                         json!({ "phase": "cancelled", "version": version.clone() }),
                     );
+                    state.set_installing(false);
                     return Ok(json!({
                         "installed": false,
                         "cancelled": true,
@@ -300,6 +336,7 @@ pub(crate) async fn install_update(
                             "update-progress",
                             json!({ "phase": "cancelled", "version": version.clone() }),
                         );
+                        state.set_installing(false);
                         return Ok(json!({
                             "installed": false,
                             "cancelled": true,
@@ -312,10 +349,17 @@ pub(crate) async fn install_update(
         }
     };
 
-    match result {
+    let outcome = match result {
         Ok(()) => {
             tracing::info!(version = %version, "更新已安装，等待重启");
             state.set_pending_update(None);
+            // DE-100：装成功说明这个版本已被接受，清掉「验签失败」抑制标记，
+            // 否则重发的同版本修复包会被当成坏包静默跳过。
+            if let Err(save) = state.update_config(&state.paths(), |config| {
+                config.updates.last_failed_version.clear();
+            }) {
+                tracing::warn!(error = %save, "清理失败版本标记失败");
+            }
             let _ = app.emit(
                 "update-progress",
                 json!({ "phase": "installed", "version": version }),
@@ -336,11 +380,20 @@ pub(crate) async fn install_update(
             tracing::error!(kind, version = %version, error = %err, "更新安装失败");
             let _ = app.emit(
                 "update-error",
-                json!({ "kind": kind, "message": message, "version": version }),
+                json!({
+                    "kind": kind,
+                    "message": message,
+                    "version": version,
+                    // DE-99：验签失败阻断对话框需要「期望签名」和下载源，前端据此展示 kv 行。
+                    "expectedSignature": update.signature,
+                    "downloadUrl": update.download_url.as_str(),
+                }),
             );
             Err(message)
         }
-    }
+    };
+    state.set_installing(false);
+    outcome
 }
 
 #[tauri::command]

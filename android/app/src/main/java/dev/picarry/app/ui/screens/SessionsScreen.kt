@@ -1,9 +1,19 @@
 package dev.picarry.app.ui.screens
 
+import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -14,10 +24,13 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -52,13 +65,22 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import dev.picarry.app.data.CarryRepository
 import dev.picarry.app.data.FsListing
 import dev.picarry.app.data.FsRoots
@@ -68,8 +90,8 @@ import dev.picarry.app.data.Session
 import dev.picarry.app.data.breadcrumbs
 import dev.picarry.app.data.displayName
 import dev.picarry.app.net.CarryException
+import dev.picarry.app.ui.components.ButtonKind
 import dev.picarry.app.ui.components.CarryActionButton
-import dev.picarry.app.ui.components.CarryIconButton
 import dev.picarry.app.ui.components.CarrySheetGrabber
 import dev.picarry.app.ui.components.CarrySheetHeader
 import dev.picarry.app.ui.components.EmptyState
@@ -78,26 +100,33 @@ import dev.picarry.app.ui.components.NullableStringSaver
 import dev.picarry.app.ui.components.ScreenHeader
 import dev.picarry.app.ui.components.StatusDot
 import dev.picarry.app.ui.components.Tag
-import dev.picarry.app.ui.components.pressClickable
+import dev.picarry.app.ui.components.monoLabelText
 import dev.picarry.app.ui.components.statusColor
+import dev.picarry.app.ui.theme.AccentSoft
 import dev.picarry.app.ui.theme.Amber
 import dev.picarry.app.ui.theme.Cyan
 import dev.picarry.app.ui.theme.Inter
 import dev.picarry.app.ui.theme.Line
 import dev.picarry.app.ui.theme.LineStrong
 import dev.picarry.app.ui.theme.Mint
-import dev.picarry.app.ui.theme.Panel
 import dev.picarry.app.ui.theme.Rose
-import dev.picarry.app.ui.theme.Surface2
 import dev.picarry.app.ui.theme.TextMuted
 import dev.picarry.app.ui.theme.TextPrimary
 import dev.picarry.app.ui.theme.TextSecondary
 import dev.picarry.app.ui.theme.Violet
-import dev.picarry.app.ui.theme.VioletSoft
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 private val filters = listOf("全部" to "all", "运行中" to "running", "等待审批" to "approval")
+
+// token: 激活 chip 计数 rgba(211,204,255,.75)，Theme.kt 无对应 token。
+private val ChipCountActive = Color(0xFFD3CCFF)
+
+// token: 浅色主题的覆盖色 --ink-rgb = 26,26,46。
+private val InkOverlayLight = Color(0xFF1A1A2E)
+
+// token: 搜索框输入/占位 12.5sp，Theme 字阶最小 11sp，无 12.5 档。
+private val SearchTextSize = 12.5.sp
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -116,14 +145,14 @@ fun SessionsScreen(
     var isCreating by rememberSaveable { mutableStateOf(false) }
     var createSlow by rememberSaveable { mutableStateOf(false) }
     var createHint by rememberSaveable(stateSaver = NullableStringSaver) { mutableStateOf<String?>(null) }
-    // 只存 sessionId：Session 本身不可保存，旋转后按 id 回查即可保持面板打开（BUG-023）。
+    // 只存 sessionId：Session 本身不可保存，旋转后按 id 回查仍能保持面板打开（BUG-023）。
     var renameSessionId by rememberSaveable(stateSaver = NullableStringSaver) { mutableStateOf<String?>(null) }
     var showNodePicker by rememberSaveable { mutableStateOf(false) }
     var pickerNodeId by rememberSaveable(stateSaver = NullableStringSaver) { mutableStateOf<String?>(null) }
     var createError by remember { mutableStateOf<String?>(null) }
     val nodeSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val dirSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    // 8 秒只是「慢」的提示阈值，绝不能复位 isCreating：复位会让「在此目录新建」
+    // 8 秒只是「慢」的提示阈值，绝不能复位 isCreating：复位会让「使用此目录」
     // 重新可点，用户再点一次就会再发一次 session.create，产生两个新会话（BUG-010）。
     LaunchedEffect(isCreating) {
         if (!isCreating) {
@@ -151,47 +180,64 @@ fun SessionsScreen(
     val nodeOrder = filtered.map { it.nodeId }.distinct()
     val onlineNodes = nodes.filter { link[it.id] == LinkState.Online }
     val scopedNodeName = filterNodeId?.let { id -> nodes.firstOrNull { it.id == id }?.name ?: id.take(8) }
+    val todayActive = scoped.count { isActiveToday(it.updatedAt) }
 
     LazyColumn(
         Modifier.fillMaxSize().statusBarsPadding(),
-        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 28.dp, bottom = 26.dp),
+        // MP-03：标题间距由 ScreenHeader 的 10dp 提供；MP-07：底部留 98dp 给覆盖式导航。
+        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 0.dp, bottom = 98.dp),
     ) {
-        item {
-            ScreenHeader(
-                title = scopedNodeName ?: "会话",
-                subtitle = if (filterNodeId == null) "按节点分组 · ${sessions.size} 个会话" else "节点会话 · ${scoped.size} 个会话",
-                count = scoped.size.toString().padStart(2, '0'),
-            ) {
-                if (isCreating) {
-                    Box(Modifier.size(38.dp), contentAlignment = Alignment.Center) {
-                        CircularProgressIndicator(Modifier.size(18.dp), color = Violet, strokeWidth = 2.dp)
-                    }
-                } else {
-                    CarryIconButton(Icons.Outlined.Add, "新建会话", onClick = {
-                        createHint = null
-                        createError = null
-                        when (onlineNodes.size) {
-                            0 -> createHint = "没有在线的节点，请先配对或等待连接恢复"
-                            1 -> pickerNodeId = onlineNodes.first().id
-                            else -> showNodePicker = true
+        item(key = "header") {
+            Column {
+                ScreenHeader(
+                    title = scopedNodeName ?: "会话",
+                    subtitle = when {
+                        filterNodeId != null -> "仅此节点 · ${scoped.size} 个会话"
+                        todayActive > 0 -> "按节点分组 · 今天 $todayActive 个活跃"
+                        else -> "按节点分组 · ${scoped.size} 个会话"
+                    },
+                    count = scoped.size.toString().padStart(2, '0'),
+                ) {
+                    if (isCreating) {
+                        Box(Modifier.size(38.dp), contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator(Modifier.size(18.dp), color = Violet, strokeWidth = 2.dp)
                         }
-                    })
+                    } else {
+                        HeaderIconButton("新建会话") {
+                            createHint = null
+                            createError = null
+                            when (onlineNodes.size) {
+                                0 -> createHint = "没有在线的节点"
+                                1 -> pickerNodeId = onlineNodes.first().id
+                                else -> showNodePicker = true
+                            }
+                        }
+                    }
+                }
+                if (createHint != null) {
+                    Spacer(Modifier.height(2.dp))
+                    Text(createHint!!, style = MaterialTheme.typography.bodySmall, color = Rose)
+                }
+                if (isCreating && createSlow) {
+                    Spacer(Modifier.height(2.dp))
+                    // 只提示慢，不解锁按钮：重复提交会真的建出两个会话（BUG-010）。
+                    Text("仍在创建，请稍候…", style = MaterialTheme.typography.bodySmall, color = TextMuted)
                 }
             }
-            if (createHint != null) {
-                Spacer(Modifier.height(4.dp))
-                Text(createHint!!, style = MaterialTheme.typography.bodySmall, color = Rose)
-            }
-            if (isCreating && createSlow) {
-                Spacer(Modifier.height(4.dp))
-                // 只提示慢，不解锁按钮：重复提交会真的建出两个会话（BUG-010）。
-                Text("节点响应较慢，仍在等待创建结果…", style = MaterialTheme.typography.bodySmall, color = TextMuted)
+        }
+        item(key = "search") {
+            Column {
+                Spacer(Modifier.height(2.dp))
+                SearchField(query) { query = it }
+                Spacer(Modifier.height(12.dp))
             }
         }
-        item { SearchField(query) { query = it } }
-        item {
+        item(key = "filters") {
             Row(
-                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 12.dp, bottom = 14.dp),
+                Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(bottom = 16.dp),
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 filters.forEach { (label, id) ->
@@ -205,43 +251,64 @@ fun SessionsScreen(
                         Modifier
                             .height(29.dp)
                             .clip(CircleShape)
-                            .background(if (active) Violet.copy(alpha = 0.16f) else Color.Transparent)
-                            .border(0.8.dp, if (active) Violet.copy(alpha = 0.30f) else LineStrong, CircleShape)
-                            .pressClickable(onClick = { filter = id }, scale = 0.96f)
+                            .background(if (active) Violet.copy(alpha = 0.16f) else inkOverlay(0.02f))
+                            .border(1.dp, if (active) Violet.copy(alpha = 0.40f) else Line, CircleShape)
+                            .tactilePress(scale = 0.96f, onClick = { filter = id })
                             .padding(horizontal = 11.dp),
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
                         Text(
                             label,
                             style = MaterialTheme.typography.labelLarge,
-                            color = if (active) VioletSoft else TextSecondary,
+                            color = if (active) AccentSoft else TextSecondary,
+                            maxLines = 1,
                         )
                         Text(
                             "$count",
                             style = MaterialTheme.typography.labelSmall,
-                            color = if (active) VioletSoft else TextMuted,
+                            color = if (active) chipCountColor() else TextMuted,
+                            maxLines = 1,
                         )
                     }
                 }
             }
         }
         if (filtered.isEmpty()) {
-            item {
-                if (nodes.isEmpty()) {
-                    EmptyState(Icons.Outlined.Devices, "还没有配对设备", "会话来自已配对的电脑，请先扫描电脑上的二维码配对")
-                } else if (scoped.isEmpty()) {
-                    EmptyState(Icons.Outlined.Forum, "还没有会话", "在电脑上的 pi 会话会自动出现在这里，也可以点击右上角新建")
-                } else {
-                    // 有会话但被搜索词/筛选筛空了：不能说“还没有会话”，那会让用户以为会话丢了（BUG-018）。
-                    EmptyState(Icons.Outlined.SearchOff, "没有匹配的会话", "换个关键词，或把筛选切回「全部」")
+            item(key = "empty") {
+                // MS-09：空态只留一句短说明，不再追加底部按钮。
+                when {
+                    nodes.isEmpty() -> EmptyState(
+                        Icons.Outlined.Devices,
+                        "还没有配对设备",
+                        "扫描电脑上的二维码开始",
+                    )
+                    scoped.isEmpty() -> EmptyState(
+                        Icons.Outlined.Forum,
+                        "还没有会话",
+                        "在电脑上发起会话后会出现在这里",
+                    )
+                    // 有会话但被搜索词/筛选筛空了：不能说“还没有会话”（BUG-018）。
+                    else -> EmptyState(
+                        Icons.Outlined.SearchOff,
+                        "没有匹配的会话",
+                        "换个关键词或筛选",
+                    )
                 }
             }
         }
-        nodeOrder.forEach { nodeId ->
+        nodeOrder.forEachIndexed { groupIndex, nodeId ->
             val node = nodes.firstOrNull { it.id == nodeId }
             val nodeSessions = filtered.filter { it.nodeId == nodeId }
-            item(key = "head-$nodeId") { NodeGroupHeader(node, nodeId, nodeSessions.size, link[nodeId]) }
+            item(key = "head-$nodeId") {
+                NodeGroupHeader(
+                    node = node,
+                    nodeId = nodeId,
+                    count = nodeSessions.size,
+                    state = link[nodeId],
+                    topPadding = if (groupIndex == 0) 2.dp else 18.dp,
+                )
+            }
             items(nodeSessions, key = { it.nodeId + it.id }) { session ->
                 SessionRow(
                     session = session,
@@ -249,12 +316,6 @@ fun SessionsScreen(
                     onClick = { onOpenChat(session.nodeId, session.id) },
                     onMore = { renameSessionId = session.id },
                 )
-            }
-        }
-        if (nodes.isEmpty()) {
-            item {
-                Spacer(Modifier.height(12.dp))
-                CarryActionButton("先配对一个节点", onPair, Modifier.fillMaxWidth(), kind = dev.picarry.app.ui.components.ButtonKind.Ghost)
             }
         }
     }
@@ -276,15 +337,17 @@ fun SessionsScreen(
         ModalBottomSheet(
             onDismissRequest = { showNodePicker = false },
             sheetState = nodeSheetState,
-            containerColor = Panel,
+            containerColor = sheetContainerColor(),
             shape = RoundedCornerShape(topStart = 26.dp, topEnd = 26.dp),
             dragHandle = { CarrySheetGrabber() },
             scrimColor = Color.Black.copy(alpha = 0.66f),
         ) {
-            NodePickerSheet(onlineNodes, onDismiss = { showNodePicker = false }) { id ->
-                showNodePicker = false
-                createError = null
-                pickerNodeId = id
+            SheetSurface {
+                NodePickerSheet(onlineNodes, onDismiss = { showNodePicker = false }) { id ->
+                    showNodePicker = false
+                    createError = null
+                    pickerNodeId = id
+                }
             }
         }
     }
@@ -296,11 +359,12 @@ fun SessionsScreen(
             ModalBottomSheet(
                 onDismissRequest = { pickerNodeId = null; createError = null },
                 sheetState = dirSheetState,
-                containerColor = Panel,
+                containerColor = sheetContainerColor(),
                 shape = RoundedCornerShape(topStart = 26.dp, topEnd = 26.dp),
                 dragHandle = { CarrySheetGrabber() },
                 scrimColor = Color.Black.copy(alpha = 0.66f),
             ) {
+                SheetSurface {
                 DirectoryPickerSheet(
                     repo = repo,
                     node = pickerNode,
@@ -325,160 +389,270 @@ fun SessionsScreen(
                         )
                     },
                 )
+                }
             }
         }
     }
 }
 
+// token: B.5.3 sheet 底 #101019 → #0B0B13（深色）；浅色用纯白。
+private val SheetTopDark = Color(0xFF101019)
+private val SheetBottomDark = Color(0xFF0B0B13)
+
+/** MB-01..05 sheet 基座：渐变底、顶边 1px 白 .14、body padding 0 18 26。 */
+@Composable
+private fun sheetContainerColor(): Color = if (isDarkUi()) SheetTopDark else Color.White
+
+@Composable
+private fun SheetSurface(content: @Composable () -> Unit) {
+    val dark = isDarkUi()
+    val background: Brush = if (dark) {
+        Brush.verticalGradient(listOf(SheetTopDark, SheetBottomDark))
+    } else {
+        SolidColor(Color.White)
+    }
+    val topLine = inkOverlay(if (dark) 0.14f else 0.08f)
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .drawBehind {
+                drawRect(background)
+                drawLine(
+                    color = topLine,
+                    start = Offset(0f, 0.5.dp.toPx()),
+                    end = Offset(size.width, 0.5.dp.toPx()),
+                    strokeWidth = 1.dp.toPx(),
+                )
+            }
+            .padding(start = 18.dp, end = 18.dp, bottom = 26.dp),
+    ) {
+        content()
+    }
+}
+
+/** MS-01 右上角非主色 icon-btn：视觉 38×38 圆角 12，AX-02 命中区 48。 */
+@Composable
+private fun HeaderIconButton(contentDescription: String, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(12.dp)
+    Box(
+        Modifier
+            // M-P2-11 / AX-02：可点区域 48dp，视觉仍为 38dp（内缩 5dp）。
+            .size(48.dp)
+            .tactilePress(scale = 0.94f, onClick = onClick)
+            .padding(5.dp)
+            .clip(shape)
+            .background(inkOverlay(0.035f))
+            .border(1.dp, Line, shape),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(Icons.Outlined.Add, contentDescription, tint = TextSecondary, modifier = Modifier.size(20.dp))
+    }
+}
+
+/** MS-02 搜索框：40 高、圆角 12、白 .035 底、输入与占位 12.5sp。 */
 @Composable
 private fun SearchField(query: String, onQuery: (String) -> Unit) {
+    val shape = RoundedCornerShape(12.dp)
     Row(
         Modifier
             .fillMaxWidth()
             .height(40.dp)
-            .clip(RoundedCornerShape(12.dp))
-            .background(Surface2.copy(alpha = 0.52f))
-            .border(0.8.dp, Line, RoundedCornerShape(12.dp))
-            .padding(horizontal = 12.dp),
+            .clip(shape)
+            .background(inkOverlay(0.035f))
+            .border(1.dp, Line, shape)
+            .padding(start = 12.dp, end = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(Icons.Outlined.Search, "搜索会话", tint = TextMuted, modifier = Modifier.size(15.dp))
-        Spacer(Modifier.size(8.dp))
+        Icon(Icons.Outlined.Search, "搜索会话", tint = TextMuted, modifier = Modifier.size(16.dp))
+        Spacer(Modifier.width(9.dp))
         BasicTextField(
             value = query,
             onValueChange = onQuery,
             singleLine = true,
-            textStyle = TextStyle(color = TextPrimary, fontSize = MaterialTheme.typography.bodyMedium.fontSize, fontFamily = Inter),
+            textStyle = TextStyle(color = TextPrimary, fontSize = SearchTextSize, fontFamily = Inter),
             cursorBrush = SolidColor(Violet),
             modifier = Modifier.weight(1f),
             decorationBox = { inner ->
-                if (query.isBlank()) Text("搜索会话、路径或消息…", style = MaterialTheme.typography.bodySmall, color = TextMuted)
+                if (query.isBlank()) {
+                    Text(
+                        "搜索会话、路径或消息",
+                        style = MaterialTheme.typography.bodySmall.copy(fontSize = SearchTextSize),
+                        color = TextMuted,
+                    )
+                }
                 inner()
             },
         )
         if (query.isNotBlank()) {
-            Box(Modifier.size(28.dp).clip(CircleShape).clickable { onQuery("") }, contentAlignment = Alignment.Center) {
+            // 热区宽 44dp（搜索条本身仅 40 高，纵向受设计高度限制）。
+            Box(
+                Modifier.size(width = 44.dp, height = 40.dp).tactilePress(scale = 0.94f) { onQuery("") },
+                contentAlignment = Alignment.Center,
+            ) {
                 Icon(Icons.Outlined.Close, "清除搜索", tint = TextMuted, modifier = Modifier.size(14.dp))
             }
+        } else {
+            Spacer(Modifier.width(8.dp))
         }
     }
 }
 
+/** MS-04 分组头：18/7 外边距、5dp 呼吸点、mono 11 大写、1dp 连线、计数 11。 */
 @Composable
-private fun NodeGroupHeader(node: Node?, nodeId: String, count: Int, state: LinkState?) {
+private fun NodeGroupHeader(node: Node?, nodeId: String, count: Int, state: LinkState?, topPadding: Dp) {
+    val online = state == LinkState.Online
     Row(
-        Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 7.dp),
+        Modifier.fillMaxWidth().padding(start = 2.dp, end = 2.dp, top = topPadding, bottom = 7.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(7.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        StatusDot(if (state == LinkState.Online) Mint else TextMuted, 5)
+        BreathDot(if (online) Mint else TextMuted, sizeDp = 5, glow = online, breathe = online)
         Text(
-            node?.name ?: nodeId.take(8),
-            style = MaterialTheme.typography.labelMedium,
-            color = TextSecondary,
+            monoLabelText(node?.name ?: nodeId.take(8)),
+            style = MaterialTheme.typography.labelMedium.copy(letterSpacing = 1.4.sp),
+            color = TextMuted,
             maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f, fill = false),
         )
-        Box(Modifier.weight(1f).height(0.7.dp).background(Line))
-        MonoLabel("$count", color = TextMuted)
+        Box(Modifier.weight(1f).height(1.dp).background(Line))
+        Text("$count", style = MaterialTheme.typography.labelMedium, color = TextMuted, maxLines = 1)
     }
 }
 
+/** MS-05 / MS-06 会话行：无分隔线，12×10 内边距、13 圆角、按压 .06 底 + .985 缩放。 */
 @Composable
 private fun SessionRow(session: Session, migrated: Boolean, onClick: () -> Unit, onMore: () -> Unit) {
+    // MS-07：等待审批（含 pendingApprovals 计数与 status）玫色呼吸；运行中琥珀色不呼吸。
+    val waiting = session.pendingApprovals > 0 || session.status == "waiting_approval"
     val dot = when {
-        session.pendingApprovals > 0 -> Rose
+        waiting -> Rose
         session.isRunning -> Amber
         session.status == "error" -> Rose
         else -> TextMuted
     }
+    val breathe = waiting
     Row(
         Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(13.dp))
-            .pressClickable(onClick = onClick, scale = 0.985f)
+            .tactilePress(scale = 0.985f, pressedBackground = inkOverlay(0.06f), onClick = onClick)
             .padding(horizontal = 10.dp, vertical = 12.dp),
         verticalAlignment = Alignment.Top,
     ) {
-        Box(Modifier.padding(top = 6.dp)) { StatusDot(dot, 6) }
-        Spacer(Modifier.size(11.dp))
+        Box(Modifier.padding(top = 6.dp)) {
+            BreathDot(dot, sizeDp = 7, glow = waiting || session.isRunning || session.status == "error", breathe = breathe)
+        }
+        Spacer(Modifier.width(11.dp))
         Column(Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.fillMaxWidth()) {
                 Text(
                     session.title,
-                    style = MaterialTheme.typography.titleSmall,
+                    Modifier.weight(1f).alignByBaseline(),
+                    style = MaterialTheme.typography.titleSmall.copy(letterSpacing = (-0.135).sp),
                     fontWeight = FontWeight.SemiBold,
                     color = TextPrimary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f),
                 )
-                Spacer(Modifier.size(8.dp))
-                MonoLabel(timeAgo(session.updatedAt), color = TextMuted)
+                Spacer(Modifier.width(8.dp))
+                MonoLabel(
+                    timeAgo(session.updatedAt),
+                    color = TextMuted,
+                    modifier = Modifier.alignByBaseline(),
+                )
             }
             Spacer(Modifier.height(3.dp))
             Text(
                 session.preview.ifBlank { session.cwd },
                 style = MaterialTheme.typography.labelLarge,
-                color = TextSecondary,
+                color = TextMuted,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
             Spacer(Modifier.height(8.dp))
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
                 Text(
                     session.cwd.ifBlank { "~" },
                     style = MaterialTheme.typography.labelSmall,
                     color = TextMuted,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false),
+                    modifier = Modifier.weight(1f, fill = false).widthIn(max = 150.dp),
                 )
                 if (session.pendingApprovals > 0) {
-                    Tag("等待审批", Rose)
+                    FootTag("等待审批", Rose)
                 } else if (session.isRunning) {
-                    Tag(statusText(session.status), statusColor(session.status))
+                    // M-P2-03：E.2 只允许 4 态，未知状态不渲染，避免设计外状态文案。
+                    val state = statusText(session.status)
+                    if (state != null) FootTag(state, statusColor(session.status))
                 }
-                if (migrated) Tag("已迁移", Amber)
-                if (!session.writable) Tag("只读", Cyan)
+                if (migrated) FootTag("已迁移", Amber)
+                if (!session.writable) FootTag("只读", Cyan)
             }
         }
-        // 24dp 的图标按钮点起来容易打偏：可点区域撑到 48dp，图标与底色仍按原尺寸绘制（BUG-020）。
-        Box(
-            Modifier
-                .padding(start = 4.dp)
-                .size(48.dp)
-                .clip(RoundedCornerShape(12.dp))
-                .clickable(onClick = onMore),
-            contentAlignment = Alignment.Center,
-        ) {
-            Box(
-                Modifier.size(24.dp).clip(RoundedCornerShape(7.dp)),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(Icons.Outlined.MoreHoriz, "管理会话", tint = TextMuted, modifier = Modifier.size(16.dp))
-            }
-        }
+        SessionMoreButton(onMore)
     }
-    Box(Modifier.fillMaxWidth().padding(start = 27.dp).height(0.7.dp).background(Line.copy(alpha = 0.7f)))
 }
 
+/** MS-08 更多按钮：可视 24、圆角 7，48dp 热区；按压 .07 底 + .94 缩放。 */
+@Composable
+private fun SessionMoreButton(onMore: () -> Unit) {
+    Box(Modifier.offset(x = 10.dp, y = (-2).dp).size(48.dp), contentAlignment = Alignment.Center) {
+        Box(
+            Modifier
+                .size(24.dp)
+                .clip(RoundedCornerShape(7.dp))
+                .tactilePress(scale = 0.94f, pressedBackground = inkOverlay(0.07f), onClick = onMore),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(Icons.Outlined.MoreHoriz, "管理会话", tint = TextMuted, modifier = Modifier.size(16.dp))
+        }
+    }
+}
+
+/** MS-06 脚注 tag：19 高、11sp、padding 0 6。 */
+@Composable
+private fun FootTag(text: String, color: Color) {
+    val shape = RoundedCornerShape(6.dp)
+    Row(
+        Modifier
+            .height(19.dp)
+            .clip(shape)
+            .background(color.copy(alpha = 0.09f))
+            .border(0.6.dp, color.copy(alpha = 0.22f), shape)
+            .padding(horizontal = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(text, style = MaterialTheme.typography.labelSmall, color = color, maxLines = 1)
+    }
+}
+
+/** MB-20..23 重命名：副标题压缩、44 高输入框、只保留长度提示、按钮 46。 */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun RenameSessionSheet(session: Session, onDismiss: () -> Unit, onSave: (String, (String?) -> Unit) -> Unit) {
     var name by remember(session.id) { mutableStateOf(session.name) }
     var error by remember(session.id) { mutableStateOf<String?>(null) }
     var saving by remember(session.id) { mutableStateOf(false) }
+    var focused by remember(session.id) { mutableStateOf(false) }
+    val fieldShape = RoundedCornerShape(10.dp)
     ModalBottomSheet(
         onDismissRequest = onDismiss,
-        containerColor = Panel,
+        containerColor = sheetContainerColor(),
         shape = RoundedCornerShape(topStart = 26.dp, topEnd = 26.dp),
         dragHandle = { CarrySheetGrabber() },
         scrimColor = Color.Black.copy(alpha = 0.66f),
     ) {
-        Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp).padding(bottom = 26.dp)) {
+        SheetSurface {
+          Column(Modifier.fillMaxWidth()) {
             CarrySheetHeader(
                 title = "重命名会话",
-                subtitle = "只影响列表与对话标题 · 不改变 .jsonl 路径",
+                subtitle = "只改显示名，不改写记录",
                 onClose = onDismiss,
             )
             Text("会话名称", style = MaterialTheme.typography.labelSmall, color = TextMuted)
@@ -492,23 +666,35 @@ private fun RenameSessionSheet(session: Session, onDismiss: () -> Unit, onSave: 
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(44.dp)
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(Surface2.copy(alpha = 0.55f))
-                    .border(0.8.dp, LineStrong, RoundedCornerShape(10.dp))
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                    .onFocusChanged { focused = it.isFocused }
+                    // 聚焦时补紫色外光（MB-21）。
+                    .shadow(
+                        elevation = if (focused) 6.dp else 0.dp,
+                        shape = fieldShape,
+                        ambientColor = Violet.copy(alpha = 0.35f),
+                        spotColor = Violet.copy(alpha = 0.55f),
+                    )
+                    .clip(fieldShape)
+                    .background(inkOverlay(0.035f))
+                    .border(1.dp, if (focused) Violet.copy(alpha = 0.55f) else LineStrong, fieldShape)
+                    .padding(horizontal = 12.dp),
+                decorationBox = { inner ->
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.CenterStart) { inner() }
+                },
             )
-            Spacer(Modifier.height(1.dp))
-            Text(
-                "名称可以随时修改；并发重命名以服务端最后写入为准。",
-                style = MaterialTheme.typography.labelSmall,
-                color = TextMuted,
-                modifier = Modifier.padding(top = 7.dp),
-            )
+            Spacer(Modifier.height(7.dp))
+            // MB-22：只保留长度限制，删除并发写入的实现细节。
+            Text("最多 60 个字符", style = MaterialTheme.typography.labelSmall, color = TextMuted)
             if (error != null) {
-                Text(error!!, style = MaterialTheme.typography.bodySmall, color = Rose, modifier = Modifier.padding(top = 8.dp))
+                Text(
+                    error!!,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Rose,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
             }
             Row(Modifier.fillMaxWidth().padding(top = 16.dp), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                CarryActionButton("取消", onDismiss, Modifier.weight(1f), kind = dev.picarry.app.ui.components.ButtonKind.Ghost)
+                CarryActionButton("取消", onDismiss, Modifier.weight(1f), kind = ButtonKind.Ghost, height = 46.dp)
                 CarryActionButton(
                     if (saving) "保存中…" else "保存",
                     onClick = {
@@ -520,33 +706,48 @@ private fun RenameSessionSheet(session: Session, onDismiss: () -> Unit, onSave: 
                     },
                     Modifier.weight(1.45f),
                     enabled = name.isNotBlank() && !saving,
+                    height = 46.dp,
                 )
             }
+          }
         }
     }
 }
 
+/** MB-90 节点选择：设置行样式，删除长副标题，无涟漪。 */
 @Composable
 private fun NodePickerSheet(onlineNodes: List<Node>, onDismiss: () -> Unit, onPick: (String) -> Unit) {
-    Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp).padding(bottom = 28.dp)) {
-        CarrySheetHeader("选择节点", "新会话建在所选节点上。", onClose = onDismiss)
+    Column(Modifier.fillMaxWidth()) {
+        CarrySheetHeader("选择节点", onClose = onDismiss)
+        if (onlineNodes.isEmpty()) {
+            Text("没有在线的节点", style = MaterialTheme.typography.bodySmall, color = TextMuted)
+            return@Column
+        }
         onlineNodes.forEach { node ->
+            val shape = RoundedCornerShape(12.dp)
             Row(
                 Modifier
                     .fillMaxWidth()
                     .height(48.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(Surface2.copy(alpha = 0.45f))
-                    .border(0.8.dp, Line, RoundedCornerShape(12.dp))
-                    .clickable { onPick(node.id) }
+                    .clip(shape)
+                    .background(inkOverlay(0.03f))
+                    .border(1.dp, Line, shape)
+                    .tactilePress(scale = 0.97f, onClick = { onPick(node.id) })
                     .padding(horizontal = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 StatusDot(Mint, 6)
-                Spacer(Modifier.size(10.dp))
-                Text(node.name, style = MaterialTheme.typography.titleSmall, color = TextPrimary, maxLines = 1, modifier = Modifier.weight(1f))
+                Spacer(Modifier.width(10.dp))
+                Text(
+                    node.name,
+                    style = MaterialTheme.typography.titleSmall,
+                    color = TextPrimary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
                 Tag("在线", Mint)
-                Spacer(Modifier.size(8.dp))
+                Spacer(Modifier.width(8.dp))
                 Icon(Icons.Outlined.ChevronRight, null, tint = TextMuted, modifier = Modifier.size(15.dp))
             }
             Spacer(Modifier.height(7.dp))
@@ -554,6 +755,7 @@ private fun NodePickerSheet(onlineNodes: List<Node>, onDismiss: () -> Unit, onPi
     }
 }
 
+/** MB-91 目录选择：头部只写“选择目录”+ 节点名；行 44 高、白 .03 底；底部按钮 46。 */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun DirectoryPickerSheet(
@@ -602,11 +804,9 @@ private fun DirectoryPickerSheet(
     Column(
         Modifier
             .fillMaxWidth()
-            .fillMaxHeight(0.88f)
-            .padding(horizontal = 18.dp)
-            .padding(bottom = 20.dp),
+            .fillMaxHeight(0.88f),
     ) {
-        CarrySheetHeader("选择目录", "在 ${node.name} 上的工作目录新建会话。", onClose = onDismiss)
+        CarrySheetHeader("选择目录", node.name, onClose = onDismiss)
         if (!canBrowse) {
             Text("节点版本较旧，升级后可选择目录", style = MaterialTheme.typography.bodySmall, color = Amber)
             Spacer(Modifier.height(10.dp))
@@ -615,11 +815,11 @@ private fun DirectoryPickerSheet(
         }
 
         if (error != null) {
-            Text(error!!, style = MaterialTheme.typography.bodySmall, color = Rose)
+            Text(error!!, style = MaterialTheme.typography.bodySmall, color = Rose, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Spacer(Modifier.height(8.dp))
             CarryActionButton("重试", onClick = {
                 if (roots == null) reloadTick += 1 else scope.launch { load(listing?.path ?: "") }
-            }, kind = dev.picarry.app.ui.components.ButtonKind.Ghost)
+            }, kind = ButtonKind.Ghost)
             Spacer(Modifier.height(8.dp))
         }
 
@@ -628,8 +828,13 @@ private fun DirectoryPickerSheet(
             Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), verticalAlignment = Alignment.CenterVertically) {
                 crumbs.forEachIndexed { index, crumb ->
                     val last = index == crumbs.lastIndex
+                    val crumbModifier = if (last) {
+                        Modifier.sizeIn(minHeight = 40.dp)
+                    } else {
+                        Modifier.sizeIn(minHeight = 40.dp).tactilePress(scale = 0.96f) { scope.launch { load(crumb) } }
+                    }
                     Box(
-                        Modifier.sizeIn(minHeight = 40.dp).clickable(enabled = !last) { scope.launch { load(crumb) } }.padding(horizontal = 4.dp),
+                        crumbModifier.padding(horizontal = 4.dp),
                         contentAlignment = Alignment.Center,
                     ) {
                         Text(displayName(crumb), style = MaterialTheme.typography.labelSmall, color = if (last) TextPrimary else Violet, maxLines = 1)
@@ -648,13 +853,18 @@ private fun DirectoryPickerSheet(
                         Modifier
                             .height(29.dp)
                             .clip(CircleShape)
-                            .background(if (active) Violet.copy(alpha = 0.16f) else Color.Transparent)
-                            .border(0.8.dp, if (active) Violet.copy(alpha = 0.30f) else LineStrong, CircleShape)
-                            .clickable { scope.launch { load(path) } }
+                            .background(if (active) Violet.copy(alpha = 0.16f) else inkOverlay(0.02f))
+                            .border(1.dp, if (active) Violet.copy(alpha = 0.40f) else Line, CircleShape)
+                            .tactilePress(scale = 0.96f) { scope.launch { load(path) } }
                             .padding(horizontal = 11.dp),
                         contentAlignment = Alignment.Center,
                     ) {
-                        Text(displayName(path), style = MaterialTheme.typography.labelLarge, color = if (active) VioletSoft else TextSecondary, maxLines = 1)
+                        Text(
+                            displayName(path),
+                            style = MaterialTheme.typography.labelLarge,
+                            color = if (active) AccentSoft else TextSecondary,
+                            maxLines = 1,
+                        )
                     }
                 }
             }
@@ -675,23 +885,31 @@ private fun DirectoryPickerSheet(
                         item { Text("这个目录下没有子目录", style = MaterialTheme.typography.bodySmall, color = TextMuted) }
                     }
                     items(current.entries, key = { it.path }) { entry ->
+                        val rowShape = RoundedCornerShape(12.dp)
                         Row(
                             Modifier
                                 .fillMaxWidth()
-                                .sizeIn(minHeight = 44.dp)
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(Surface2.copy(alpha = 0.42f))
-                                .border(0.8.dp, Line, RoundedCornerShape(12.dp))
-                                .clickable { scope.launch { load(entry.path) } }
-                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                                .height(44.dp)
+                                .clip(rowShape)
+                                .background(inkOverlay(0.03f))
+                                .border(1.dp, Line, rowShape)
+                                .tactilePress(scale = 0.97f) { scope.launch { load(entry.path) } }
+                                .padding(horizontal = 12.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Icon(Icons.Outlined.Folder, null, tint = Amber, modifier = Modifier.size(16.dp))
-                            Spacer(Modifier.size(8.dp))
-                            Text(entry.name, style = MaterialTheme.typography.titleSmall, color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                entry.name,
+                                style = MaterialTheme.typography.titleSmall,
+                                color = TextPrimary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f),
+                            )
                             if (entry.hasSessions) {
                                 StatusDot(Mint, 4)
-                                Spacer(Modifier.size(8.dp))
+                                Spacer(Modifier.width(8.dp))
                             }
                             Icon(Icons.Outlined.ChevronRight, null, tint = TextMuted, modifier = Modifier.size(15.dp))
                         }
@@ -705,12 +923,19 @@ private fun DirectoryPickerSheet(
 
         Spacer(Modifier.height(12.dp))
         if (createError != null) {
-            Text(createError, style = MaterialTheme.typography.bodySmall, color = Rose)
+            Text(
+                createError,
+                style = MaterialTheme.typography.bodySmall,
+                color = Rose,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
             Spacer(Modifier.height(8.dp))
         }
         val target = listing?.path
         CarryActionButton(
-            if (isCreating) "创建中…" else "在此目录新建",
+            // M-P2-04 / E.2.7：目录选择主按钮文案“使用此目录”。
+            if (isCreating) "创建中…" else "使用此目录",
             onClick = { onCreate(target ?: "") },
             modifier = Modifier.fillMaxWidth(),
             enabled = target != null && !isCreating,
@@ -721,30 +946,108 @@ private fun DirectoryPickerSheet(
 
 @Composable
 private fun DefaultCwdRow(isCreating: Boolean, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(12.dp)
     Row(
         Modifier
             .fillMaxWidth()
             .height(48.dp)
-            .clip(RoundedCornerShape(12.dp))
-            .background(Surface2.copy(alpha = 0.45f))
-            .border(0.8.dp, Line, RoundedCornerShape(12.dp))
-            .clickable(enabled = !isCreating, onClick = onClick)
+            .clip(shape)
+            .background(inkOverlay(0.03f))
+            .border(1.dp, Line, shape)
+            .tactilePress(scale = 0.97f, onClick = onClick)
             .padding(horizontal = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(Icons.Outlined.Folder, null, tint = Violet, modifier = Modifier.size(16.dp))
-        Spacer(Modifier.size(8.dp))
-        Text("使用节点默认目录", style = MaterialTheme.typography.titleSmall, color = TextPrimary, modifier = Modifier.weight(1f))
+        Spacer(Modifier.width(8.dp))
+        Text(
+            "使用节点默认目录",
+            style = MaterialTheme.typography.titleSmall,
+            color = if (isCreating) TextMuted else TextPrimary,
+            modifier = Modifier.weight(1f),
+        )
         Icon(Icons.Outlined.ChevronRight, null, tint = TextMuted, modifier = Modifier.size(15.dp))
     }
 }
 
-private fun statusText(status: String) = when (status) {
-    "streaming" -> "生成中"
-    "waiting_approval" -> "等待审批"
-    "waiting_input" -> "等待输入"
-    "error" -> "出错"
-    else -> "空闲"
+@Composable
+private fun Modifier.tactilePress(
+    scale: Float = 0.975f,
+    pressedBackground: Color = Color.Transparent,
+    onClick: () -> Unit,
+): Modifier {
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val value by animateFloatAsState(
+        targetValue = if (pressed) scale else 1f,
+        animationSpec = tween(durationMillis = 150, easing = CubicBezierEasing(0.2f, 0f, 0f, 1f)),
+        label = "pressScale",
+    )
+    return this
+        .graphicsLayer { scaleX = value; scaleY = value }
+        .background(if (pressed) pressedBackground else Color.Transparent)
+        .clickable(interactionSource = interaction, indication = null, onClick = onClick)
+}
+
+@Composable
+private fun isDarkUi(): Boolean = MaterialTheme.colorScheme.background.luminance() < 0.5f
+
+/** token: --ink-rgb 覆盖色；深色白、浅色 #1A1A2E。 */
+@Composable
+private fun inkOverlay(alpha: Float): Color =
+    (if (isDarkUi()) Color.White else InkOverlayLight).copy(alpha = alpha)
+
+@Composable
+private fun chipCountColor(): Color =
+    if (isDarkUi()) ChipCountActive.copy(alpha = 0.75f) else AccentSoft.copy(alpha = 0.85f)
+
+/** MS-07 行状态点：7dp，等待审批玫色呼吸（1.6s），其余静止。 */
+@Composable
+private fun BreathDot(color: Color, sizeDp: Int = 7, glow: Boolean = true, breathe: Boolean = false) {
+    val alpha = if (breathe) breathingAlpha() else 1f
+    Box(
+        Modifier.size(sizeDp.dp).drawBehind {
+            val radius = this.size.minDimension / 2f
+            if (glow) {
+                drawCircle(color.copy(alpha = 0.10f * alpha), radius = radius + 3.dp.toPx())
+                drawCircle(color.copy(alpha = 0.20f * alpha), radius = radius + 1.5.dp.toPx())
+            }
+            drawCircle(color.copy(alpha = alpha), radius = radius)
+        },
+    )
+}
+
+@Composable
+private fun breathingAlpha(): Float {
+    val transition = rememberInfiniteTransition(label = "breathe")
+    val value by transition.animateFloat(
+        initialValue = 1f,
+        targetValue = 0.42f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 800, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "breatheAlpha",
+    )
+    return value
+}
+
+/** MS-01 副标题“今天 N 个活跃”的当天判定；非 ISO 文本（如“刚刚”）按今天处理。 */
+private fun isActiveToday(iso: String, now: Long = System.currentTimeMillis()): Boolean {
+    if (iso.isBlank()) return false
+    val epoch = runCatching { java.time.Instant.parse(iso).toEpochMilli() }.getOrNull() ?: return true
+    val zone = java.time.ZoneId.systemDefault()
+    return java.time.Instant.ofEpochMilli(epoch).atZone(zone).toLocalDate() ==
+        java.time.Instant.ofEpochMilli(now).atZone(zone).toLocalDate()
+}
+
+private fun statusText(status: String): String? = when (status) {
+    // M-P2-03 / E.2：只映射 运行中 / 等待审批 / 已完成 / 失败；其余返回 null（不渲染）。
+    "streaming", "running", "in_progress" -> "运行中"
+    "waiting_approval", "waiting_input" -> "等待审批"
+    "completed", "finished", "done", "idle" -> "已完成"
+    "error", "failed" -> "失败"
+    else -> null
 }
 
 private fun timeAgo(iso: String): String {
@@ -758,5 +1061,5 @@ private fun timeAgo(iso: String): String {
             mins < 24 * 60 -> "${mins / 60} 小时前"
             else -> "${mins / 1440} 天前"
         }
-    }.getOrDefault("")
+    }.getOrDefault(if (iso.length <= 8) iso else "")
 }

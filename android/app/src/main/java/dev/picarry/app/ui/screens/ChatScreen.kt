@@ -3,27 +3,51 @@ package dev.picarry.app.ui.screens
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.RectF
+import android.graphics.Typeface
+import android.text.SpannableStringBuilder
+import android.text.Spanned
 import android.text.method.LinkMovementMethod
+import android.text.style.ForegroundColorSpan
+import android.text.style.ReplacementSpan
 import android.util.Base64
 import java.util.UUID
 import android.widget.TextView
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -55,6 +79,7 @@ import androidx.compose.material.icons.outlined.Compress
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.PowerSettingsNew
 import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Edit
@@ -69,12 +94,12 @@ import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.PowerSettingsNew
 import androidx.compose.material.icons.outlined.Psychology
+import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material.icons.outlined.Stop
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -95,23 +120,33 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.ReadOnlyComposable
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -121,6 +156,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.res.ResourcesCompat
 import java.io.File
 import dev.picarry.app.R
@@ -165,10 +201,10 @@ import dev.picarry.app.ui.components.NullableStringSaver
 import dev.picarry.app.ui.components.Pill
 import dev.picarry.app.ui.components.StatusDot
 import dev.picarry.app.ui.components.Tag
-import dev.picarry.app.ui.components.pressClickable
 import dev.picarry.app.ui.components.riskColor
 import dev.picarry.app.ui.components.statusColor
 import dev.picarry.app.ui.theme.Amber
+import dev.picarry.app.ui.theme.AccentSoft
 import dev.picarry.app.ui.theme.Cyan
 import dev.picarry.app.ui.theme.Mint
 import dev.picarry.app.ui.theme.Ink
@@ -188,7 +224,10 @@ import dev.picarry.app.ui.theme.Violet
 import dev.picarry.app.ui.theme.VioletSoft
 import io.noties.markwon.AbstractMarkwonPlugin
 import io.noties.markwon.Markwon
+import io.noties.markwon.MarkwonSpansFactory
 import io.noties.markwon.core.MarkwonTheme
+import org.commonmark.node.Code
+import org.commonmark.node.StrongEmphasis
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
@@ -222,6 +261,213 @@ private val LocalImageBytes = compositionLocalOf<suspend (ImagePart) -> ByteArra
 // 与协议上限保持一致，避免 UI 里散落魔法数字（B-46）。
 private const val MAX_IMAGES_PER_MESSAGE = 10
 private const val MAX_IMAGE_MB = 20
+
+// ---------------------------------------------------------------------------
+// 0.3.2 设计 token（Theme.kt 暂无同名 token；本文件私有，可随 Theme 迁移）
+// ---------------------------------------------------------------------------
+// token: MC-07 用户气泡正文 #EEEAFF
+private val UserBubbleInk = Color(0xFFEEEAFF)
+// token: MC-07 用户气泡时间 rgba(220,214,255,.5)
+private val UserBubbleStamp = Color(0xFFDCD6FF)
+// token: MC-08 AI 正文 #DCDCE8
+private val AssistantInk = Color(0xFFDCDCE8)
+// token: MC-08 代码块底 #07070D
+private val CodeBlockBg = Color(0xFF07070D)
+// token: MC-08 代码块文字 #B9B5CC
+private val CodeBlockInk = Color(0xFFB9B5CC)
+// token: MC-11 工具输出 #9A9AB4
+private val ToolOutputInk = Color(0xFF9A9AB4)
+// token: MC-12 审批命令 #FFD7DE
+private val ApprovalCommandInk = Color(0xFFFFD7DE)
+// token: MC-12 审批工具名 #FFC2CD
+private val ApprovalToolInk = Color(0xFFFFC2CD)
+// token: MC-12 审批脚注 rgba(255,190,200,.6)
+private val ApprovalFootInk = Color(0xFFFFBEC8)
+// token: MQ-04 打断文字 #FF9AAC
+private val StopInk = Color(0xFFFF9AAC)
+// token: B.5.1 玻璃卡片底白 .022 / .045
+private val GlassWhisper = Color.White.copy(alpha = 0.022f)
+// token: 输入框内高光白 .06
+private val InnerHighlight = Color.White.copy(alpha = 0.06f)
+// token: B.6 标准曲线 cubic-bezier(.2,0,0,1)
+private val ChatEase = CubicBezierEasing(0.2f, 0f, 0f, 1f)
+// token: MQ-01 输入区渐变 rgba(9,9,16,.92) / rgba(8,8,14,.99)
+private val ComposerGradMid = Color(0xFF090910)
+private val ComposerGradEnd = Color(0xFF08080E)
+// token: MQ-05 输入框渐变 rgba(27,27,39,.85) → rgba(21,21,31,.92)
+private val InputGradTop = Color(0xFF1B1B27)
+private val InputGradBottom = Color(0xFF15151F)
+// token: MQ-08 发送 #8D7DFF → #5F4DF0
+private val SendGradStart = Color(0xFF8D7DFF)
+private val SendGradEnd = Color(0xFF5F4DF0)
+
+// token: MB-01 sheet 渐变 #101019 → #0B0B13
+private val SheetGradTop = Color(0xFF101019)
+private val SheetGradBottom = Color(0xFF0B0B13)
+
+// token: MB-01 sheet 顶部 1px 白 .14
+private val SheetHairline = Color.White.copy(alpha = 0.14f)
+
+// token: MC-06 新消息浮标底 rgba(20,18,34,.92)
+private val NewMessagePillBg = Color(0xEB141222)
+// token: MC-08 行内 code 紫底（violet .14 叠在 panel 上）
+private val InlineCodeBg = Color(0xFF191732)
+// token: B.5.3 图片预览遮罩 rgb(3,3,8) @66%
+private val PhotoScrim = Color(0xFF030308)
+// token: MB-71 审批后果主文案 #FFC4CE
+private val ApprovalSheetPrimaryInk = Color(0xFFFFC4CE)
+// token: MB-72 审批命令块原文 #FFD9E0
+private val ApprovalSheetCommandInk = Color(0xFFFFD9E0)
+// token: MC-11 状态 tag 成功文字（design .tag.green #A6F4CF）
+private val ToolTagGreenInk = Color(0xFFA6F4CF)
+// token: MC-11 状态 tag 失败文字（design .tag.rose #FFADBC）
+private val ToolTagRoseInk = Color(0xFFFFADBC)
+
+/** 设计稿按压：整体缩放 + 背景无涟漪（AC-01/H.5），显式 tween 而非默认 spring。 */
+@Composable
+private fun Modifier.chatPress(onClick: () -> Unit, scale: Float = 0.985f, enabled: Boolean = true): Modifier {
+    val source = remember { MutableInteractionSource() }
+    val pressed by source.collectIsPressedAsState()
+    val value by animateFloatAsState(
+        targetValue = if (pressed) scale else 1f,
+        animationSpec = tween(durationMillis = 160, easing = ChatEase),
+        label = "chatPress",
+    )
+    return this.graphicsLayer { scaleX = value; scaleY = value }
+        .clickable(interactionSource = source, indication = null, enabled = enabled, onClick = onClick)
+}
+
+/** 无缩放、无涟漪的点按区域（行内文字、图标等）。 */
+@Composable
+private fun Modifier.chatClick(enabled: Boolean = true, onClick: () -> Unit): Modifier {
+    val source = remember { MutableInteractionSource() }
+    return this.clickable(interactionSource = source, indication = null, enabled = enabled, onClick = onClick)
+}
+
+/** 审批风险的中文标签（H.7：英文只保留数据值，风险标签必须中文）。 */
+private fun riskLabel(risk: String): String = when (risk.lowercase()) {
+    "critical" -> "高风险 · 不可逆"
+    "high" -> "高风险"
+    "medium" -> "中风险"
+    "low" -> "低风险"
+    else -> "需审批"
+}
+
+/** 风险色：critical/high 玫、medium 琥珀、low 薄荷。 */
+@Composable
+@ReadOnlyComposable
+private fun chatRiskColor(risk: String): Color = when (risk.lowercase()) {
+    "critical", "high" -> Rose
+    "medium" -> Amber
+    "low" -> Mint
+    else -> Amber
+}
+
+/** MC-11：名称后的状态胶囊文案（自动允许/成功/已应用/失败）。 */
+private fun toolTagLabel(tool: ToolCall): String = when {
+    tool.status == "running" -> "运行中"
+    tool.isError || tool.status == "error" -> "失败"
+    tool.name.contains("apply", ignoreCase = true) || tool.name.contains("patch", ignoreCase = true) -> "已应用"
+    else -> "成功"
+}
+
+/** MC-11：右侧「状态文字」文案；成功后统一显示“成功”。 */
+private fun toolStateLabel(tool: ToolCall): String = when {
+    tool.status == "running" -> "运行中"
+    tool.isError || tool.status == "error" -> "失败"
+    else -> "成功"
+}
+
+/** MC-11：状态色（成功绿/失败玫/运行紫）。 */
+@Composable
+@ReadOnlyComposable
+private fun toolStateColor(tool: ToolCall): Color = when {
+    tool.status == "running" -> VioletSoft
+    tool.isError || tool.status == "error" -> Rose
+    else -> Mint
+}
+
+/** MC-11：状态 tag 按设计 `.tag` 形状（21dp 高、圆角 6dp、mono 11、1dp 描边）。 */
+@Composable
+private fun ToolStateTag(tool: ToolCall) {
+    val running = tool.status == "running"
+    val failed = tool.isError || tool.status == "error"
+    val bg = when {
+        running -> Violet.copy(alpha = 0.12f)
+        failed -> Rose.copy(alpha = 0.10f)
+        else -> Mint.copy(alpha = 0.09f)
+    }
+    val stroke = when {
+        running -> Violet.copy(alpha = 0.30f)
+        failed -> Rose.copy(alpha = 0.28f)
+        else -> Mint.copy(alpha = 0.26f)
+    }
+    val ink = when {
+        running -> AccentSoft
+        failed -> ToolTagRoseInk
+        else -> ToolTagGreenInk
+    }
+    val shape = RoundedCornerShape(6.dp)
+    Row(
+        Modifier.height(21.dp).clip(shape).background(bg).border(1.dp, stroke, shape).padding(horizontal = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            toolTagLabel(tool),
+            style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace, fontSize = 11.sp),
+            color = ink,
+        )
+    }
+}
+
+private fun startOfLocalDay(ms: Long): Long = java.util.Calendar.getInstance().apply {
+    timeInMillis = ms
+    set(java.util.Calendar.HOUR_OF_DAY, 0)
+    set(java.util.Calendar.MINUTE, 0)
+    set(java.util.Calendar.SECOND, 0)
+    set(java.util.Calendar.MILLISECOND, 0)
+}.timeInMillis
+
+/** MC-05 日期分隔文案：今天 9:38 / 昨天 22:14 / 11月20日。 */
+private fun chatDateLabel(tsMs: Long): String {
+    if (tsMs <= 0) return ""
+    val today = startOfLocalDay(System.currentTimeMillis())
+    val day = startOfLocalDay(tsMs)
+    val clock = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date(tsMs))
+    return when (day) {
+        today -> "今天 $clock"
+        today - 86_400_000L -> "昨天 $clock"
+        else -> java.text.SimpleDateFormat("M月d日", java.util.Locale.getDefault()).format(java.util.Date(tsMs))
+    }
+}
+
+private sealed interface ChatRow { val key: String }
+
+private data class ChatDateRow(val label: String) : ChatRow {
+    override val key: String get() = "date:$label"
+}
+
+private data class ChatMessageRow(val message: ChatMessage) : ChatRow {
+    override val key: String get() = message.id
+}
+
+/** 在消息之间插入日期分隔（MC-05）；无时间戳的本地消息不硬造日期。 */
+private fun buildChatRows(messages: List<ChatMessage>): List<ChatRow> {
+    val rows = ArrayList<ChatRow>(messages.size + 4)
+    var lastDay = Long.MIN_VALUE
+    messages.forEach { msg ->
+        val ts = if (msg.tsMs > 0) msg.tsMs else msg.createdAt
+        if (ts > 0) {
+            val day = startOfLocalDay(ts)
+            if (day != lastDay) {
+                rows += ChatDateRow(chatDateLabel(ts))
+                lastDay = day
+            }
+        }
+        rows += ChatMessageRow(msg)
+    }
+    return rows
+}
 
 /** 图片占位文案统一用 KB/MB，避免不足 1 MB 显示成 "0 MB"（R-06/R-15）。 */
 private fun formatImageSize(size: Long): String =
@@ -275,7 +521,7 @@ internal fun savePendingImagesTo(dir: File, items: List<OutgoingImage>) {
     dir.mkdirs()
     val index = StringBuilder()
     items.forEach { item ->
-        // 已上传项也要写盘：里面是压缩后的小图，用于旋转/重建后仍能看到缩略图（BUG-007）。
+        // 已上传项也要写盘：里面是压缩后的小图，旋转/重建后仍能看到缩略图（BUG-007）。
         if (item.bytes.isNotEmpty()) {
             val f = File(dir, item.id + ".bin")
             if (!f.isFile || f.length() != item.bytes.size.toLong()) f.writeBytes(item.bytes)
@@ -440,6 +686,22 @@ fun ChatScreen(
             .collect { (count, bottom) -> if (count > 0) stickBottom = bottom }
     }
 
+    // MC-05：把消息按日期切成「日期分隔行 + 消息行」，只在跨天时插一条。
+    val chatRows = remember(messages) { buildChatRows(messages) }
+    // MC-06：用户上滑阅读时累计新消息条数；回到底部（stickBottom）后清零。
+    var seenMessageCount by remember(sessionId) { mutableStateOf(-1) }
+    var unseenMessages by remember(sessionId) { mutableStateOf(0) }
+    LaunchedEffect(messages.size) {
+        val previous = seenMessageCount
+        if (previous >= 0 && messages.size > previous && !stickBottom) {
+            unseenMessages += messages.size - previous
+        }
+        seenMessageCount = messages.size
+    }
+    LaunchedEffect(stickBottom) {
+        if (stickBottom) unseenMessages = 0
+    }
+
     fun updateImage(id: String, transform: (OutgoingImage) -> OutgoingImage) {
         outgoing = outgoing.map { if (it.id == id) transform(it) else it }
     }
@@ -573,7 +835,7 @@ fun ChatScreen(
                 repo.saveDraft(nodeId, sessionId, latestText)
                 repo.copyDraft(nodeId, sessionId, m.toSessionId)
                 // 事件是唯一导航来源：doFork 不再自己跳，避免双路径竞态（R-16）。
-                Toast.makeText(context, "已迁移到 fork 会话，草稿已保留", Toast.LENGTH_LONG).show()
+                Toast.makeText(context, "已迁移到新分支", Toast.LENGTH_LONG).show()
                 onMigrated(m.toSessionId)
             }
         }
@@ -647,16 +909,16 @@ fun ChatScreen(
         }.getOrNull()
     }) {
     Column(Modifier.fillMaxSize().statusBarsPadding().imePadding()) {
-        Spacer(Modifier.height(28.dp))
+        Spacer(Modifier.height(36.dp))
         Row(
             Modifier.fillMaxWidth().height(54.dp).padding(horizontal = 14.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             CarryIconButton(Icons.AutoMirrored.Outlined.ArrowBack, "返回", onBack, plain = true, size = 34)
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                    StatusDot(if (session?.isRunning == true) Amber else if (link[nodeId] == LinkState.Online) Mint else TextMuted, 4)
+                    GlowDot(if (session?.isRunning == true) Amber else if (link[nodeId] == LinkState.Online) Mint else TextMuted)
                     Text(
                         buildString {
                             append(node?.name ?: nodeId.take(8))
@@ -672,7 +934,12 @@ fun ChatScreen(
                 Spacer(Modifier.height(2.dp))
                 Text(
                     session?.title ?: "会话",
-                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+                    style = MaterialTheme.typography.titleMedium.copy(
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 15.5.sp,
+                        letterSpacing = (-0.31).sp,
+                        lineHeight = 19.sp,
+                    ),
                     color = TextPrimary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -682,30 +949,29 @@ fun ChatScreen(
         }
 
         Row(
-            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 18.dp).padding(bottom = 9.dp),
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
+                .padding(start = 20.dp, end = 20.dp, top = 2.dp, bottom = 9.dp),
             horizontalArrangement = Arrangement.spacedBy(5.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             ChatMetaChip(
                 currentName.ifBlank { "默认模型" },
-                VioletSoft,
                 icon = Icons.Outlined.AutoAwesome,
                 onClick = { showModels = true },
             )
-            ChatMetaChip("thinking · $currentThinking", Cyan, onClick = { showModels = true })
-            ChatMetaChip(displayName(session?.cwd.orEmpty()).ifBlank { "~" }, TextMuted)
+            ChatMetaChip("思考 $currentThinking", onClick = { showModels = true })
+            ChatMetaChip(displayName(session?.cwd.orEmpty()).ifBlank { "~" })
         }
 
         if (migrationNotice) {
-            NoticeBanner("已迁移到 fork 会话 · 旧会话已停止写入", Amber, onClose = { migrationNotice = false })
+            MigrationBanner(onClose = { migrationNotice = false })
         }
 
         if (session?.writable == false && !migrationNotice) {
-            NoticeBanner(
+            ReadOnlyBar(
                 // 只读原因必须按真实来源判断：这里已经在 `writable == false` 分支内，
                 // 再用 readOnly（含 writable 条件）判断会让「本机终端正在写」永不出现（BUG-025）。
-                if (migrated.contains(key)) "该会话已迁移，当前为只读" else "本机终端正在写这个会话，当前为只读",
-                Amber,
+                if (migrated.contains(key)) "只读 · 该会话已迁移" else "只读 · 节点未开放写入",
             )
         }
         if (openError != null) {
@@ -716,39 +982,77 @@ fun ChatScreen(
             )
         }
 
-        LazyColumn(
-            state = listState,
-            modifier = Modifier.weight(1f).fillMaxWidth(),
-            contentPadding = PaddingValues(horizontal = 18.dp, vertical = 10.dp),
-            verticalArrangement = Arrangement.spacedBy(15.dp),
-        ) {
-            items(messages, key = { it.id }) { msg ->
-                when (msg.role) {
-                    "user" -> UserBubble(msg)
-                    "tool" -> msg.tool?.let { ToolCard(it) }
-                    "system" -> SystemBubble(msg)
-                    else -> AssistantBlock(msg)
-                }
-                // 总结行插在本轮最后一条消息之后（任意角色）：用户说话后也能一眼看到刚才那轮花了多少。
-                turnByAnchor[msg.id]?.let { turn ->
-                    TurnSummaryRow(turn = turn, onClick = { openTurnAnchor = turn.anchorMessageId })
-                }
-            }
-            items(pending, key = { "ap-${it.id}" }) { approval ->
-                ApprovalCard(approval) { openApprovalId = approval.id }
-            }
-            if (messages.isEmpty() && pending.isEmpty()) {
-                item {
-                    Column(Modifier.fillMaxWidth().padding(top = 60.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                        Box(Modifier.size(46.dp).clip(RoundedCornerShape(14.dp)).background(Violet.copy(alpha = 0.10f)).border(0.8.dp, Violet.copy(alpha = 0.25f), RoundedCornerShape(14.dp)), contentAlignment = Alignment.Center) {
-                            Icon(Icons.Outlined.Terminal, null, tint = VioletSoft, modifier = Modifier.size(22.dp))
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 10.dp, bottom = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(15.dp),
+            ) {
+                items(chatRows, key = { it.key }) { row ->
+                    when (row) {
+                        is ChatDateRow -> DateSeparator(row.label)
+                        is ChatMessageRow -> {
+                            val msg = row.message
+                            when (msg.role) {
+                                "user" -> UserBubble(msg)
+                                "tool" -> msg.tool?.let { ToolCard(it) }
+                                "system" -> SystemBubble(msg)
+                                else -> AssistantBlock(msg)
+                            }
+                            // 总结行插在本轮最后一条消息之后（任意角色）：用户说话后也能一眼看到刚才那轮花了多少。
+                            turnByAnchor[msg.id]?.let { turn ->
+                                TurnSummaryRow(turn = turn, onClick = { openTurnAnchor = turn.anchorMessageId })
+                            }
                         }
-                        Spacer(Modifier.height(12.dp))
-                        Text("会话已连接", style = MaterialTheme.typography.titleSmall, color = TextSecondary)
-                        Spacer(Modifier.height(2.dp))
-                        Text("在下方输入消息，pi 会在电脑上执行", style = MaterialTheme.typography.labelLarge, color = TextMuted)
                     }
                 }
+                items(pending, key = { "ap-${it.id}" }) { approval ->
+                    ApprovalCard(approval) { openApprovalId = approval.id }
+                }
+                if (messages.isEmpty() && pending.isEmpty()) {
+                    item {
+                        Column(Modifier.fillMaxWidth().padding(top = 60.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                            Box(
+                                Modifier.size(46.dp).clip(RoundedCornerShape(14.dp))
+                                    .background(Violet.copy(alpha = 0.10f))
+                                    .border(0.8.dp, Violet.copy(alpha = 0.25f), RoundedCornerShape(14.dp)),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Icon(Icons.Outlined.Terminal, null, tint = VioletSoft, modifier = Modifier.size(22.dp))
+                            }
+                            Spacer(Modifier.height(12.dp))
+                            Text(
+                                "会话已连接",
+                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                                color = TextPrimary,
+                            )
+                            Spacer(Modifier.height(2.dp))
+                            Text("输入消息开始", style = MaterialTheme.typography.labelLarge, color = TextMuted)
+                        }
+                    }
+                }
+            }
+            // 顶部 26dp 渐隐遮罩：列表滚到头部下方时柔化边界（MC-17），不拦截触摸。
+            Box(
+                Modifier.align(Alignment.TopCenter).fillMaxWidth().height(26.dp)
+                    .background(Brush.verticalGradient(listOf(Ink.copy(alpha = 0.92f), Ink.copy(alpha = 0f)))),
+            )
+            // MC-06 新消息浮标：不在底部且有新消息时出现，点按回到底部。
+            androidx.compose.animation.AnimatedVisibility(
+                visible = unseenMessages > 0 && !stickBottom,
+                enter = fadeIn(tween(durationMillis = 180, easing = ChatEase)),
+                exit = fadeOut(tween(durationMillis = 180, easing = ChatEase)),
+                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp),
+            ) {
+                NewMessagePill(
+                    count = unseenMessages,
+                    onClick = {
+                        unseenMessages = 0
+                        scope.launch { runCatching { listState.animateScrollToItem(chatRows.size + pending.size) } }
+                        stickBottom = true
+                    },
+                )
             }
         }
 
@@ -763,27 +1067,29 @@ fun ChatScreen(
             }
         }
         failedSend?.let { failure ->
+            // MC-18：发送失败只在列表上方保留这一处，助手块里不再重复。
             Row(
-                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
-                    .clip(RoundedCornerShape(10.dp)).background(Rose.copy(alpha = 0.10f)).padding(10.dp),
+                Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 4.dp)
+                    .clip(RoundedCornerShape(9.dp)).background(Rose.copy(alpha = 0.08f)).padding(start = 10.dp, top = 6.dp, bottom = 6.dp, end = 2.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Column(Modifier.weight(1f)) {
-                    Text("发送失败", style = MaterialTheme.typography.labelMedium, color = Rose)
-                    Text(
-                        failure.error,
-                        style = MaterialTheme.typography.labelSmall, color = TextSecondary,
-                        maxLines = 2, overflow = TextOverflow.Ellipsis,
-                    )
-                }
-                TextButton(onClick = {
-                    repo.sendPrompt(failure.nodeId, failure.sessionId, failure.text, failure.mode, failure.images)
-                    failedSend = null
-                }) { Text("重试", color = Cyan) }
-                Icon(
-                    Icons.Outlined.Close, "忽略", tint = TextMuted,
-                    modifier = Modifier.size(15.dp).clickable { failedSend = null },
+                Text(
+                    "发送失败：${failure.error}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Rose,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
                 )
+                Box(
+                    Modifier.height(44.dp).clip(RoundedCornerShape(8.dp))
+                        .chatClick {
+                            repo.sendPrompt(failure.nodeId, failure.sessionId, failure.text, failure.mode, failure.images)
+                            failedSend = null
+                        }
+                        .padding(horizontal = 10.dp),
+                    contentAlignment = Alignment.Center,
+                ) { Text("重试", style = MaterialTheme.typography.labelLarge, color = Cyan) }
             }
         }
         Composer(
@@ -850,8 +1156,11 @@ fun ChatScreen(
             scrimColor = Color.Black.copy(alpha = 0.66f),
             dragHandle = null,
         ) {
+            SheetSurface {
             SessionMenuSheet(
                 name = session?.title ?: "会话",
+                nodeLabel = node?.name.orEmpty(),
+                sessionId = sessionId,
                 readOnly = readOnly,
                 onClose = { showMenu = false },
                 onRename = {
@@ -875,12 +1184,14 @@ fun ChatScreen(
                     repo.closeSession(nodeId, sessionId) { onBack() }
                 },
             )
+            }
         }
     }
 
     if (showModels) {
         ModalBottomSheet(onDismissRequest = { showModels = false }, sheetState = modelSheetState, containerColor = Panel,
             shape = RoundedCornerShape(topStart = 26.dp, topEnd = 26.dp), scrimColor = Color.Black.copy(alpha = 0.66f), dragHandle = null) {
+            SheetSurface {
             ModelSheet(
                 repo = repo,
                 nodeId = nodeId,
@@ -892,11 +1203,13 @@ fun ChatScreen(
                 currentThinking = currentThinking,
                 onClose = { showModels = false },
             )
+            }
         }
     }
     if (showCommands) {
         ModalBottomSheet(onDismissRequest = { showCommands = false }, sheetState = commandSheetState, containerColor = Panel,
             shape = RoundedCornerShape(topStart = 26.dp, topEnd = 26.dp), scrimColor = Color.Black.copy(alpha = 0.66f), dragHandle = null) {
+            SheetSurface {
             CommandSheet(onClose = { showCommands = false }) { cmd ->
                 showCommands = false
                 when (cmd.name) {
@@ -904,6 +1217,7 @@ fun ChatScreen(
                     "compact" -> repo.compact(nodeId, sessionId)
                     else -> text = "/${cmd.name} "
                 }
+            }
             }
         }
     }
@@ -916,21 +1230,46 @@ fun ChatScreen(
             scrimColor = Color.Black.copy(alpha = 0.66f),
             dragHandle = null,
         ) {
+            SheetSurface {
             Column(Modifier.fillMaxWidth()) {
                 CarrySheetGrabber()
                 CarrySheetHeader(
                     title = "重命名会话",
-                    subtitle = "只影响列表与对话标题 · 不改变 .jsonl 路径",
+                    subtitle = "只改显示名，不改写记录",
                     onClose = { showRename = false },
                 )
                 Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp).padding(bottom = 26.dp)) {
                     MonoLabel("会话名称", color = TextMuted)
                     Spacer(Modifier.height(5.dp))
+                    val renameFieldSource = remember { MutableInteractionSource() }
+                    val renameFocused by renameFieldSource.collectIsFocusedAsState()
+                    val renameGlowColor = Violet.copy(alpha = 0.18f) // drawBehind 不能读 Composable token
                     Box(
                         Modifier.fillMaxWidth().height(44.dp)
                             .clip(RoundedCornerShape(10.dp))
-                            .background(Surface2)
-                            .border(0.8.dp, LineStrong, RoundedCornerShape(10.dp))
+                            .background(Color.White.copy(alpha = 0.035f))
+                            .border(
+                                1.dp,
+                                if (renameFocused) Violet.copy(alpha = 0.55f) else Color.White.copy(alpha = 0.14f),
+                                RoundedCornerShape(10.dp),
+                            )
+                            .drawBehind {
+                                if (renameFocused) {
+                                    val outline = Path().apply {
+                                        addRoundRect(
+                                            RoundRect(
+                                                left = 0f,
+                                                top = 0f,
+                                                right = size.width,
+                                                bottom = size.height,
+                                                radiusX = 10.dp.toPx(),
+                                                radiusY = 10.dp.toPx(),
+                                            ),
+                                        )
+                                    }
+                                    drawPath(outline, renameGlowColor, style = Stroke(width = 3.dp.toPx()))
+                                }
+                            }
                             .padding(horizontal = 12.dp),
                         contentAlignment = Alignment.CenterStart,
                     ) {
@@ -940,12 +1279,13 @@ fun ChatScreen(
                             textStyle = TextStyle(color = TextPrimary, fontSize = 13.sp, fontFamily = Inter, lineHeight = 20.sp),
                             cursorBrush = SolidColor(Violet),
                             singleLine = true,
+                            interactionSource = renameFieldSource,
                             modifier = Modifier.fillMaxWidth(),
                         )
                     }
                     Spacer(Modifier.height(6.dp))
                     Text(
-                        renameError ?: "留空则恢复默认名称；名称最长 60 个字符。",
+                        renameError ?: "最多 60 个字符",
                         style = MaterialTheme.typography.labelSmall,
                         color = if (renameError != null) Rose else TextMuted,
                     )
@@ -953,7 +1293,7 @@ fun ChatScreen(
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         CarryActionButton(
                             "取消", { showRename = false },
-                            modifier = Modifier.weight(1f), kind = ButtonKind.Ghost,
+                            modifier = Modifier.weight(1f), kind = ButtonKind.Ghost, height = 46.dp,
                         )
                         CarryActionButton(
                             "保存", {
@@ -961,10 +1301,11 @@ fun ChatScreen(
                                     if (error == null) showRename = false else renameError = error
                                 }
                             },
-                            modifier = Modifier.weight(1.3f), kind = ButtonKind.Primary,
+                            modifier = Modifier.weight(1.3f), kind = ButtonKind.Primary, height = 46.dp,
                         )
                     }
                 }
+            }
             }
         }
     }
@@ -978,59 +1319,77 @@ fun ChatScreen(
             scrimColor = Color.Black.copy(alpha = 0.66f),
             dragHandle = null,
         ) {
-            Column(Modifier.fillMaxWidth().fillMaxHeight(0.82f)) {
+            SheetSurface(Modifier.fillMaxHeight(0.82f)) {
                 CarrySheetGrabber()
                 val page = entriesPage
                 CarrySheetHeader(
-                    title = "分支与 entries",
-                    subtitle = if (page == null) "从任意 entry 分叉会复制到该点，原会话保持不变。"
-                    else "leaf ${page.leafId?.take(8) ?: "—"} · 共 ${page.entries.size} 条",
+                    title = "分支与历史",
+                    subtitle = page?.let { "leaf ${it.leafId?.take(8) ?: "—"} · 共 ${it.entries.size} 条" },
                     onClose = { if (!forking) showEntries = false },
                 )
                 when {
                     entriesLoading -> Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
-                        CircularProgressIndicator(color = Violet, strokeWidth = 2.dp)
+                        CircularProgressIndicator(color = Violet, strokeWidth = 2.dp, modifier = Modifier.size(20.dp))
                     }
                     entriesError != null -> Column(Modifier.fillMaxWidth().weight(1f).padding(horizontal = 18.dp)) {
-                        Text(entriesError.orEmpty(), style = MaterialTheme.typography.bodySmall, color = Rose)
+                        Text(entriesError.orEmpty(), style = MaterialTheme.typography.labelSmall, color = Rose)
                         Spacer(Modifier.height(8.dp))
-                        CarryActionButton("重试", { openEntries() }, kind = ButtonKind.Ghost)
+                        Box(Modifier.height(44.dp).chatClick { openEntries() }, contentAlignment = Alignment.CenterStart) {
+                            Text("重试", style = MaterialTheme.typography.labelLarge, color = Cyan)
+                        }
                     }
                     page != null -> {
                         val children = remember(page) { page.entries.groupingBy { it.parentId }.eachCount() }
                         Box(Modifier.fillMaxWidth().weight(1f)) {
+                            // MB-31：主干左 21dp
                             Box(
-                                Modifier.padding(start = 32.dp, top = 8.dp, bottom = 8.dp)
+                                Modifier.padding(start = 21.dp, top = 8.dp, bottom = 8.dp)
                                     .width(1.dp).fillMaxHeight().background(Line),
                             )
                             LazyColumn(
                                 Modifier.fillMaxSize(),
-                                contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 4.dp, bottom = 8.dp),
+                                contentPadding = PaddingValues(start = 18.dp, end = 14.dp, top = 4.dp, bottom = 8.dp),
                                 verticalArrangement = Arrangement.spacedBy(2.dp),
                             ) {
+                                if (page.entries.isEmpty()) {
+                                    item {
+                                        Box(
+                                            Modifier.fillParentMaxWidth().padding(vertical = 40.dp),
+                                            contentAlignment = Alignment.Center,
+                                        ) {
+                                            Text("没有可用的 entry", style = MaterialTheme.typography.labelSmall, color = TextMuted)
+                                        }
+                                    }
+                                }
                                 items(page.entries.asReversed(), key = { it.id }) { entry ->
                                     val selected = entry.id == selectedEntryId
                                     val indent = (entry.depth * 13).dp
+                                    val role = if (entry.role.isBlank()) entry.type else entry.role
+                                    val roleColor = when {
+                                        role.contains("user", true) -> Violet
+                                        role.contains("tool", true) -> Mint
+                                        else -> Cyan
+                                    }
                                     Row(
                                         Modifier.fillMaxWidth()
                                             .padding(start = indent)
+                                            .alpha(if (selected) 1f else 0.52f)
                                             .clip(RoundedCornerShape(11.dp))
-                                            .background(if (selected) Violet.copy(alpha = 0.10f) else Color.Transparent)
+                                            .background(if (selected) Violet.copy(alpha = 0.09f) else Color.Transparent)
                                             .border(
-                                                0.7.dp,
-                                                if (selected) Violet.copy(alpha = 0.30f) else Color.Transparent,
+                                                1.dp,
+                                                if (selected) Violet.copy(alpha = 0.28f) else Color.Transparent,
                                                 RoundedCornerShape(11.dp),
                                             )
-                                            .clickable { selectedEntryId = entry.id }
-                                            .padding(vertical = 8.dp, horizontal = 7.dp),
+                                            .chatClick { selectedEntryId = entry.id }
+                                            .padding(start = 0.dp, top = 9.dp, bottom = 9.dp, end = 8.dp),
                                         verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                                     ) {
-                                        val role = if (entry.role.isBlank()) entry.type else entry.role
                                         Box(
                                             Modifier.size(28.dp).clip(RoundedCornerShape(9.dp))
-                                                .background(if (selected) Violet.copy(alpha = 0.18f) else Surface2)
-                                                .border(0.7.dp, if (selected) Violet.copy(alpha = 0.35f) else Line, RoundedCornerShape(9.dp)),
+                                                .background(roleColor.copy(alpha = 0.14f))
+                                                .border(1.dp, roleColor.copy(alpha = 0.22f), RoundedCornerShape(9.dp)),
                                             contentAlignment = Alignment.Center,
                                         ) {
                                             Text(
@@ -1040,51 +1399,73 @@ fun ChatScreen(
                                                     else -> "A"
                                                 },
                                                 style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
-                                                color = if (selected) VioletSoft else TextMuted,
+                                                color = roleColor,
                                             )
                                         }
                                         Column(Modifier.weight(1f)) {
                                             Text(
-                                                entry.preview.ifBlank { role },
-                                                style = MaterialTheme.typography.bodySmall,
-                                                color = if (selected) TextPrimary else TextSecondary,
-                                                maxLines = 2,
+                                                listOf(role, entry.timestamp).filter { it.isNotBlank() }.joinToString(" · "),
+                                                style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                                                color = TextMuted,
+                                                maxLines = 1,
                                                 overflow = TextOverflow.Ellipsis,
                                             )
                                             Spacer(Modifier.height(2.dp))
                                             Text(
-                                                entry.id.take(8) + " · " + role,
-                                                style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
-                                                color = TextMuted,
-                                                maxLines = 1,
+                                                entry.preview.ifBlank { entry.id.take(8) },
+                                                style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.5.sp, lineHeight = 17.8.sp),
+                                                color = if (selected) TextPrimary else TextSecondary,
+                                                maxLines = 2,
+                                                overflow = TextOverflow.Ellipsis,
                                             )
                                         }
-                                        if ((children[entry.id] ?: 0) > 1) {
-                                            Tag("分支", Amber)
-                                        }
+                                        if ((children[entry.id] ?: 0) > 1) Tag("分支", Amber)
+                                        if (selected) Icon(Icons.Outlined.Check, "已选中", tint = VioletSoft, modifier = Modifier.size(18.dp))
                                     }
                                 }
                             }
                         }
+                        // MB-33：底栏 margin 0 14 24、渐变、14 圆角
                         Row(
-                            Modifier.fillMaxWidth().background(Surface2.copy(alpha = 0.7f))
-                                .padding(horizontal = 18.dp, vertical = 11.dp),
+                            Modifier.fillMaxWidth()
+                                .padding(start = 14.dp, end = 14.dp, top = 8.dp, bottom = 26.dp)
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(Brush.verticalGradient(listOf(Surface2, Panel)))
+                                .border(1.dp, LineStrong, RoundedCornerShape(14.dp))
+                                .padding(horizontal = 12.dp, vertical = 11.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
-                            Text(
-                                "复制到所选 entry，不移动原会话。",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = TextMuted,
-                                modifier = Modifier.weight(1f),
-                            )
-                            CarryActionButton(
-                                if (forking) "正在分叉…" else "从 ${selectedEntryId?.take(8) ?: "…"} 分叉",
-                                { doFork() },
-                                kind = ButtonKind.Primary,
-                                enabled = selectedEntryId != null && !forking,
-                                height = 38.dp,
-                            )
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    "从 ${selectedEntryId?.take(8) ?: "…"} 分叉",
+                                    style = MaterialTheme.typography.labelLarge.copy(fontSize = 11.5.sp, fontWeight = FontWeight.Medium),
+                                    color = TextPrimary,
+                                )
+                                Spacer(Modifier.height(1.dp))
+                                Text(
+                                    "新会话复制到该消息 · 旧会话保留",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = TextMuted,
+                                )
+                            }
+                            Box(
+                                Modifier.height(38.dp).clip(RoundedCornerShape(10.dp))
+                                    .background(Brush.linearGradient(listOf(SendGradStart, SendGradEnd)))
+                                    .chatPress(
+                                        onClick = { if (selectedEntryId != null && !forking) doFork() },
+                                        scale = 0.97f,
+                                        enabled = selectedEntryId != null && !forking,
+                                    )
+                                    .padding(horizontal = 16.dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(
+                                    if (forking) "正在分叉…" else "分叉",
+                                    style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
+                                    color = Color.White,
+                                )
+                            }
                         }
                     }
                 }
@@ -1095,12 +1476,15 @@ fun ChatScreen(
     openTurn?.let { turn ->
         ModalBottomSheet(onDismissRequest = { openTurnAnchor = null }, sheetState = turnSheetState, containerColor = Panel,
             shape = RoundedCornerShape(topStart = 26.dp, topEnd = 26.dp), scrimColor = Color.Black.copy(alpha = 0.66f), dragHandle = null) {
+            SheetSurface {
             TurnDetailSheet(turn) { openTurnAnchor = null }
+            }
         }
     }
     openApproval?.let { approval ->
         ApprovalDialog(
             approval = approval,
+            deviceCount = nodes.size,
             onDismiss = { openApprovalId = null },
             onDecide = { decision, remember ->
                 repo.resolveApproval(nodeId, approval.id, decision, remember)
@@ -1112,36 +1496,155 @@ fun ChatScreen(
 }
 
 @Composable
+private fun GlowDot(color: Color, size: Int = 5) {
+    Box(
+        Modifier.size(size.dp).drawBehind {
+            drawCircle(color.copy(alpha = 0.30f), radius = this.size.minDimension * 1.7f)
+            drawCircle(color, radius = this.size.minDimension / 2f)
+        },
+    )
+}
+
+/** MC-02：高 24、圆角 99、白 .02 底 + 1px line；按压白 .06、无涟漪。 */
+@Composable
 private fun ChatMetaChip(
     label: String,
-    color: Color,
-    running: Boolean = false,
     icon: androidx.compose.ui.graphics.vector.ImageVector? = null,
+    running: Boolean = false,
     onClick: (() -> Unit)? = null,
 ) {
-    val shape = RoundedCornerShape(7.dp)
+    val source = remember { MutableInteractionSource() }
+    val pressed by source.collectIsPressedAsState()
+    val shape = RoundedCornerShape(99)
     Row(
         Modifier
             .height(24.dp)
             .clip(shape)
-            .background(if (onClick != null) Color.White.copy(alpha = 0.035f) else color.copy(alpha = 0.10f))
-            .border(0.7.dp, if (onClick != null) Line else color.copy(alpha = 0.22f), shape)
-            .then(if (onClick != null) Modifier.pressClickable(onClick = onClick, scale = 0.96f) else Modifier)
-            .padding(horizontal = 7.dp),
+            .background(if (pressed && onClick != null) Color.White.copy(alpha = 0.06f) else Color.White.copy(alpha = 0.02f))
+            .border(1.dp, Line, shape)
+            .then(
+                if (onClick != null) {
+                    Modifier.clickable(interactionSource = source, indication = null, onClick = onClick)
+                } else {
+                    Modifier
+                },
+            )
+            .padding(horizontal = 9.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(5.dp),
     ) {
         if (running) {
-            CircularProgressIndicator(color = color, strokeWidth = 1.2.dp, modifier = Modifier.size(9.dp))
+            CircularProgressIndicator(color = Violet, strokeWidth = 1.2.dp, modifier = Modifier.size(10.dp))
         } else if (icon != null) {
-            Icon(icon, null, tint = color, modifier = Modifier.size(11.dp))
+            Icon(icon, null, tint = VioletSoft, modifier = Modifier.size(12.dp))
         }
         Text(
             label,
             style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
-            color = if (onClick != null) TextSecondary else color,
+            color = TextSecondary,
             maxLines = 1,
         )
+    }
+}
+
+/** MC-03：迁移横幅两行 + 图标块；不要行首圆点。 */
+@Composable
+private fun MigrationBanner(onClose: () -> Unit) {
+    val shape = RoundedCornerShape(11.dp)
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 14.dp).padding(bottom = 8.dp)
+            .clip(shape)
+            .background(Amber.copy(alpha = 0.07f))
+            .border(1.dp, Amber.copy(alpha = 0.30f), shape)
+            .padding(start = 10.dp, top = 9.dp, bottom = 9.dp, end = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(9.dp),
+    ) {
+        Box(
+            Modifier.size(26.dp).clip(RoundedCornerShape(8.dp)).background(Amber.copy(alpha = 0.12f)),
+            contentAlignment = Alignment.Center,
+        ) { Icon(Icons.Outlined.AccountTree, null, tint = Amber, modifier = Modifier.size(14.dp)) }
+        Column(Modifier.weight(1f)) {
+            Text(
+                "已迁移到新分支",
+                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                color = Amber,
+            )
+            Spacer(Modifier.height(1.dp))
+            Text("草稿已保留", style = MaterialTheme.typography.labelSmall, color = TextMuted)
+        }
+        Box(Modifier.size(44.dp).chatClick(onClick = onClose), contentAlignment = Alignment.Center) {
+            Icon(Icons.Outlined.Close, "关闭提示", tint = TextMuted, modifier = Modifier.size(15.dp))
+        }
+    }
+}
+
+/** MC-04：只读单行条（P0）。 */
+@Composable
+private fun ReadOnlyBar(text: String) {
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 3.dp)
+            .clip(RoundedCornerShape(9.dp))
+            .background(Amber.copy(alpha = 0.07f))
+            .border(1.dp, Amber.copy(alpha = 0.22f), RoundedCornerShape(9.dp))
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Icon(Icons.Outlined.Lock, null, tint = Amber, modifier = Modifier.size(13.dp))
+        Text(
+            text,
+            style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+            color = Amber,
+        )
+    }
+}
+
+/** MC-05：日期分隔行 —— 左右 1px 渐变线 + mono 11。 */
+@Composable
+private fun DateSeparator(label: String) {
+    if (label.isBlank()) return
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Box(
+            Modifier.weight(1f).height(1.dp)
+                .background(Brush.horizontalGradient(listOf(Color.Transparent, Color.White.copy(alpha = 0.09f)))),
+        )
+        Text(
+            label,
+            style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace, letterSpacing = 1.5.sp),
+            color = TextMuted,
+        )
+        Box(
+            Modifier.weight(1f).height(1.dp)
+                .background(Brush.horizontalGradient(listOf(Color.White.copy(alpha = 0.09f), Color.Transparent))),
+        )
+    }
+}
+
+/** MC-06：新消息浮标；a11y 热区 44，可视高度 28。 */
+@Composable
+private fun NewMessagePill(count: Int, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    Box(modifier.height(44.dp), contentAlignment = Alignment.Center) {
+        Row(
+            Modifier.height(28.dp).clip(CircleShape)
+                .background(NewMessagePillBg) // token: MC-06 浮标底 rgba(20,18,34,.92)
+                .border(1.dp, Violet.copy(alpha = 0.35f), CircleShape)
+                .chatPress(onClick = onClick, scale = 0.96f)
+                .padding(horizontal = 11.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(5.dp),
+        ) {
+            Text(
+                if (count > 1) "$count 条新消息" else "回到最新",
+                style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                color = AccentSoft,
+            )
+            Icon(Icons.Outlined.ExpandMore, null, tint = AccentSoft, modifier = Modifier.size(14.dp))
+        }
     }
 }
 
@@ -1190,9 +1693,39 @@ private fun NoticeBanner(
     }
 }
 
+/**
+ * MB-01..05：sheet 内容根 —— 渐变底 #101019→#0B0B13 + 顶部 1px 白 .14 高光。
+ * ModalBottomSheet 的 containerColor 只能纯色，故在这层实现设计稿的玻璃渐变；
+ * 26dp 顶部圆角由 ModalBottomSheet 的 shape 裁剪，这里不重复 clip。
+ * 体内 18dp 横向与 26dp 底部留白由各 sheet 的内容列提供（见各 sheet 的 body padding）。
+ */
+@Composable
+private fun SheetSurface(
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit,
+) {
+    Column(
+        modifier
+            .fillMaxWidth()
+            .background(Brush.verticalGradient(listOf(SheetGradTop, SheetGradBottom)))
+            .drawBehind {
+                drawLine(
+                    color = SheetHairline,
+                    start = Offset(0f, 0.5f),
+                    end = Offset(size.width, 0.5f),
+                    strokeWidth = 1.dp.toPx(),
+                )
+            },
+    ) {
+        content()
+    }
+}
+
 @Composable
 private fun SessionMenuSheet(
     name: String,
+    nodeLabel: String,
+    sessionId: String,
     readOnly: Boolean,
     onClose: () -> Unit,
     onRename: () -> Unit,
@@ -1201,20 +1734,24 @@ private fun SessionMenuSheet(
     onCompact: () -> Unit,
     onCloseSession: () -> Unit,
 ) {
+    // MB-10/11：副标题补节点与会话 id；5 行无行间线，整行可点。
+    val subtitle = listOf(name, nodeLabel, sessionId.take(8))
+        .filter { it.isNotBlank() }
+        .joinToString(" · ")
     Column(Modifier.fillMaxWidth()) {
         CarrySheetGrabber()
-        CarrySheetHeader(title = "会话操作", subtitle = name, onClose = onClose)
-        Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp)) {
+        CarrySheetHeader(title = "会话操作", subtitle = subtitle, onClose = onClose)
+        Column(
+            Modifier.fillMaxWidth().padding(horizontal = 18.dp),
+            verticalArrangement = Arrangement.spacedBy(1.dp),
+        ) {
             ChatMenuRow(Icons.Outlined.Edit, "重命名会话", "只改显示名，不改写记录", enabled = !readOnly, onClick = onRename)
-            ChatMenuRow(Icons.Outlined.ContentCopy, "复制会话 ID", "用于脚本或反馈问题", onClick = onCopyId)
+            ChatMenuRow(Icons.Outlined.ContentCopy, "复制会话 ID", "复制给脚本或反馈问题", onClick = onCopyId)
             ChatMenuRow(Icons.Outlined.AccountTree, "分支与 entries", "查看消息树，从任意节点分叉", enabled = !readOnly, onClick = onEntries)
             ChatMenuRow(Icons.Outlined.Tune, "压缩上下文", "保留摘要，释放上下文窗口", enabled = !readOnly, onClick = onCompact)
-            Spacer(Modifier.height(6.dp))
-            HorizontalDivider(color = Line)
-            Spacer(Modifier.height(6.dp))
             ChatMenuRow(Icons.Outlined.Close, "关闭会话", "不影响电脑上的 pi 记录", danger = true, onClick = onCloseSession)
         }
-        Spacer(Modifier.height(24.dp))
+        Spacer(Modifier.height(26.dp))
     }
 }
 
@@ -1235,19 +1772,24 @@ private fun ChatMenuRow(
     Row(
         Modifier
             .fillMaxWidth()
-            .then(if (enabled) Modifier.pressClickable(onClick = onClick, scale = 0.985f) else Modifier)
-            .padding(vertical = 8.dp, horizontal = 6.dp),
+            .clip(RoundedCornerShape(10.dp))
+            .then(if (enabled) Modifier.chatPress(onClick = onClick, scale = 0.985f) else Modifier)
+            .padding(vertical = 10.dp, horizontal = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(11.dp),
     ) {
         Box(
             Modifier.size(30.dp).clip(RoundedCornerShape(9.dp))
-                .background(tint.copy(alpha = if (danger) 0.12f else 0.06f))
-                .border(0.7.dp, tint.copy(alpha = 0.14f), RoundedCornerShape(9.dp)),
+                .background(if (danger) Rose.copy(alpha = 0.08f) else Color.White.copy(alpha = 0.05f))
+                .border(1.dp, tint.copy(alpha = if (danger) 0.18f else 0.10f), RoundedCornerShape(9.dp)),
             contentAlignment = Alignment.Center,
         ) { Icon(icon, null, tint = tint, modifier = Modifier.size(15.dp)) }
         Column(Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Medium), color = if (danger) Rose else if (enabled) TextPrimary else TextMuted)
+            Text(
+                title,
+                style = MaterialTheme.typography.labelLarge.copy(fontSize = 11.5.sp, fontWeight = FontWeight.Medium),
+                color = if (danger) Rose else if (enabled) TextPrimary else TextMuted,
+            )
             Spacer(Modifier.height(1.dp))
             Text(subtitle, style = MaterialTheme.typography.labelSmall, color = TextMuted)
         }
@@ -1256,37 +1798,45 @@ private fun ChatMenuRow(
 
 @Composable
 private fun UserBubble(msg: ChatMessage) {
-    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End) {
-        if (msg.text.isNotBlank()) {
-            Box(
-                Modifier
-                    .widthIn(max = 310.dp)
-                    .clip(RoundedCornerShape(16.dp, 16.dp, 5.dp, 16.dp))
-                    .background(Brush.linearGradient(listOf(Violet.copy(alpha = 0.30f), Violet.copy(alpha = 0.12f))))
-                    .border(0.7.dp, Violet.copy(alpha = 0.30f), RoundedCornerShape(16.dp, 16.dp, 5.dp, 16.dp))
-                    .padding(horizontal = 14.dp, vertical = 11.dp),
-            ) {
-                Column {
-                    Text(msg.text, style = MaterialTheme.typography.bodyLarge.copy(lineHeight = 21.6.sp), color = TextPrimary)
-                    val stamp = msg.tsMs
-                    if (stamp > 0) {
-                        val clock = remember(stamp) {
-                            java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date(stamp))
-                        }
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val bubbleMax = maxWidth * 0.86f
+        val shape = RoundedCornerShape(16.dp, 16.dp, 5.dp, 16.dp)
+        Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End) {
+            if (msg.text.isNotBlank()) {
+                Box(
+                    Modifier
+                        .widthIn(max = bubbleMax)
+                        .clip(shape)
+                        .background(Brush.linearGradient(listOf(Violet.copy(alpha = 0.26f), Violet.copy(alpha = 0.13f))))
+                        .border(1.dp, Violet.copy(alpha = 0.30f), shape)
+                        .padding(horizontal = 14.dp, vertical = 11.dp),
+                ) {
+                    Column {
                         Text(
-                            clock,
-                            style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMono, fontSize = 8.5.sp),
-                            color = VioletSoft.copy(alpha = 0.5f),
-                            textAlign = androidx.compose.ui.text.style.TextAlign.End,
-                            modifier = Modifier.align(Alignment.End).padding(top = 6.dp),
+                            msg.text,
+                            style = MaterialTheme.typography.bodyLarge.copy(fontSize = 13.5.sp, lineHeight = 21.6.sp),
+                            color = UserBubbleInk,
                         )
+                        val stamp = msg.tsMs
+                        if (stamp > 0) {
+                            val clock = remember(stamp) {
+                                java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date(stamp))
+                            }
+                            Text(
+                                clock,
+                                style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMono),
+                                color = UserBubbleStamp.copy(alpha = 0.5f),
+                                textAlign = androidx.compose.ui.text.style.TextAlign.End,
+                                modifier = Modifier.align(Alignment.End).padding(top = 6.dp),
+                            )
+                        }
                     }
                 }
             }
-        }
-        if (msg.images.isNotEmpty()) {
-            Spacer(Modifier.height(6.dp))
-            ImageStrip(msg.images, Modifier.widthIn(max = 320.dp))
+            if (msg.images.isNotEmpty()) {
+                Spacer(Modifier.height(6.dp))
+                ImageStrip(msg.images, Modifier.widthIn(max = 320.dp))
+            }
         }
     }
 }
@@ -1294,41 +1844,44 @@ private fun UserBubble(msg: ChatMessage) {
 @Composable
 private fun AssistantBlock(msg: ChatMessage) {
     Column(Modifier.fillMaxWidth()) {
-        if (msg.streaming) {
-            MonoLabel("pi · 生成中", color = Violet)
-            Spacer(Modifier.height(5.dp))
-        }
         if (msg.thinking.isNotBlank()) {
             var expanded by remember(msg.id) { mutableStateOf(false) }
-            val dashedLine = LineStrong
-            Spacer(Modifier.height(6.dp))
+            val rotation by animateFloatAsState(if (expanded) 90f else 0f, tween(durationMillis = 200, easing = ChatEase), label = "thinking-chevron")
             Column(
                 Modifier
                     .fillMaxWidth()
                     .drawBehind {
                         val stroke = 1.dp.toPx()
                         drawLine(
-                            color = dashedLine,
-                            start = Offset(stroke / 2, 0f),
-                            end = Offset(stroke / 2, size.height),
+                            color = Color.White.copy(alpha = 0.16f),
+                            start = Offset(stroke / 2f, 0f),
+                            end = Offset(stroke / 2f, size.height),
                             strokeWidth = stroke,
-                            pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(4.dp.toPx(), 4.dp.toPx())),
+                            pathEffect = PathEffect.dashPathEffect(floatArrayOf(4.dp.toPx(), 4.dp.toPx())),
                         )
                     }
-                    .clickable { expanded = !expanded }
+                    .chatClick { expanded = !expanded }
                     .padding(start = 11.dp, top = 2.dp, bottom = 2.dp),
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Outlined.Psychology, null, tint = TextMuted, modifier = Modifier.size(14.dp))
-                    Spacer(Modifier.size(6.dp))
-                    MonoLabel("思考", color = TextSecondary)
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Icon(Icons.Outlined.Psychology, null, tint = TextMuted, modifier = Modifier.size(13.dp))
+                    MonoLabel("思考", color = TextMuted)
                     Spacer(Modifier.weight(1f))
-                    Icon(if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore, null, tint = TextMuted, modifier = Modifier.size(15.dp))
+                    Icon(
+                        Icons.Outlined.ChevronRight,
+                        null,
+                        tint = TextMuted,
+                        modifier = Modifier.size(14.dp).graphicsLayer { rotationZ = rotation },
+                    )
                 }
-                AnimatedVisibility(visible = expanded) {
+                AnimatedVisibility(
+                    visible = expanded,
+                    enter = expandVertically(tween(durationMillis = 300, easing = ChatEase)) + fadeIn(tween(durationMillis = 200, easing = ChatEase)),
+                    exit = shrinkVertically(tween(durationMillis = 300, easing = ChatEase)) + fadeOut(tween(durationMillis = 160, easing = ChatEase)),
+                ) {
                     Text(
                         msg.thinking,
-                        style = MaterialTheme.typography.bodySmall.copy(lineHeight = 19.sp),
+                        style = MaterialTheme.typography.bodySmall.copy(lineHeight = 18.5.sp),
                         color = TextMuted,
                         modifier = Modifier.padding(top = 6.dp),
                     )
@@ -1343,10 +1896,6 @@ private fun AssistantBlock(msg: ChatMessage) {
             Spacer(Modifier.height(8.dp))
             ImageStrip(msg.images)
         }
-        if (msg.error) {
-            Spacer(Modifier.height(5.dp))
-            Text("发送失败", style = MaterialTheme.typography.labelSmall, color = Rose)
-        }
     }
 }
 
@@ -1354,73 +1903,138 @@ private fun AssistantBlock(msg: ChatMessage) {
 private fun SystemBubble(msg: ChatMessage) {
     Row(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(Rose.copy(alpha = 0.08f)).padding(10.dp),
-        verticalAlignment = Alignment.CenterVertically,
+        verticalAlignment = Alignment.Top,
+        horizontalArrangement = Arrangement.spacedBy(7.dp),
     ) {
-        Text(msg.text, style = MaterialTheme.typography.bodySmall, color = if (msg.error) Rose else TextSecondary)
+        if (msg.error) {
+            Icon(Icons.Outlined.Info, null, tint = Rose, modifier = Modifier.size(14.dp))
+        }
+        Text(
+            msg.text,
+            style = MaterialTheme.typography.bodySmall.copy(lineHeight = 17.sp),
+            color = if (msg.error) Rose else TextSecondary,
+        )
     }
 }
 
 @Composable
 private fun ToolCard(tool: ToolCall) {
     var expanded by remember(tool.id) { mutableStateOf(false) }
+    val rotation by animateFloatAsState(if (expanded) 90f else 0f, tween(durationMillis = 200, easing = ChatEase), label = "tool-chevron")
+    val done = tool.status == "success" || tool.status == "completed" || (tool.durationMs > 0 && !tool.isError)
+    val accent = when {
+        tool.isError -> Rose
+        done -> Mint
+        else -> Violet
+    }
+    val shape = RoundedCornerShape(13.dp)
     Column(
         Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(13.dp))
-            .background(Panel.copy(alpha = 0.55f))
-            .border(0.7.dp, if (tool.isError) Rose.copy(alpha = 0.4f) else Line, RoundedCornerShape(13.dp))
-            .clickable { expanded = !expanded }
-            .padding(horizontal = 10.dp, vertical = 9.dp),
+            .clip(shape)
+            .background(GlassWhisper)
+            .border(1.dp, if (tool.isError) Rose.copy(alpha = 0.32f) else Line, shape),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-            Box(Modifier.size(26.dp).clip(RoundedCornerShape(8.dp)).background(Cyan.copy(alpha = 0.10f)), contentAlignment = Alignment.Center) {
-                Icon(Icons.Outlined.Terminal, null, tint = if (tool.isError) Rose else Cyan, modifier = Modifier.size(14.dp))
+        Row(
+            Modifier.fillMaxWidth().chatClick { expanded = !expanded }
+                .padding(horizontal = 11.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.Top,
+            horizontalArrangement = Arrangement.spacedBy(9.dp),
+        ) {
+            Box(
+                Modifier.size(26.dp).clip(RoundedCornerShape(8.dp))
+                    .background(accent.copy(alpha = if (done) 0.08f else 0.12f))
+                    .border(1.dp, accent.copy(alpha = 0.14f), RoundedCornerShape(8.dp)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(Icons.Outlined.Terminal, null, tint = accent, modifier = Modifier.size(14.dp))
             }
-            Text(tool.name, style = MaterialTheme.typography.labelLarge.copy(fontFamily = FontFamily.Monospace), color = TextPrimary)
-            if (tool.durationMs > 0) MonoLabel("${tool.durationMs}ms", color = TextMuted)
-            Spacer(Modifier.weight(1f))
-            when (tool.status) {
-                "running" -> CircularProgressIndicator(Modifier.size(12.dp), color = Cyan, strokeWidth = 1.5.dp)
-                "error" -> Text("失败", style = MaterialTheme.typography.labelSmall, color = Rose)
-                else -> Icon(Icons.Outlined.Check, null, tint = Mint, modifier = Modifier.size(14.dp))
+            Column(Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        tool.name,
+                        style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace, fontSize = 11.sp),
+                        color = TextPrimary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    // MC-11：名称后状态 tag（设计 .tag：21 高、6dp 圆角、紫/绿/玫描边）。
+                    ToolStateTag(tool)
+                }
+                val summary = summarizeToolArgs(tool.args)
+                if (summary.isNotBlank()) {
+                    Spacer(Modifier.height(3.dp))
+                    Text(
+                        summary.take(if (expanded) 4000 else 160),
+                        style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace, fontSize = 11.sp),
+                        color = TextMuted,
+                        maxLines = if (expanded) 80 else 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
-            Icon(if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore, null, tint = TextMuted, modifier = Modifier.size(15.dp))
-        }
-        // 默认只显示一行命令摘要；参数与结果都要点开，避免长输出刷屏。
-        val summary = summarizeToolArgs(tool.args)
-        if (summary.isNotBlank()) {
-            Spacer(Modifier.height(6.dp))
-            Text(
-                summary.take(if (expanded) 4000 else 160),
-                style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
-                color = TextMuted,
-                maxLines = if (expanded) 80 else 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                // MC-11：右侧统一为「状态文字 + 时长」mono 11sp。
+                Text(
+                    toolStateLabel(tool),
+                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace, fontSize = 11.sp),
+                    color = toolStateColor(tool),
+                )
+                if (tool.durationMs > 0) {
+                    Text(
+                        "${tool.durationMs}ms",
+                        style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace, fontSize = 11.sp),
+                        color = TextMuted,
+                    )
+                }
+                Icon(
+                    Icons.Outlined.ChevronRight,
+                    null,
+                    tint = TextMuted,
+                    modifier = Modifier.size(14.dp).graphicsLayer { rotationZ = rotation },
+                )
+            }
         }
         if (tool.images.isNotEmpty()) {
-            Spacer(Modifier.height(8.dp))
-            ImageStrip(tool.images, Modifier.clickable(enabled = false) {})
+            Box(Modifier.padding(start = 11.dp, end = 11.dp, bottom = 10.dp)) {
+                ImageStrip(tool.images, Modifier.clickable(enabled = false) {})
+            }
         }
-        AnimatedVisibility(visible = expanded) {
-            Column {
+        AnimatedVisibility(
+            visible = expanded,
+            enter = expandVertically(tween(durationMillis = 320, easing = ChatEase)) + fadeIn(tween(durationMillis = 200, easing = ChatEase)),
+            exit = shrinkVertically(tween(durationMillis = 320, easing = ChatEase)) + fadeOut(tween(durationMillis = 160, easing = ChatEase)),
+        ) {
+            Column(
+                Modifier.fillMaxWidth()
+                    .drawBehind {
+                        drawLine(
+                            color = Color.White.copy(alpha = 0.075f),
+                            start = Offset(0f, 0f),
+                            end = Offset(size.width, 0f),
+                            strokeWidth = 1.dp.toPx(),
+                        )
+                    }
+                    .padding(start = 11.dp, end = 11.dp, top = 10.dp, bottom = 11.dp),
+            ) {
                 if (tool.args.isNotBlank()) {
-                    Spacer(Modifier.height(9.dp))
-                    MonoLabel("参数", color = TextMuted)
                     Text(
                         tool.args.take(8000),
-                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                        style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace, lineHeight = 18.7.sp),
                         color = TextSecondary,
                     )
                 }
                 if (tool.result.isNotBlank()) {
-                    Spacer(Modifier.height(9.dp))
-                    MonoLabel(if (tool.isError) "错误输出" else "结果", color = if (tool.isError) Rose else TextMuted)
-                    Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(9.dp)).background(Color.Black.copy(alpha = 0.28f)).padding(10.dp)) {
+                    if (tool.args.isNotBlank()) Spacer(Modifier.height(9.dp))
+                    Box(
+                        Modifier.fillMaxWidth().clip(RoundedCornerShape(9.dp)).background(Color.Black.copy(alpha = 0.28f))
+                            .padding(10.dp),
+                    ) {
                         Text(
                             tool.result.take(20000),
-                            style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace, lineHeight = 16.sp),
-                            color = if (tool.isError) Rose else TextSecondary,
+                            style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace, lineHeight = 18.7.sp),
+                            color = if (tool.isError) Rose else ToolOutputInk,
                         )
                     }
                 }
@@ -1443,11 +2057,15 @@ private fun summarizeToolArgs(args: String): String {
 }
 
 @Composable
-private fun MarkdownBody(text: String, streaming: Boolean = false) {
+private fun MarkdownBody(text: String, streaming: Boolean = false, bodyColor: Color = AssistantInk) {
     val context = LocalContext.current
-    val textColor = TextPrimary.toArgb()
-    val codeBg = PanelHigh.toArgb()
+    val density = LocalDensity.current
+    val textColor = bodyColor.toArgb()
+    val codeInk = VioletSoft.toArgb()
+    val blockBg = CodeBlockBg.toArgb()
+    val blockInk = CodeBlockInk.toArgb()
     val linkColor = Violet.toArgb()
+    val cursorInk = VioletSoft.toArgb() // 流式光标色（非 composable 回调内使用）
     // 流式期间每个 delta 都会重组，若每次都 markwon.setMarkdown 全量重解析，
     // 长度为 n 的回复是 O(n²) 开销（长代码块/表格时明显掉帧）。
     // 这里把流式渲染节流到 STREAM_RENDER_INTERVAL_MS，非流式（最终消息）立即渲染。
@@ -1464,16 +2082,50 @@ private fun MarkdownBody(text: String, streaming: Boolean = false) {
         lastRenderedAt = System.nanoTime() / 1_000_000
         shown = text
     }
-    val markwon = remember(context, textColor, codeBg, linkColor) {
+    // MC-09：流式光标 7×14 紫块 blink 1s（steps(1)）。用半个周期切换可见性模拟 steps。
+    var cursorOn by remember { mutableStateOf(true) }
+    LaunchedEffect(streaming) {
+        cursorOn = true
+        while (streaming) {
+            delay(500)
+            cursorOn = !cursorOn
+        }
+    }
+    // toArgb() 是 @ReadOnlyComposable，必须在 remember 外层先算好（remember 回调不是可组合上下文）。
+    val inlineCodeFill = InlineCodeBg.toArgb()
+    val inlineCodeStroke = Violet.copy(alpha = 0.16f).toArgb()
+    val strongInk = Color.White.toArgb()
+    val markwon = remember(context, textColor, codeInk, blockBg, blockInk, linkColor, density) {
+        val inlineCodeSpan = RoundedInlineCodeSpan(
+            fillColor = inlineCodeFill,
+            strokeColor = inlineCodeStroke,
+            textColorInt = codeInk,
+            textSizePx = with(density) { 11.5.sp.toPx() },
+            typeface = Typeface.MONOSPACE,
+            radiusPx = with(density) { 4.dp.toPx() },
+            padHorizontalPx = with(density) { 5.dp.toPx() },
+            padVerticalPx = with(density) { 1.5.dp.toPx() },
+            strokeWidthPx = with(density) { 1.dp.toPx() },
+        )
         Markwon.builder(context)
             .usePlugin(object : AbstractMarkwonPlugin() {
                 override fun configureTheme(builder: MarkwonTheme.Builder) {
                     builder
-                        .codeTextColor(textColor)
-                        .codeBlockTextColor(textColor)
-                        .codeBlockBackgroundColor(codeBg)
+                        .codeBlockTextColor(blockInk)
+                        .codeBlockBackgroundColor(blockBg)
+                        .codeBlockTextSize(with(density) { 10.5.sp.roundToPx() })
                         .linkColor(linkColor)
+                        .isLinkUnderlined(false)
                         .headingBreakHeight(0)
+                }
+
+                override fun configureSpansFactory(builder: MarkwonSpansFactory.Builder) {
+                    // MC-08：行内 code 自绘圆角紫底 + 1px 紫边 + 1.5/5 内边距（Markwon 默认只有方角底色）。
+                    builder.setFactory(Code::class.java) { _, _ -> arrayOf<Any>(inlineCodeSpan) }
+                    // MC-08：strong 白 600（Markwon 默认只加粗，文字仍是正文色）。
+                    builder.addFactory(StrongEmphasis::class.java) { _, _ ->
+                        arrayOf<Any>(ForegroundColorSpan(strongInk))
+                    }
                 }
             })
             .build()
@@ -1496,14 +2148,78 @@ private fun MarkdownBody(text: String, streaming: Boolean = false) {
             view.setTextColor(textColor)
             view.setLinkTextColor(linkColor)
             // 文本没变就不要全量重解析 Markdown（节流后同一帧可能重复进入 update）。
-            val rendered = shown + "\u0000" + textColor + "\u0000" + linkColor
+            val rendered = shown + "\u0000" + textColor + "\u0000" + linkColor + "\u0000" + streaming + "\u0000" + cursorOn
             if (view.tag != rendered) {
                 view.tag = rendered
-                markwon.setMarkdown(view, shown)
+                val builder = SpannableStringBuilder(markwon.toMarkdown(shown))
+                while (builder.isNotEmpty() && (builder[builder.length - 1] == '\n' || builder[builder.length - 1] == ' ')) {
+                    builder.delete(builder.length - 1, builder.length)
+                }
+                if (streaming && builder.isNotEmpty() && cursorOn) {
+                    builder.append("\u2589")
+                    builder.setSpan(
+                        ForegroundColorSpan(cursorInk),
+                        builder.length - 1,
+                        builder.length,
+                        Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+                    )
+                }
+                view.text = builder
             }
         },
         modifier = Modifier.fillMaxWidth(),
     )
+}
+
+/**
+ * MC-08 行内 code 自绘 span：圆角紫底 + 1px 紫边 + 1.5/5 内边距 + mono 11.5。
+ * Markwon 自带 CodeSpan 只会给文字上底色（方角、无内边距），这里用 ReplacementSpan 接管整段绘制。
+ */
+private class RoundedInlineCodeSpan(
+    private val fillColor: Int,
+    private val strokeColor: Int,
+    private val textColorInt: Int,
+    private val textSizePx: Float,
+    private val typeface: Typeface,
+    private val radiusPx: Float,
+    private val padHorizontalPx: Float,
+    private val padVerticalPx: Float,
+    private val strokeWidthPx: Float,
+) : ReplacementSpan() {
+    override fun getSize(paint: Paint, text: CharSequence, start: Int, end: Int, fm: Paint.FontMetricsInt?): Int {
+        paint.typeface = typeface
+        paint.textSize = textSizePx
+        return (paint.measureText(text, start, end) + padHorizontalPx * 2f).toInt()
+    }
+
+    override fun draw(
+        canvas: Canvas,
+        text: CharSequence,
+        start: Int,
+        end: Int,
+        x: Float,
+        top: Int,
+        y: Int,
+        bottom: Int,
+        paint: Paint,
+    ) {
+        paint.typeface = typeface
+        paint.textSize = textSizePx
+        val metrics = paint.fontMetrics
+        val left = x
+        val right = x + paint.measureText(text, start, end) + padHorizontalPx * 2f
+        val rect = RectF(left, y + metrics.ascent - padVerticalPx, right, y + metrics.descent + padVerticalPx)
+        paint.style = Paint.Style.FILL
+        paint.color = fillColor
+        canvas.drawRoundRect(rect, radiusPx, radiusPx, paint)
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = strokeWidthPx
+        paint.color = strokeColor
+        canvas.drawRoundRect(rect, radiusPx, radiusPx, paint)
+        paint.style = Paint.Style.FILL
+        paint.color = textColorInt
+        canvas.drawText(text, start, end, left + padHorizontalPx, y.toFloat(), paint)
+    }
 }
 
 private suspend fun decodeImage(part: ImagePart, loader: suspend (ImagePart) -> ByteArray?): android.graphics.Bitmap? =
@@ -1561,14 +2277,16 @@ private fun ImageStrip(images: List<ImagePart>, modifier: Modifier = Modifier) {
                 // 加载中/不可用不能直接消失，否则用户以为图片丢了（B-42）。
                 Box(
                     Modifier.size(96.dp).clip(RoundedCornerShape(9.dp)).background(Panel)
-                        .border(0.7.dp, Line, RoundedCornerShape(10.dp))
-                        .clickable(enabled = loaded && !part.unavailable) { retry += 1 },
+                        .border(1.dp, Line, RoundedCornerShape(9.dp))
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            enabled = loaded && !part.unavailable,
+                        ) { retry += 1 },
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
                         when {
-                            part.unavailable && part.size > 0 ->
-                                "图片不可用（${formatImageSize(part.size)}）"
                             part.unavailable -> "图片不可用"
                             loaded -> "加载失败，点击重试"
                             else -> "加载中…"
@@ -1584,8 +2302,8 @@ private fun ImageStrip(images: List<ImagePart>, modifier: Modifier = Modifier) {
                     modifier = Modifier
                         .size(96.dp)
                         .clip(RoundedCornerShape(9.dp))
-                        .border(0.7.dp, Line, RoundedCornerShape(9.dp))
-                        .clickable { preview = part },
+                        .border(1.dp, Line, RoundedCornerShape(9.dp))
+                        .chatClick { preview = part },
                 )
             }
         }
@@ -1597,31 +2315,47 @@ private fun ImageStrip(images: List<ImagePart>, modifier: Modifier = Modifier) {
             value = withContext(Dispatchers.IO) { decodeImage(part, loader) }
             loaded = true
         }
-        Dialog(onDismissRequest = { preview = null }) {
-            Column(
-                Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Color.Black).padding(8.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
+        // MB-80：点遮罩关闭；内容用 panel 底 + 16 圆角，禁止整屏纯黑。
+        Dialog(onDismissRequest = { preview = null }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+            BoxWithConstraints(
+                Modifier.fillMaxSize().background(PhotoScrim.copy(alpha = 0.66f)) // token: B.5.3 scrim
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                    ) { preview = null },
+                contentAlignment = Alignment.Center,
             ) {
-                bitmap?.let {
-                    androidx.compose.foundation.Image(
-                        bitmap = it.asImageBitmap(),
-                        contentDescription = "查看图片",
-                        contentScale = ContentScale.Fit,
-                        modifier = Modifier.fillMaxWidth().height(420.dp),
-                    )
-                } ?: Text(
-                    when {
-                        part.unavailable && part.size > 0 -> "图片不可用（${formatImageSize(part.size)}）"
-                        part.unavailable -> "图片不可用"
-                        loaded -> "加载失败，点击重试"
-                        else -> "加载中…"
-                    },
-                    color = Color.White,
-                    modifier = Modifier
-                        .padding(24.dp)
-                        .clickable(enabled = loaded && !part.unavailable) { retry += 1 },
-                )
-                TextButton(onClick = { preview = null }) { Text("关闭", color = Color.White) }
+                val previewMaxHeight = maxHeight
+                Box(
+                    Modifier.fillMaxWidth(0.92f).widthIn(max = 640.dp)
+                        .clip(RoundedCornerShape(16.dp)).background(Panel).padding(8.dp),
+                ) {
+                    if (bitmap != null) {
+                        androidx.compose.foundation.Image(
+                            bitmap = bitmap!!.asImageBitmap(),
+                            contentDescription = "查看图片",
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier.fillMaxWidth().heightIn(max = previewMaxHeight * 0.84f),
+                        )
+                    } else {
+                        Text(
+                            when {
+                                part.unavailable -> "图片不可用"
+                                loaded -> "加载失败，点击重试"
+                                else -> "加载中…"
+                            },
+                            color = TextSecondary,
+                            modifier = Modifier.fillMaxWidth().padding(24.dp),
+                        )
+                    }
+                    Box(
+                        Modifier.align(Alignment.TopEnd).size(44.dp).chatClick { preview = null },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Box(Modifier.size(30.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.55f)))
+                        Icon(Icons.Outlined.Close, "关闭图片预览", tint = Color.White, modifier = Modifier.size(16.dp))
+                    }
+                }
             }
         }
     }
@@ -1630,41 +2364,61 @@ private fun ImageStrip(images: List<ImagePart>, modifier: Modifier = Modifier) {
 @Composable
 private fun ApprovalCard(approval: Approval, onClick: () -> Unit) {
     val remaining = rememberCountdown(approval)
-    val accent = Rose
+    val shape = RoundedCornerShape(16.dp)
+    val accentBar = Rose.copy(alpha = 0.85f) // drawBehind 内使用，不能在绘制回调里读 token
     Column(
         Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp))
-            .background(Brush.linearGradient(listOf(Rose.copy(alpha = 0.12f), Rose.copy(alpha = 0.035f))))
-            .border(0.8.dp, Rose.copy(alpha = 0.42f), RoundedCornerShape(16.dp))
+            .clip(shape)
+            .background(
+                Brush.linearGradient(
+                    listOf(Rose.copy(alpha = 0.15f), Rose.copy(alpha = 0.035f), Color.White.copy(alpha = 0.01f)),
+                ),
+            )
+            .border(1.dp, Rose.copy(alpha = 0.32f), shape)
             .drawBehind {
-                drawLine(accent.copy(alpha = 0.85f), Offset(1.5.dp.toPx(), 12.dp.toPx()), Offset(1.5.dp.toPx(), size.height - 12.dp.toPx()), 2.dp.toPx())
+                drawLine(
+                    accentBar,
+                    Offset(1.dp.toPx(), 14.dp.toPx()),
+                    Offset(1.dp.toPx(), size.height - 14.dp.toPx()),
+                    2.dp.toPx(),
+                )
             }
-            .clickable(onClick = onClick)
-            .padding(horizontal = 15.dp, vertical = 13.dp),
+            .chatPress(onClick = onClick, scale = 0.985f)
+            .padding(start = 15.dp, end = 13.dp, top = 12.dp, bottom = 11.dp),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Tag(approval.risk, riskColor(approval.risk), filled = true)
-            Spacer(Modifier.size(7.dp))
-            Text(approval.toolName, style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMono), color = TextSecondary)
-            Spacer(Modifier.weight(1f))
-            MonoLabel(if (remaining <= 0) "已超时" else "${remaining}s", color = if (remaining <= 0) TextMuted else Rose)
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+            Tag(riskLabel(approval.risk), chatRiskColor(approval.risk), filled = true)
+            Text(
+                approval.toolName,
+                style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMono, fontSize = 10.5.sp),
+                color = ApprovalToolInk,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            Icon(Icons.Outlined.Schedule, null, tint = Rose.copy(alpha = 0.8f), modifier = Modifier.size(11.dp))
+            Text(
+                if (remaining <= 0) "已超时" else "${remaining}s",
+                style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMono, fontSize = 10.sp),
+                color = if (remaining <= 0) TextMuted else Rose,
+            )
         }
-        Spacer(Modifier.height(7.dp))
+        Spacer(Modifier.height(6.dp))
         Text(
             approval.command ?: approval.summary.ifBlank { "高风险操作" },
-            style = MaterialTheme.typography.labelMedium.copy(fontFamily = JetBrainsMono, lineHeight = 17.sp),
-            color = TextPrimary,
+            style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMono, fontSize = 10.5.sp, lineHeight = 16.3.sp),
+            color = ApprovalCommandInk,
             maxLines = 3,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(9.dp))
-                .background(Color.Black.copy(alpha = 0.35f)).padding(horizontal = 10.dp, vertical = 8.dp),
+                .background(Color.Black.copy(alpha = 0.35f)).padding(horizontal = 10.dp, vertical = 9.dp),
         )
         Spacer(Modifier.height(8.dp))
         Box(Modifier.fillMaxWidth().height(2.dp).clip(CircleShape).background(Rose.copy(alpha = 0.12f))) {
             Box(Modifier.fillMaxWidth((remaining / 120f).coerceIn(0f, 1f)).fillMaxHeight().background(Rose.copy(alpha = 0.8f)))
         }
-        Spacer(Modifier.height(9.dp))
+        Spacer(Modifier.height(8.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 approval.cwd.ifBlank { approval.path.orEmpty() },
@@ -1675,7 +2429,7 @@ private fun ApprovalCard(approval: Approval, onClick: () -> Unit) {
                 modifier = Modifier.weight(1f),
             )
             Spacer(Modifier.size(8.dp))
-            Text("审批 →", style = MaterialTheme.typography.labelMedium, color = Rose)
+            Text("审批 →", style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMono), color = ApprovalFootInk)
         }
     }
 }
@@ -1684,6 +2438,7 @@ private fun ApprovalCard(approval: Approval, onClick: () -> Unit) {
 @Composable
 private fun ApprovalDialog(
     approval: Approval,
+    deviceCount: Int,
     onDismiss: () -> Unit,
     onDecide: (String, Boolean) -> Unit,
     onExtend: () -> Unit,
@@ -1699,16 +2454,17 @@ private fun ApprovalDialog(
     }
     // 服务端到点即超时拒绝：按钮必须一起失效，否则用户以为还能批准。
     val expired = remaining <= 0
-    val critical = approval.risk.equals("critical", ignoreCase = true)
+    val critical = approval.risk.lowercase() == "critical"
     val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheet,
         containerColor = Panel,
-            shape = RoundedCornerShape(topStart = 26.dp, topEnd = 26.dp),
+        shape = RoundedCornerShape(topStart = 26.dp, topEnd = 26.dp),
         scrimColor = Color.Black.copy(alpha = 0.66f),
         dragHandle = null,
     ) {
+        SheetSurface {
         Column(Modifier.fillMaxWidth()) {
             CarrySheetGrabber()
             Row(
@@ -1719,7 +2475,7 @@ private fun ApprovalDialog(
                 Box(
                     Modifier.size(44.dp).clip(RoundedCornerShape(13.dp))
                         .background(Brush.linearGradient(listOf(Rose.copy(alpha = 0.30f), Rose.copy(alpha = 0.10f))))
-                        .border(0.8.dp, Rose.copy(alpha = 0.38f), RoundedCornerShape(13.dp)),
+                        .border(1.dp, Rose.copy(alpha = 0.38f), RoundedCornerShape(13.dp)),
                     contentAlignment = Alignment.Center,
                 ) { Icon(Icons.Outlined.Bolt, null, tint = Rose, modifier = Modifier.size(21.dp)) }
                 Column(Modifier.weight(1f)) {
@@ -1737,125 +2493,261 @@ private fun ApprovalDialog(
                     CircularProgressIndicator(
                         progress = { if (approval.remainingSeconds <= 0) 0f else (remaining.toFloat() / approval.remainingSeconds).coerceIn(0f, 1f) },
                         color = if (expired) TextMuted else Rose,
-                        trackColor = Line,
-                        strokeWidth = 2.dp,
+                        trackColor = Rose.copy(alpha = 0.16f),
+                        strokeWidth = 2.5.dp,
                         modifier = Modifier.size(44.dp),
                     )
                     Text(
                         if (expired) "0" else "$remaining",
-                        style = MaterialTheme.typography.labelMedium,
+                        style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMono),
                         color = if (expired) TextMuted else Rose,
                     )
                 }
             }
             Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp).padding(bottom = 26.dp)) {
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Tag(approval.risk, riskColor(approval.risk), filled = true)
-                    Tag(approval.category, TextMuted)
-                    Spacer(Modifier.weight(1f))
-                    MonoLabel(if (expired) "已超时 · 将按拒绝处理" else "批准后立即在本机执行", color = if (expired) TextMuted else Rose)
+                // MB-71：批准后果 + 自动拒绝时间，必须一眼可见。
+                Row(
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                        .background(Rose.copy(alpha = 0.055f))
+                        .border(1.dp, Rose.copy(alpha = 0.15f), RoundedCornerShape(12.dp))
+                        .padding(horizontal = 12.dp, vertical = 11.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            if (expired) "已超时 · 将按拒绝处理" else "批准后立即在电脑本机执行",
+                            style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.5.sp, fontWeight = FontWeight.SemiBold),
+                            color = ApprovalSheetPrimaryInk, // token: MB-71 主文案
+                        )
+                        Spacer(Modifier.height(2.dp))
+                        Text(
+                            if (expired) "服务端已按拒绝处理，请等待下一次审批请求" else "120 秒内未响应将自动拒绝",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = TextMuted,
+                        )
+                    }
+                    Tag(riskLabel(approval.risk), chatRiskColor(approval.risk), filled = true)
                 }
                 Spacer(Modifier.height(11.dp))
                 Column(
                     Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
-                        .background(Color.Black.copy(alpha = 0.34f))
-                        .border(0.7.dp, Line, RoundedCornerShape(12.dp))
+                        .background(Color.Black.copy(alpha = 0.35f))
+                        .border(1.dp, Line, RoundedCornerShape(12.dp))
                         .padding(horizontal = 12.dp, vertical = 10.dp),
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         MonoLabel("COMMAND", color = TextMuted)
                         Spacer(Modifier.weight(1f))
                         Icon(Icons.Outlined.Lock, null, tint = TextMuted, modifier = Modifier.size(11.dp))
+                        Spacer(Modifier.size(4.dp))
+                        Text("SHA-256 已校验", style = MaterialTheme.typography.labelSmall, color = TextMuted)
                     }
                     Spacer(Modifier.height(6.dp))
                     Text(
                         approval.command ?: approval.summary,
-                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace, lineHeight = 17.sp),
-                        color = TextPrimary,
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 11.sp,
+                            lineHeight = 18.7.sp,
+                        ),
+                        color = ApprovalSheetCommandInk, // token: MB-72 命令原文
                         maxLines = 8,
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
-                Spacer(Modifier.height(9.dp))
+                Spacer(Modifier.height(10.dp))
                 ApprovalKeyValue("CWD", approval.cwd.ifBlank { "—" })
-                ApprovalKeyValue("SESSION", approval.sessionId.take(12))
-                ApprovalKeyValue("REQUEST", approval.requestedAt)
-                Spacer(Modifier.height(9.dp))
-                Row(
-                    Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(Surface2).padding(horizontal = 10.dp, vertical = 7.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text("记住此命令", style = MaterialTheme.typography.bodySmall, color = if (critical) TextMuted else TextSecondary)
-                        Text(
-                            if (critical) "危险命令不允许记住" else "仅记住这一条命令",
-                            style = MaterialTheme.typography.labelSmall, color = TextMuted,
-                        )
+                ApprovalKeyValue("SESSION", approval.sessionId.take(16), last = approval.requestedAt.isBlank())
+                // M-P2-05：REQUEST 为空时不渲染空标签行（不留空 key + 分隔线）。
+                if (approval.requestedAt.isNotBlank()) {
+                    ApprovalKeyValue("REQUEST", approval.requestedAt, last = true)
+                }
+                Spacer(Modifier.height(12.dp))
+                if (critical) {
+                    val criticalDashedColor = TextMuted.copy(alpha = 0.45f) // drawBehind 不能读 Composable token
+                    // MB-74：critical 操作不支持记住 —— 虚线禁用行、18dp 勾选框内锁图标、opacity .55、不可点。
+                    Row(
+                        Modifier.fillMaxWidth().heightIn(min = 44.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color.White.copy(alpha = 0.02f))
+                            .drawBehind {
+                                val width = 1.dp.toPx()
+                                val dash = PathEffect.dashPathEffect(floatArrayOf(4.dp.toPx(), 4.dp.toPx()))
+                                val outline = Path().apply {
+                                    addRoundRect(
+                                        RoundRect(
+                                            left = 0f,
+                                            top = 0f,
+                                            right = size.width,
+                                            bottom = size.height,
+                                            radiusX = 10.dp.toPx(),
+                                            radiusY = 10.dp.toPx(),
+                                        ),
+                                    )
+                                }
+                                drawPath(
+                                    path = outline,
+                                    color = criticalDashedColor,
+                                    style = Stroke(width = width, pathEffect = dash),
+                                )
+                            }
+                            .padding(horizontal = 10.dp, vertical = 9.dp)
+                            .alpha(0.55f),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(9.dp),
+                    ) {
+                        Box(
+                            Modifier.size(18.dp).clip(RoundedCornerShape(5.dp))
+                                .border(1.dp, TextMuted, RoundedCornerShape(5.dp)),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(Icons.Outlined.Lock, null, tint = TextMuted, modifier = Modifier.size(10.dp))
+                        }
+                        Column(Modifier.weight(1f)) {
+                            Text("critical 操作不支持记住", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
+                            Spacer(Modifier.height(2.dp))
+                            Text(
+                                "即使已记住同类命令，critical 操作仍必须逐次确认。",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = TextMuted,
+                            )
+                        }
                     }
-                    CarrySwitch(checked = rememberRule && !critical, onCheckedChange = { rememberRule = it }, enabled = !critical)
+                } else {
+                    Row(
+                        Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(Surface2)
+                            .padding(start = 10.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text("记住此命令", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
+                        }
+                        // M-P2-11：可视开关 38×22 不变，外层扩到 44dp 命中区。
+                        Box(
+                            Modifier.size(44.dp).chatClick(enabled = !expired) { rememberRule = !rememberRule },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            CarrySwitch(checked = rememberRule, onCheckedChange = { rememberRule = it }, enabled = !expired)
+                        }
+                    }
                 }
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    if (expired) "已超时：服务端已按拒绝处理，请等待下一次审批请求。"
-                    else "本对话都允许：后续普通工具不再询问；rm -rf 等危险命令仍会逐次确认。",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (expired) Rose else TextMuted,
-                )
-                Spacer(Modifier.height(13.dp))
+                Spacer(Modifier.height(14.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(7.dp), verticalAlignment = Alignment.CenterVertically) {
-                    CarryActionButton(
-                        "拒绝", { onDecide("deny", false) },
-                        modifier = Modifier.weight(1f), kind = ButtonKind.Ghost, enabled = !expired, height = 44.dp,
-                    )
-                    CarryActionButton(
-                        "延长 120s", { onExtend(); remaining = (remaining + 120).coerceAtMost(300) },
-                        modifier = Modifier.weight(1.12f), kind = ButtonKind.Ghost, enabled = !expired && remaining < 300, height = 44.dp,
-                    )
-                    CarryActionButton(
-                        "批准", { onDecide("allow", rememberRule && !critical) },
-                        modifier = Modifier.weight(1.35f), kind = ButtonKind.Danger, enabled = !expired, height = 44.dp,
-                    )
+                    ApprovalGhostButton(
+                        "拒绝",
+                        enabled = !expired,
+                        modifier = Modifier.weight(1f),
+                    ) { onDecide("deny", false) }
+                    ApprovalGhostButton(
+                        "延长 120s",
+                        enabled = !expired && remaining < 300,
+                        tint = Amber,
+                        modifier = Modifier.weight(1.15f),
+                    ) { onExtend(); remaining = (remaining + 120).coerceAtMost(300) }
+                    ApprovalSolidButton(
+                        "批准",
+                        enabled = !expired,
+                        modifier = Modifier.weight(1.35f),
+                    ) { onDecide("allow", rememberRule && !critical) }
                 }
-                Spacer(Modifier.height(4.dp))
+                Spacer(Modifier.height(10.dp))
                 Text(
-                    "本对话都允许",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = Cyan,
-                    modifier = Modifier.fillMaxWidth()
-                        .clip(RoundedCornerShape(8.dp))
-                        .clickable(enabled = !expired) { onDecide("allow_always", rememberRule && !critical) }
-                        .padding(vertical = 10.dp),
+                    "广播至 $deviceCount 台已配对设备 · 首个响应生效",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TextMuted,
+                    modifier = Modifier.fillMaxWidth(),
                     textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                 )
             }
+        }
         }
     }
 }
 
 @Composable
-private fun ApprovalKeyValue(key: String, value: String) {
-    Row(
-        Modifier.fillMaxWidth().padding(vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
+private fun ApprovalGhostButton(
+    label: String,
+    enabled: Boolean,
+    modifier: Modifier = Modifier,
+    tint: Color = TextPrimary,
+    onClick: () -> Unit,
+) {
+    val shape = RoundedCornerShape(13.dp)
+    Box(
+        modifier.height(44.dp).clip(shape)
+            .background(Color.White.copy(alpha = 0.035f))
+            .border(1.dp, LineStrong, shape)
+            .alpha(if (enabled) 1f else 0.45f)
+            .chatPress(enabled = enabled, onClick = onClick),
+        contentAlignment = Alignment.Center,
     ) {
-        MonoLabel(key, color = TextMuted)
-        Spacer(Modifier.weight(1f))
-        Text(
-            value,
-            style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
-            color = TextSecondary,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-        )
+        Text(label, style = MaterialTheme.typography.titleSmall, color = tint)
+    }
+}
+
+@Composable
+private fun ApprovalSolidButton(
+    label: String,
+    enabled: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    val shape = RoundedCornerShape(13.dp)
+    Box(
+        modifier.height(44.dp).clip(shape)
+            .background(Brush.linearGradient(listOf(Rose.copy(alpha = 0.92f), Rose.copy(alpha = 0.66f))))
+            .border(1.dp, Rose.copy(alpha = 0.4f), shape)
+            .alpha(if (enabled) 1f else 0.45f)
+            .chatPress(enabled = enabled, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(label, style = MaterialTheme.typography.titleSmall, color = Color.White)
+    }
+}
+
+@Composable
+private fun ApprovalKeyValue(key: String, value: String, last: Boolean = false) {
+    Column(Modifier.fillMaxWidth()) {
+        Row(
+            Modifier.fillMaxWidth().padding(vertical = 9.dp),
+            verticalAlignment = Alignment.Top,
+        ) {
+            Text(
+                key,
+                style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                color = TextMuted,
+                modifier = Modifier.width(78.dp),
+            )
+            Text(
+                value,
+                style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace, lineHeight = 16.sp),
+                color = TextSecondary,
+                modifier = Modifier.weight(1f),
+            )
+        }
+        if (!last) DividerLine()
     }
 }
 
 @Composable
 private fun KeyValue(key: String, value: String) {
-    Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-        MonoLabel(key, color = TextMuted)
-        Spacer(Modifier.height(2.dp))
-        Text(value, style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace), color = TextPrimary, maxLines = 4)
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 3.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Text(
+            key,
+            style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+            color = TextMuted,
+            modifier = Modifier.width(96.dp),
+        )
+        Text(
+            value,
+            style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace, fontSize = 11.5.sp, lineHeight = 17.sp),
+            color = TextPrimary,
+            modifier = Modifier.weight(1f),
+        )
     }
 }
 
@@ -1881,21 +2773,36 @@ private fun Composer(
 ) {
     fun mb(v: Long): String = String.format(java.util.Locale.US, "%.1f", v / 1048576.0)
     val canSend = !readOnly && (text.isNotBlank() || pendingImages.isNotEmpty())
+    val inputSource = remember { MutableInteractionSource() }
+    val inputFocused by inputSource.collectIsFocusedAsState()
+    val inputBorderColor = if (inputFocused) Violet.copy(alpha = 0.55f) else Color.White.copy(alpha = 0.14f)
+    val inputGlowColor = Violet.copy(alpha = 0.18f)
+    val focusedNow = inputFocused
+    val readonlyDash = Amber.copy(alpha = 0.22f)
     Column(
         Modifier
             .fillMaxWidth()
-            .background(Brush.verticalGradient(listOf(Ink.copy(alpha = 0f), Ink.copy(alpha = 0.96f))))
-            .navigationBarsPadding()
-            .padding(start = 14.dp, end = 14.dp, top = 8.dp, bottom = 14.dp),
+            // MQ-01：transparent → rgba(9,9,16,.92) 34% → rgba(8,8,14,.99)
+            .background(
+                Brush.verticalGradient(
+                    0f to Color.Transparent,
+                    0.34f to ComposerGradMid.copy(alpha = 0.92f),
+                    1f to ComposerGradEnd.copy(alpha = 0.99f),
+                ),
+            )
+            .padding(start = 14.dp, end = 14.dp, top = 8.dp, bottom = 26.dp),
     ) {
         if (running) {
             Row(
-                Modifier.fillMaxWidth().height(26.dp),
+                Modifier.fillMaxWidth().height(24.dp),
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Row(
-                    Modifier.height(26.dp).clip(RoundedCornerShape(8.dp)).background(Surface2.copy(alpha = 0.72f)).padding(2.dp),
+                    Modifier.height(24.dp).clip(RoundedCornerShape(8.dp))
+                        .background(Color.White.copy(alpha = 0.04f))
+                        .border(1.dp, Line, RoundedCornerShape(8.dp))
+                        .padding(2.dp),
                     horizontalArrangement = Arrangement.spacedBy(2.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -1910,7 +2817,10 @@ private fun Composer(
         if (pendingImages.isNotEmpty()) {
             val done = pendingImages.count { it.blobId != null || it.error != null }
             Row(verticalAlignment = Alignment.CenterVertically) {
-                MonoLabel("附件 $done/${pendingImages.size}", color = TextMuted)
+                MonoLabel(
+                    "附件 $done/${pendingImages.size} · ${formatImageSize(pendingImages.sumOf { it.size })}",
+                    color = TextMuted,
+                )
                 Spacer(Modifier.weight(1f))
                 MonoLabel("会话 ${mb(usageBytes)}/${mb(usageLimit)} MiB", color = if (usageBytes > usageLimit) Rose else TextMuted)
             }
@@ -1926,104 +2836,172 @@ private fun Composer(
                 }
                 if (pendingImages.size < MAX_IMAGES_PER_MESSAGE && !readOnly) {
                     item {
-                        val dashedLine = LineStrong
                         Box(
-                            Modifier.size(76.dp)
-                                .clip(RoundedCornerShape(9.dp))
+                            Modifier.size(38.dp)
+                                .clip(RoundedCornerShape(8.dp))
                                 .background(Color.White.copy(alpha = 0.02f))
                                 .drawBehind {
-                                    val stroke = 0.8.dp.toPx()
                                     drawRoundRect(
-                                        color = dashedLine,
-                                        style = androidx.compose.ui.graphics.drawscope.Stroke(
-                                            width = stroke,
-                                            pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(5.dp.toPx(), 4.dp.toPx())),
+                                        color = Color.White.copy(alpha = 0.24f),
+                                        style = Stroke(
+                                            width = 1.dp.toPx(),
+                                            pathEffect = PathEffect.dashPathEffect(floatArrayOf(5.dp.toPx(), 4.dp.toPx())),
                                         ),
-                                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(9.dp.toPx()),
+                                        cornerRadius = CornerRadius(8.dp.toPx()),
                                     )
                                 }
-                                .clickable(onClick = onPickImage),
+                                .chatClick { onPickImage() },
                             contentAlignment = Alignment.Center,
-                        ) { Icon(Icons.Outlined.Add, "添加图片", tint = TextMuted, modifier = Modifier.size(18.dp)) }
+                        ) { Icon(Icons.Outlined.Add, "添加图片", tint = TextMuted, modifier = Modifier.size(16.dp)) }
                     }
                 }
             }
             Spacer(Modifier.height(6.dp))
-            LinearProgressIndicator(
-                progress = { if (usageLimit <= 0) 0f else (usageBytes.toFloat() / usageLimit).coerceIn(0f, 1f) },
-                modifier = Modifier.fillMaxWidth().height(3.dp).clip(CircleShape),
-                color = if (usageBytes > usageLimit) Rose else Violet,
-                trackColor = Line,
-            )
+            // MQ-10：4dp 用量条，紫→青；超限玫
+            Box(
+                Modifier.fillMaxWidth().height(4.dp).clip(CircleShape)
+                    .background(Color.White.copy(alpha = 0.08f)),
+            ) {
+                val ratio = if (usageLimit <= 0) 0f else (usageBytes.toFloat() / usageLimit).coerceIn(0f, 1f)
+                Box(
+                    Modifier.fillMaxWidth(ratio).fillMaxHeight().clip(CircleShape)
+                        .background(
+                            if (usageBytes > usageLimit) {
+                                SolidColor(Rose)
+                            } else {
+                                Brush.horizontalGradient(listOf(Violet, Cyan))
+                            },
+                        ),
+                )
+            }
             Spacer(Modifier.height(7.dp))
         }
         if (imageError != null) {
-            Text(
-                imageError,
-                style = MaterialTheme.typography.labelSmall,
-                color = Rose,
-                modifier = Modifier.padding(bottom = 5.dp),
-            )
-        }
-        Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Box(
-                Modifier.size(31.dp).clip(RoundedCornerShape(9.dp))
-                    .background(Color.White.copy(alpha = 0.035f))
-                    .border(0.7.dp, Line, RoundedCornerShape(9.dp))
-                    .clickable(enabled = !readOnly, onClick = onPickImage),
-                contentAlignment = Alignment.Center,
+            // MQ-13：输入区上方图片错误条，只说明原因
+            Row(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
+                    .background(Rose.copy(alpha = 0.06f))
+                    .border(1.dp, Rose.copy(alpha = 0.18f), RoundedCornerShape(10.dp))
+                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(7.dp),
             ) {
-                Icon(Icons.Outlined.AddPhotoAlternate, "添加图片", tint = if (readOnly) TextMuted.copy(alpha = 0.4f) else TextSecondary, modifier = Modifier.size(16.dp))
+                Icon(Icons.Outlined.Info, null, tint = Rose, modifier = Modifier.size(14.dp))
+                Text(imageError, style = MaterialTheme.typography.labelSmall, color = TextSecondary)
             }
-            Box(
-                Modifier
-                    .weight(1f)
-                    .clip(RoundedCornerShape(19.dp))
-                    .background(Brush.verticalGradient(listOf(Surface3, Surface2)))
-                    .border(0.8.dp, LineStrong, RoundedCornerShape(19.dp))
-                    .padding(horizontal = 13.dp, vertical = 9.dp),
-            ) {
-                if (text.isBlank()) {
-                    Text(
-                        if (readOnly) "该会话已迁移，只读"
-                        else if (running) "插入一条消息 / 输入指令…" else "给 pi 发消息… 输入 / 唤起命令",
-                        style = MaterialTheme.typography.bodyMedium, color = TextMuted,
-                    )
-                }
-                BasicTextField(
-                    value = text,
-                    onValueChange = { value ->
-                        if (value == "/" && text.isBlank()) onCommands() else onText(value)
-                    },
-                    enabled = !readOnly,
-                    textStyle = MaterialTheme.typography.bodyMedium.copy(color = TextPrimary, fontSize = 13.sp, lineHeight = 21.sp),
-                    cursorBrush = SolidColor(Violet),
-                    maxLines = 5,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
-            Box(
-                Modifier
-                    .size(32.dp)
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(
-                        if (canSend) Brush.linearGradient(listOf(Violet, VioletSoft))
-                        else Brush.linearGradient(listOf(TextMuted.copy(alpha = 0.14f), TextMuted.copy(alpha = 0.10f)))
-                    )
-                    .clickable(enabled = canSend, onClick = onSend),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    Icons.Outlined.ArrowUpward,
-                    "发送",
-                    tint = if (canSend) Color.White else TextMuted,
-                    modifier = Modifier.size(17.dp),
-                )
-            }
+            Spacer(Modifier.height(7.dp))
         }
         if (readOnly) {
-            Spacer(Modifier.height(5.dp))
-            Text("只读会话 · 图片与消息发送已禁用", style = MaterialTheme.typography.labelSmall, color = Amber)
+            // MQ-11：只读态虚线条（P0），替换输入行，底部不再重复提示
+            Box(
+                Modifier.fillMaxWidth().height(44.dp)
+                    .background(Color.White.copy(alpha = 0.02f), RoundedCornerShape(12.dp))
+                    .drawBehind {
+                        drawRoundRect(
+                            color = readonlyDash,
+                            style = Stroke(
+                                width = 1.dp.toPx(),
+                                pathEffect = PathEffect.dashPathEffect(floatArrayOf(6.dp.toPx(), 4.dp.toPx())),
+                            ),
+                            cornerRadius = CornerRadius(12.dp.toPx()),
+                        )
+                    }
+                    .padding(horizontal = 12.dp),
+                contentAlignment = Alignment.CenterStart,
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                    Icon(Icons.Outlined.Lock, null, tint = Amber, modifier = Modifier.size(14.dp))
+                    Text("只读 · 无法发送", style = MaterialTheme.typography.labelLarge, color = TextMuted)
+                }
+            }
+        } else {
+            Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                // MQ-06：添加图片 31dp 图标，44dp 热区，透明底
+                Box(
+                    Modifier.size(44.dp).chatPress(onClick = onPickImage, scale = 0.94f),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(Icons.Outlined.AddPhotoAlternate, "添加图片", tint = TextMuted, modifier = Modifier.size(16.dp))
+                }
+                // MQ-05：19 圆角、内高光、聚焦紫边+光
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(19.dp))
+                        .background(
+                            Brush.verticalGradient(
+                                listOf(InputGradTop.copy(alpha = 0.85f), InputGradBottom.copy(alpha = 0.92f)),
+                            ),
+                        )
+                        .border(1.dp, inputBorderColor, RoundedCornerShape(19.dp))
+                        .drawBehind {
+                            if (focusedNow) {
+                                drawRoundRect(
+                                    color = inputGlowColor,
+                                    style = Stroke(width = 3.dp.toPx()),
+                                    cornerRadius = CornerRadius(19.dp.toPx()),
+                                )
+                            }
+                            drawLine(
+                                Color.White.copy(alpha = 0.06f),
+                                Offset(14.dp.toPx(), 1.dp.toPx()),
+                                Offset(size.width - 14.dp.toPx(), 1.dp.toPx()),
+                                1.dp.toPx(),
+                            )
+                        }
+                        .padding(horizontal = 13.dp, vertical = 9.dp),
+                ) {
+                    if (text.isBlank()) {
+                        Text(
+                            if (running) "插入一条消息…" else "给 pi 发消息… 输入 / 唤起命令",
+                            style = MaterialTheme.typography.bodyMedium, color = TextMuted,
+                        )
+                    }
+                    BasicTextField(
+                        value = text,
+                        onValueChange = { value ->
+                            if (value == "/" && text.isBlank()) onCommands() else onText(value)
+                        },
+                        interactionSource = inputSource,
+                        textStyle = MaterialTheme.typography.bodyMedium.copy(color = TextPrimary, fontSize = 13.sp, lineHeight = 21.sp),
+                        cursorBrush = SolidColor(Violet),
+                        maxLines = 5,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                // MQ-08：32dp 渐变发送按钮（#8D7DFF → #5F4DF0）
+                Box(
+                    Modifier
+                        .size(32.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(
+                            if (canSend) {
+                                Brush.linearGradient(listOf(SendGradStart, SendGradEnd))
+                            } else {
+                                Brush.linearGradient(listOf(TextMuted.copy(alpha = 0.14f), TextMuted.copy(alpha = 0.10f)))
+                            },
+                        )
+                        .drawBehind {
+                            if (canSend) {
+                                drawLine(
+                                    Color.White.copy(alpha = 0.22f),
+                                    Offset(6.dp.toPx(), 1.dp.toPx()),
+                                    Offset(size.width - 6.dp.toPx(), 1.dp.toPx()),
+                                    1.dp.toPx(),
+                                )
+                            }
+                        }
+                        .chatPress(onClick = onSend, scale = 0.94f, enabled = canSend),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        Icons.Outlined.ArrowUpward,
+                        "发送",
+                        tint = if (canSend) Color.White else TextMuted,
+                        modifier = Modifier.size(16.dp),
+                    )
+                }
+            }
         }
     }
 }
@@ -2037,19 +3015,30 @@ private fun StreamModeButton(
     icon: androidx.compose.ui.graphics.vector.ImageVector? = null,
     onClick: () -> Unit,
 ) {
-    val color = if (danger) Rose else if (active) VioletSoft else TextMuted
-    Box(
-        modifier.height(26.dp)
+    // MQ-02/MQ-04：高 22、11sp，激活紫底 .20 + 内描边 .28；打断玫边 .26 + 玫底 .07。
+    val color = if (danger) StopInk else if (active) VioletSoft else TextMuted
+    val bg = when {
+        danger -> Rose.copy(alpha = 0.07f)
+        active -> Violet.copy(alpha = 0.20f)
+        else -> Color.Transparent
+    }
+    val borderColor = when {
+        danger -> Rose.copy(alpha = 0.26f)
+        active -> Violet.copy(alpha = 0.28f)
+        else -> Color.Transparent
+    }
+    Row(
+        modifier.height(22.dp)
             .clip(RoundedCornerShape(6.dp))
-            .background(if (active) Violet.copy(alpha = 0.18f) else Color.Transparent)
-            .border(0.7.dp, if (active) Violet.copy(alpha = 0.35f) else Color.Transparent, RoundedCornerShape(6.dp))
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center,
+            .background(bg)
+            .border(1.dp, borderColor, RoundedCornerShape(6.dp))
+            .padding(horizontal = 8.dp)
+            .chatClick(onClick = onClick),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(3.dp),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-            if (icon != null) Icon(icon, null, tint = color, modifier = Modifier.size(11.dp))
-            Text(label, style = MaterialTheme.typography.labelSmall, color = color)
-        }
+        if (icon != null) Icon(icon, null, tint = color, modifier = Modifier.size(11.dp))
+        Text(label, style = MaterialTheme.typography.labelSmall, color = color)
     }
 }
 
@@ -2073,9 +3062,9 @@ private fun OutgoingThumb(
         }
     }
     Box(
-        Modifier.size(76.dp).clip(RoundedCornerShape(9.dp))
+        Modifier.size(38.dp).clip(RoundedCornerShape(8.dp))
             .background(Surface2)
-            .border(0.7.dp, if (item.error != null) Rose.copy(alpha = 0.7f) else LineStrong, RoundedCornerShape(9.dp)),
+            .border(1.dp, if (item.error != null) Rose.copy(alpha = 0.7f) else Color.White.copy(alpha = 0.14f), RoundedCornerShape(8.dp)),
     ) {
         val image = bitmap
         if (image != null) {
@@ -2090,17 +3079,17 @@ private fun OutgoingThumb(
                 Icons.Outlined.Image,
                 null,
                 tint = TextMuted,
-                modifier = Modifier.align(Alignment.Center).size(19.dp),
+                modifier = Modifier.align(Alignment.Center).size(15.dp),
             )
         }
         Box(
             Modifier.align(Alignment.BottomStart).fillMaxWidth()
                 .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.72f))))
-                .padding(start = 5.dp, end = 5.dp, top = 8.dp, bottom = 3.dp),
+                .padding(start = 4.dp, end = 4.dp, top = 6.dp, bottom = 2.dp),
         ) {
             Text(
                 formatImageSize(item.size),
-                style = MaterialTheme.typography.labelSmall.copy(fontSize = 7.sp),
+                style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp, lineHeight = 12.sp),
                 color = Color.White.copy(alpha = 0.86f),
                 maxLines = 1,
             )
@@ -2115,24 +3104,24 @@ private fun OutgoingThumb(
         }
         if (item.error != null) {
             Box(
-                Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.58f)).clickable(onClick = onRetry),
+                Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.58f)).chatClick(onClick = onRetry),
                 contentAlignment = Alignment.Center,
             ) {
-                Text("重试", style = MaterialTheme.typography.labelMedium, color = Rose)
+                Text("重试", style = MaterialTheme.typography.labelSmall, color = Rose)
             }
         } else if (!item.uploading && item.blobId != null) {
             Box(
-                Modifier.align(Alignment.BottomEnd).padding(4.dp).size(14.dp).clip(CircleShape).background(Mint.copy(alpha = 0.9f)),
+                Modifier.align(Alignment.BottomEnd).padding(3.dp).size(14.dp).clip(CircleShape).background(Mint.copy(alpha = 0.9f)),
                 contentAlignment = Alignment.Center,
             ) { Icon(Icons.Outlined.Check, null, tint = Ink, modifier = Modifier.size(9.dp)) }
         }
         // 17dp 的移除按钮点不到：外面套 44dp 的可点区域，圆形仍按 17dp 绘制（BUG-020）。
         Box(
-            Modifier.align(Alignment.TopEnd).size(44.dp).clickable(onClick = onRemove),
+            Modifier.align(Alignment.TopEnd).size(44.dp).chatClick(onClick = onRemove),
             contentAlignment = Alignment.TopEnd,
         ) {
             Box(
-                Modifier.padding(top = 3.dp, end = 3.dp).size(17.dp).clip(CircleShape)
+                Modifier.padding(top = 2.dp, end = 2.dp).size(17.dp).clip(CircleShape)
                     .background(Color.Black.copy(alpha = 0.58f)),
                 contentAlignment = Alignment.Center,
             ) { Icon(Icons.Outlined.Close, "移除图片", tint = Color.White, modifier = Modifier.size(11.dp)) }
@@ -2191,7 +3180,7 @@ private fun ModelSheet(
     var levelList by remember(levels) { mutableStateOf(levels) }
     // 待提交意图 `provider|modelId|level`（level 为空表示只提交模型）。
     // 旋转会销毁 sheet 的协程作用域，把「模型已切、等级没切」静默丢掉；写进可保存状态后
-    // 重组时重放一次即可补齐（见下方 LaunchedEffect）。
+    // 重组时重放一次补齐（见下方 LaunchedEffect）。
     var inflight by rememberSaveable(stateSaver = NullableStringSaver) { mutableStateOf<String?>(null) }
     val currentKey = if (currentProvider.isBlank()) "" else "$currentProvider|$currentModelId"
     // prune 的入参：当前节点真实返回的 provider→id 集合。`models` 为空时返回 null——
@@ -2213,11 +3202,11 @@ private fun ModelSheet(
     if (groups.isEmpty()) {
         Column(Modifier.fillMaxWidth().fillMaxHeight(0.5f)) {
             CarrySheetGrabber()
-            CarrySheetHeader(title = "模型与思考等级", subtitle = "切换只影响下一次运行，不会中断当前生成。", onClose = onClose)
-            Column(Modifier.padding(horizontal = 18.dp)) {
+            CarrySheetHeader(title = "模型与思考等级", subtitle = "切换在下一轮对话生效", onClose = onClose)
+            Column(Modifier.padding(horizontal = 18.dp).padding(bottom = 26.dp)) {
             Spacer(Modifier.height(10.dp))
             Text(
-                "节点没有返回可用模型，请确认 pi 已登录并检查网络后重试。",
+                "节点未返回可用模型，请重试",
                 style = MaterialTheme.typography.bodySmall,
                     color = TextMuted,
                 )
@@ -2390,10 +3379,10 @@ private fun ModelSheet(
         Modifier
             .fillMaxWidth()
             .fillMaxHeight(0.82f)
-            .padding(bottom = 20.dp),
+            .padding(bottom = 26.dp),
     ) {
         CarrySheetGrabber()
-        CarrySheetHeader(title = "模型与思考等级", subtitle = "切换只影响下一次运行，不会中断当前生成。", onClose = onClose)
+        CarrySheetHeader(title = "模型与思考等级", subtitle = "切换在下一轮对话生效", onClose = onClose)
         Spacer(Modifier.height(2.dp))
 
         // 顶部供应商条：顺序固定为 models.list 首次出现顺序，不因当前选择重排。
@@ -2457,7 +3446,7 @@ private fun ModelSheet(
             }
         }
 
-        HorizontalDivider(color = Line.copy(alpha = 0.5f))
+        Spacer(Modifier.height(16.dp))
         Column(Modifier.padding(horizontal = 18.dp)) {
             Spacer(Modifier.height(10.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -2471,17 +3460,44 @@ private fun ModelSheet(
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         "思考等级不可用（未获取到模型能力）",
-                        style = MaterialTheme.typography.bodySmall,
+                        style = MaterialTheme.typography.labelSmall,
                         color = Amber,
                         modifier = Modifier.weight(1f),
                     )
                     Box(
                         Modifier
                             .sizeIn(minWidth = 44.dp, minHeight = 44.dp)
-                            .clip(RoundedCornerShape(50))
-                            .clickable(enabled = !busy) { retryLevels() },
+                            .chatClick(enabled = !busy) { retryLevels() },
                         contentAlignment = Alignment.Center,
-                    ) { Text("重试", style = MaterialTheme.typography.labelMedium, color = Amber) }
+                    ) { Text("重试", style = MaterialTheme.typography.labelSmall, color = Amber) }
+                }
+            } else if (levelList.size == 5) {
+                // MB-42：恰好 5 档时用 5 列网格（按钮 30 高、圆角 8、mono 11、热区 44）
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    levelList.forEach { level ->
+                        val active = !levelsError && level == pendingLevel
+                        Box(
+                            Modifier.weight(1f).height(44.dp)
+                                .chatClick(enabled = !busy && !levelsError) { commitThinking(level) },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Box(
+                                Modifier.fillMaxWidth().height(30.dp).clip(RoundedCornerShape(8.dp))
+                                    .background(if (active) Violet.copy(alpha = 0.20f) else PanelHigh)
+                                    .border(1.dp, if (active) Violet.copy(alpha = 0.34f) else Line, RoundedCornerShape(8.dp)),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(
+                                    thinkingLabel(level),
+                                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace, fontSize = 11.sp),
+                                    color = if (active) Violet else TextMuted,
+                                )
+                            }
+                        }
+                    }
                 }
             } else {
                 Row(
@@ -2491,28 +3507,26 @@ private fun ModelSheet(
                     levelList.forEach { level ->
                         val active = !levelsError && level == pendingLevel
                         // 热区至少 44dp（U-09）：外层 Box 撑热区，内层胶囊尺寸与样式不变。
-                        // 提交链进行中或等级未知时禁止点击：否则会把一个不属于该模型的等级写进去。
+                        // 提交链进行中或等级未知时禁止点按：否则会把一个不属于该模型的等级写进去。
                         Box(
                             Modifier
                                 .sizeIn(minHeight = 44.dp)
                                 .clip(RoundedCornerShape(50))
-                                .clickable(enabled = !busy && !levelsError) { commitThinking(level) },
+                                .chatClick(enabled = !busy && !levelsError) { commitThinking(level) },
                             contentAlignment = Alignment.Center,
                         ) {
-                            Column(
+                            Box(
                                 Modifier
                                     .clip(RoundedCornerShape(50))
                                     .background(if (active) Violet.copy(alpha = 0.20f) else PanelHigh)
-                                    .border(0.7.dp, if (active) Violet.copy(alpha = 0.55f) else Line, RoundedCornerShape(50))
+                                    .border(1.dp, if (active) Violet.copy(alpha = 0.34f) else Line, RoundedCornerShape(50))
                                     .padding(horizontal = 11.dp, vertical = 5.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally,
                             ) {
                                 Text(
                                     thinkingLabel(level),
-                                    style = MaterialTheme.typography.labelMedium,
+                                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace, fontSize = 11.sp),
                                     color = if (active) Violet else TextMuted,
                                 )
-                                Text(level, style = MaterialTheme.typography.labelSmall, color = TextMuted.copy(alpha = 0.7f))
                             }
                         }
                     }
@@ -2523,21 +3537,32 @@ private fun ModelSheet(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         "思考等级拉取失败，可重试",
-                        style = MaterialTheme.typography.bodySmall,
+                        style = MaterialTheme.typography.labelSmall,
                         color = Amber,
                         modifier = Modifier.weight(1f),
                     )
-                    Text("重试", style = MaterialTheme.typography.labelMedium, color = Amber, modifier = Modifier.clickable {
-                        pending?.let { commitModel(it) }
-                    })
+                    Box(
+                        Modifier.sizeIn(minWidth = 44.dp, minHeight = 44.dp)
+                            .chatClick { pending?.let { commitModel(it) } },
+                        contentAlignment = Alignment.Center,
+                    ) { Text("重试", style = MaterialTheme.typography.labelSmall, color = Amber) }
                 }
             }
             Spacer(Modifier.height(6.dp))
-            Text(
-                "只影响下一次运行；高等级会显著增加思考 token 与首字延迟。",
-                style = MaterialTheme.typography.bodySmall,
-                color = TextMuted,
-            )
+            // MB-43：提示框（白 .025 + 1px line + 圆角 10）
+            Box(
+                Modifier.fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Color.White.copy(alpha = 0.025f))
+                    .border(1.dp, Line, RoundedCornerShape(10.dp))
+                    .padding(horizontal = 10.dp, vertical = 8.dp),
+            ) {
+                Text(
+                    "高等级会显著增加思考 token 与首字延迟。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TextMuted,
+                )
+            }
         }
     }
 }
@@ -2588,32 +3613,37 @@ private fun ModelPage(
                 Row(
                     Modifier
                         .fillMaxWidth()
-                        .padding(bottom = 7.dp)
-                        .clip(RoundedCornerShape(13.dp))
-                        .background(PanelHigh.copy(alpha = if (isPending || isCurrent) 0.7f else 0.35f))
+                        .padding(bottom = 6.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(
+                            if (isPending || isCurrent) Violet.copy(alpha = 0.10f) else PanelHigh.copy(alpha = 0.35f),
+                        )
                         .border(
-                            0.7.dp,
+                            1.dp,
                             when {
-                                isCurrent -> Violet.copy(alpha = 0.5f)
-                                isPending -> Violet.copy(alpha = 0.3f)
+                                isCurrent -> Violet.copy(alpha = 0.28f)
+                                isPending -> Violet.copy(alpha = 0.20f)
                                 else -> Line
                             },
-                            RoundedCornerShape(13.dp),
+                            RoundedCornerShape(12.dp),
                         )
-                        .clickable(enabled = !busy) { onPick(m) }
-                        .padding(12.dp),
+                        .chatClick(enabled = !busy) { onPick(m) }
+                        .padding(horizontal = 12.dp, vertical = 11.dp),
                     verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(11.dp),
                 ) {
                     Box(
                         Modifier.size(30.dp).clip(RoundedCornerShape(9.dp)).background(Violet.copy(alpha = 0.12f)),
                         contentAlignment = Alignment.Center,
-                    ) { Text(m.name.take(1), style = MaterialTheme.typography.titleMedium, color = Violet) }
-                    Spacer(Modifier.size(10.dp))
+                    ) { Text(m.name.take(1), style = MaterialTheme.typography.labelLarge.copy(fontSize = 12.5.sp), color = Violet) }
                     Column(Modifier.weight(1f)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(
                                 m.name,
-                                style = MaterialTheme.typography.titleMedium,
+                                style = MaterialTheme.typography.labelLarge.copy(
+                                    fontSize = 12.5.sp,
+                                    fontWeight = FontWeight.Medium,
+                                ),
                                 color = TextPrimary,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
@@ -2626,6 +3656,7 @@ private fun ModelPage(
                                 Pill("当前（不在列表）", Amber)
                             }
                         }
+                        Spacer(Modifier.height(1.dp))
                         MonoLabel(
                             listOfNotNull(
                                 m.key,
@@ -2636,10 +3667,8 @@ private fun ModelPage(
                         )
                     }
                     if (m.priceText.isNotBlank()) {
-                        Spacer(Modifier.size(6.dp))
                         MonoLabel(m.priceText, color = TextMuted)
                     }
-                    Spacer(Modifier.size(8.dp))
                     // 已生效的当前模型必须有勾；待选只在没有当前模型时用浅色圈提示。
                     when {
                         isCurrent -> Icon(Icons.Outlined.Check, null, tint = Violet, modifier = Modifier.size(17.dp))
@@ -2662,25 +3691,34 @@ private fun ModelPage(
  */
 @Composable
 private fun TurnSummaryRow(turn: Turn, onClick: () -> Unit) {
-    Row(
+    Box(
         Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(9.dp))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 4.dp, vertical = 5.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
+            .height(44.dp)
+            .chatClick(onClick = onClick),
+        contentAlignment = Alignment.CenterStart,
     ) {
-        Text(
-            "${turn.durationText} · ${turn.tokenText}",
-            style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
-            color = TextMuted.copy(alpha = 0.85f),
-        )
-        if (turn.aborted) {
-            Text("已中断", style = MaterialTheme.typography.labelSmall, color = Amber)
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            val summaryParts = listOf(turn.durationText, turn.tokenText)
+                .map { it.trim() }
+                .filter { it.isNotBlank() && it != "—" }
+            if (summaryParts.isNotEmpty()) {
+                Text(
+                    summaryParts.joinToString(" · "),
+                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                    color = TextMuted,
+                )
+            }
+            if (turn.aborted) {
+                Text("已中断", style = MaterialTheme.typography.labelSmall, color = Amber)
+            }
+            Spacer(Modifier.weight(1f))
+            Icon(Icons.Outlined.ExpandMore, "查看轨迹", tint = TextMuted.copy(alpha = 0.7f), modifier = Modifier.size(13.dp))
         }
-        Spacer(Modifier.weight(1f))
-        Icon(Icons.Outlined.ExpandMore, "查看轨迹", tint = TextMuted.copy(alpha = 0.7f), modifier = Modifier.size(13.dp))
     }
 }
 
@@ -2690,7 +3728,7 @@ private fun TurnDetailSheet(turn: Turn, onClose: () -> Unit) {
     Column(Modifier.fillMaxWidth()) {
         CarrySheetGrabber()
         CarrySheetHeader(title = "本轮轨迹", subtitle = if (turn.aborted) "已中断" else null, onClose = onClose)
-        Column(Modifier.padding(horizontal = 18.dp).padding(bottom = 28.dp)) {
+        Column(Modifier.padding(horizontal = 18.dp).padding(bottom = 26.dp)) {
         MonoLabel(if (turn.model.isBlank()) "MODEL —" else "MODEL " + turn.model, color = TextMuted)
         Spacer(Modifier.height(14.dp))
         KeyValue("请求数", if (turn.requests > 0) "${turn.requests}" else "—")
@@ -2705,8 +3743,8 @@ private fun TurnDetailSheet(turn: Turn, onClose: () -> Unit) {
         KeyValue("成本", formatCost(turn.cost))
         Spacer(Modifier.height(10.dp))
         Text(
-            "缺失字段来自老节点或历史聊天记录：它们没有上报 usage，不做推算也不显示 0。",
-            style = MaterialTheme.typography.bodySmall,
+            "旧节点未上报 usage，缺失项显示 —",
+            style = MaterialTheme.typography.labelSmall,
             color = TextMuted,
         )
         }
@@ -2715,31 +3753,84 @@ private fun TurnDetailSheet(turn: Turn, onClose: () -> Unit) {
 
 @Composable
 private fun CommandSheet(onClose: () -> Unit, onPick: (CommandItem) -> Unit) {
+    var query by remember { mutableStateOf("") }
+    val visible = remember(query) {
+        commands.filter {
+            it.name.contains(query, ignoreCase = true) || it.description.contains(query, ignoreCase = true)
+        }
+    }
     Column(Modifier.fillMaxWidth()) {
         CarrySheetGrabber()
-        CarrySheetHeader(title = "命令面板", subtitle = "由 pi 扩展、prompt 模板与 skill 提供。", onClose = onClose)
-        Column(Modifier.padding(horizontal = 18.dp).padding(bottom = 28.dp)) {
-        commands.forEach { cmd ->
-            Row(
-                Modifier
+        CarrySheetHeader(title = "命令面板", onClose = onClose)
+        Column(Modifier.padding(horizontal = 18.dp).padding(bottom = 26.dp)) {
+            // MB-50：42dp 搜索框，紫色边与底，mono 12.5，前缀 / 15
+            BasicTextField(
+                value = query,
+                onValueChange = { query = it },
+                singleLine = true,
+                textStyle = TextStyle(color = TextPrimary, fontSize = 12.5.sp, fontFamily = FontFamily.Monospace),
+                cursorBrush = SolidColor(Violet),
+                modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(11.dp))
-                    .clickable { onPick(cmd) }
-                    .padding(vertical = 10.dp, horizontal = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Box(Modifier.size(28.dp).clip(RoundedCornerShape(8.dp)).background(Violet.copy(alpha = 0.10f)), contentAlignment = Alignment.Center) {
-                    Text("/", style = MaterialTheme.typography.titleMedium, color = Violet)
+                    .height(42.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Violet.copy(alpha = 0.07f))
+                    .border(1.dp, Violet.copy(alpha = 0.35f), RoundedCornerShape(12.dp))
+                    .padding(horizontal = 12.dp),
+                decorationBox = { inner ->
+                    Row(
+                        Modifier.fillMaxSize(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Text("/", style = MaterialTheme.typography.labelLarge.copy(fontSize = 15.sp), color = Violet)
+                        Box(Modifier.weight(1f)) {
+                            if (query.isEmpty()) {
+                                Text("搜索命令", style = MaterialTheme.typography.labelSmall, color = TextMuted)
+                            }
+                            inner()
+                        }
+                    }
+                },
+            )
+            Spacer(Modifier.height(6.dp))
+            visible.forEach { cmd ->
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .chatClick { onPick(cmd) }
+                        .padding(vertical = 10.dp, horizontal = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Text(
+                        "/",
+                        style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace, fontSize = 12.sp),
+                        color = Violet,
+                    )
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            cmd.name,
+                            style = MaterialTheme.typography.labelLarge.copy(
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 11.5.sp,
+                            ),
+                            color = TextPrimary,
+                        )
+                        Spacer(Modifier.height(1.dp))
+                        Text(cmd.description, style = MaterialTheme.typography.labelSmall, color = TextMuted)
+                    }
+                    Tag(cmd.source, TextMuted)
                 }
-                Spacer(Modifier.size(10.dp))
-                Column(Modifier.weight(1f)) {
-                    Text(cmd.name, style = MaterialTheme.typography.titleMedium, color = TextPrimary)
-                    Text(cmd.description, style = MaterialTheme.typography.bodySmall, color = TextMuted)
-                }
-                Pill(cmd.source, TextMuted)
             }
-            HorizontalDivider(color = Line.copy(alpha = 0.5f))
-        }
+            Spacer(Modifier.height(8.dp))
+            // MB-52：底栏计数
+            Text(
+                "${visible.size} 条命令 · ${commands.map { it.source }.distinct().size} 个来源",
+                style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                color = TextMuted,
+            )
         }
     }
 }

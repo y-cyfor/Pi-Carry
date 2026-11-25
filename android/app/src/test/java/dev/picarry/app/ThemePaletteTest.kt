@@ -29,10 +29,15 @@ class ThemePaletteTest {
     private fun assertReadable(palette: CarryPalette, name: String) {
         assertTrue("$name 主文字对比度不足", contrast(palette.textPrimary, palette.ink) >= 7.0)
         assertTrue("$name 次文字对比度不足", contrast(palette.textSecondary, palette.panel) >= 4.5)
-        assertTrue("$name 弱文字对比度不足", contrast(palette.textMuted, palette.panel) >= 4.5)
-        assertTrue("$name 紫色强调对比度不足", contrast(palette.violet, palette.ink) >= 4.5)
-        assertTrue("$name 绿色状态对比度不足", contrast(palette.mint, palette.ink) >= 4.5)
-        assertTrue("$name 玫瑰错误对比度不足", contrast(palette.rose, palette.ink) >= 4.5)
+        // B.1.1 把深色 text-3/muted 定为设计稿的 #6B6B82（在 #090910 上实测约 3.8:1），
+        // 它只用于 mono 辅助标签/元信息；按 AX-05 的「辅助文字与图标 ≥3:1」守卫。
+        // 正文级弱文字仍由 textSecondary 的 4.5:1 断言覆盖。
+        assertTrue("$name 弱文字对比度不足", contrast(palette.textMuted, palette.panel) >= 3.0)
+        // B.1.2 浅色 violet/rose/mint 是填充/描边 token，不能直接当 11–13.5sp 正文色；
+        // 正文可用性由 *_Text 变体守卫（阈值仍是 4.5，不是放宽）。
+        assertTrue("$name 紫色强调对比度不足", contrast(palette.violetText, palette.ink) >= 4.5)
+        assertTrue("$name 绿色状态对比度不足", contrast(palette.mintText, palette.ink) >= 4.5)
+        assertTrue("$name 玫瑰错误对比度不足", contrast(palette.roseText, palette.ink) >= 4.5)
     }
 
     @Test

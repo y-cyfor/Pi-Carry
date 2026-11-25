@@ -25,6 +25,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
+import org.robolectric.shadows.ShadowDialog
 import java.io.File
 
 /**
@@ -108,6 +109,31 @@ class UiChatScreenshotTest {
         }
     }
 
+    /**
+     * ModalBottomSheet 渲染在独立 Dialog 窗口里，activity 的 decorView 截不到，
+     * 这里单独把最上层 Dialog 的 decorView 画出来（用于 06-approval 的视觉回归）。
+     */
+    private fun shootDialog(name: String) {
+        val dialog = ShadowDialog.getLatestDialog() ?: return
+        val view = dialog.window?.decorView ?: return
+        val width = if (view.width > 0) view.width else compose.activity.window.decorView.width
+        val height = if (view.height > 0) view.height else compose.activity.window.decorView.height
+        if (width <= 0 || height <= 0) return
+        if (view.width != width || view.height != height) {
+            view.measure(
+                android.view.View.MeasureSpec.makeMeasureSpec(width, android.view.View.MeasureSpec.EXACTLY),
+                android.view.View.MeasureSpec.makeMeasureSpec(height, android.view.View.MeasureSpec.EXACTLY),
+            )
+            view.layout(0, 0, width, height)
+        }
+        val dir = File("build/screenshots").apply { mkdirs() }
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        view.draw(Canvas(bitmap))
+        File(dir, "$name.png").outputStream().use { out ->
+            bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+        }
+    }
+
     private fun seedChat() {
         put("_nodes", listOf(node))
         put("_nodesLoaded", true)
@@ -148,6 +174,7 @@ class UiChatScreenshotTest {
         compose.onNodeWithText("审批 →").performClick()
         compose.waitForIdle()
         compose.onNodeWithText("需要审批").assertIsDisplayed()
+        shootDialog("06-approval-sheet")
         shoot("06-approval")
     }
 

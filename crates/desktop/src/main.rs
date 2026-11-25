@@ -11,7 +11,7 @@ use pi_carry_core::paths::Paths;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use tauri::menu::{Menu, MenuItem};
+use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WindowEvent};
 use tracing_subscriber::fmt::time::ChronoLocal;
@@ -61,6 +61,9 @@ struct AppState {
     /// 托盘是否创建成功：失败时自检卡提示，且开机自启不再追加 `--minimized`
     /// （否则窗口永远出不来）。
     tray_available: AtomicBool,
+    /// 更新安装阶段（DESK-18）：系统安装器运行期间关闭窗口不能直接退出进程，
+    /// 否则会打断安装并留下半成品。
+    installing: AtomicBool,
 }
 
 impl Default for AppState {
@@ -78,6 +81,7 @@ impl Default for AppState {
             pending_pair: Mutex::new(None),
             last_update: Mutex::new(None),
             tray_available: AtomicBool::new(false),
+            installing: AtomicBool::new(false),
         }
     }
 }
@@ -175,6 +179,14 @@ impl AppState {
 
     fn set_tray_available(&self, value: bool) {
         self.tray_available.store(value, Ordering::Relaxed);
+    }
+
+    pub(crate) fn is_installing(&self) -> bool {
+        self.installing.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn set_installing(&self, value: bool) {
+        self.installing.store(value, Ordering::Relaxed);
     }
 
     /// 在设置锁内读—改—写配置：更新检查记录时间/失败版本时，
@@ -582,7 +594,11 @@ fn apply_and_save_settings(
 }
 
 #[tauri::command]
-fn update_settings(state: State<'_, AppState>, values: Value) -> Result<Value, String> {
+fn update_settings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    values: Value,
+) -> Result<Value, String> {
     // 整段「读—改—写」串行（理由见 apply_and_save_settings）。只锁本命令，
     // 不与 restart_service 的 lifecycle 锁嵌套，也不在这里 await。
     let settings = lock(&state.settings);
@@ -618,6 +634,8 @@ fn update_settings(state: State<'_, AppState>, values: Value) -> Result<Value, S
             .store
             .audit(&now_rfc3339(), "desktop", "settings.update", &values);
     }
+    // 设置页可能改了开机自启：托盘勾选状态必须跟着走（DE-132）。
+    refresh_tray(&app);
     Ok(json!({
         "saved": true,
         "restartRequired": values.get("relayMode").is_some()
@@ -634,6 +652,16 @@ fn update_settings(state: State<'_, AppState>, values: Value) -> Result<Value, S
             || values.get("logLevel").is_some()
             || values.get("startMinimized").is_some(),
     }))
+}
+
+/// 托盘「退出…」确认后由前端调用（DE-133）。
+///
+/// 托盘不再直接退出：先发 `tray-exit-requested` 让前端弹统一确认框，
+/// 用户确认后才走到这里。真正的桥接关闭与进程收尾仍由
+/// `RunEvent::ExitRequested` 统一处理，和窗口退出完全同一条路径。
+#[tauri::command]
+fn quit_app(app: AppHandle) {
+    app.exit(0);
 }
 
 #[tauri::command]
@@ -665,6 +693,8 @@ async fn restart_bridge_now(app: &AppHandle, state: &AppState) -> Result<Value, 
             install_bridge(state, bridge).await;
             let value = status_value(state);
             let _ = app.emit("bridge-status", value.clone());
+            // 桥接从失败恢复到在线时，托盘状态行要立刻变（DE-131）。
+            refresh_tray(app);
             Ok(value)
         }
         Err(err) => {
@@ -915,6 +945,143 @@ fn show_main(app: &AppHandle) {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
+    }
+}
+
+/// 托盘菜单的状态文案（DE-131/DE-134）。
+struct TrayText {
+    status: String,
+    update: String,
+    tooltip: String,
+}
+
+/// 菜单状态行、更新项与 tooltip 必须来自同一份运行时状态，否则会出现
+/// 菜单写「节点在线」而 tooltip 写「节点离线」的自相矛盾。
+fn tray_text(state: &AppState, version: &str) -> TrayText {
+    let online = lock(&state.bridge).is_some();
+    let update_available = state
+        .last_update()
+        .get("available")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let (status, tip) = if !online {
+        ("节点离线".to_string(), "节点离线")
+    } else if update_available {
+        ("节点在线 · 更新可用".to_string(), "更新可用")
+    } else {
+        (format!("节点在线 · {version}"), "节点在线")
+    };
+    TrayText {
+        status,
+        // DE-130：有更新时直接把提示写进菜单项，用户不用点开才知道。
+        update: if update_available {
+            "检查更新（有更新）".to_string()
+        } else {
+            "检查更新".to_string()
+        },
+        // DE-134：tooltip 「pi carry 0.3.2 · 节点在线」，版本号不写死。
+        tooltip: format!("pi carry {version} · {tip}"),
+    }
+}
+
+/// 托盘勾选状态以磁盘配置为准：托盘可能早于桥接启动，内存里没有权威状态。
+fn tray_autostart_checked(state: &AppState) -> bool {
+    Config::load(&state.paths())
+        .map(|config| config.service.autostart)
+        .unwrap_or(false)
+}
+
+/// 托盘「开机自启」勾选（DE-132）：先落盘再改注册项，失败回滚配置。
+fn toggle_tray_autostart(app: &AppHandle) -> Result<bool, String> {
+    let state = app.state::<AppState>();
+    let paths = state.paths();
+    // 与设置页共用同一把「读—改—写」锁，避免两边同时保存互相覆盖。
+    let _settings = lock(&state.settings);
+    let previous = Config::load(&paths).map_err(|e| format!("读取配置失败：{e}"))?;
+    let enabled = !previous.service.autostart;
+    let mut config = previous.clone();
+    config.service.autostart = enabled;
+    config
+        .save(&paths)
+        .map_err(|e| format!("保存配置失败：{e}"))?;
+    let minimized = config.service.start_minimized && state.tray_available();
+    if let Err(err) = set_autostart(enabled, minimized) {
+        // 注册表/登录项没改成：配置退回旧值，勾选状态与系统保持一致。
+        let mut rolled_back = previous;
+        rolled_back.service.autostart = !enabled;
+        let _ = rolled_back.save(&paths);
+        return Err(err);
+    }
+    Ok(enabled)
+}
+
+/// 按当前状态生成托盘菜单。
+///
+/// 只渲染真实存在的开关：暂停桥接还没有后端能力（Q-01），
+/// 开机自启在 macOS/Linux 交给系统登录项（DE-135），都不放占位项。
+fn build_tray_menu(
+    app: &AppHandle,
+    state: &AppState,
+    text: &TrayText,
+) -> tauri::Result<Menu<tauri::Wry>> {
+    // DE-130：第一行是禁用状态行，用户扫一眼就知道节点在不在。
+    let status = MenuItem::with_id(app, "status", &text.status, false, None::<&str>)?;
+    let show = MenuItem::with_id(app, "show", "打开 pi carry", true, None::<&str>)?;
+    // 设计画板没画「配对…」，但生产版本有且必要：手机首次连接靠它出码。
+    let pair = MenuItem::with_id(app, "pair", "配对…", true, None::<&str>)?;
+    let check = MenuItem::with_id(app, "update", &text.update, true, None::<&str>)?;
+    let logs = MenuItem::with_id(app, "logs", "打开日志", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "退出…", true, None::<&str>)?;
+    let sep_top = PredefinedMenuItem::separator(app)?;
+    let sep_mid = PredefinedMenuItem::separator(app)?;
+    let sep_quit = PredefinedMenuItem::separator(app)?;
+    let autostart = cfg!(target_os = "windows")
+        .then(|| {
+            CheckMenuItem::with_id(
+                app,
+                "autostart",
+                "开机自启",
+                true,
+                tray_autostart_checked(state),
+                None::<&str>,
+            )
+        })
+        .transpose()?;
+    let mut items: Vec<&dyn IsMenuItem<tauri::Wry>> =
+        vec![&status, &sep_top, &show, &pair, &check, &logs];
+    if let Some(item) = &autostart {
+        items.push(&sep_mid);
+        items.push(item);
+    }
+    items.push(&sep_quit);
+    items.push(&quit);
+    Menu::with_items(app, &items)
+}
+
+/// 重建托盘菜单与 tooltip；托盘不可用（Linux 无 StatusNotifier 宿主）时静默返回。
+///
+/// 菜单项很少，整体重建比逐项 set_text/set_checked 更不容易漏改；
+/// 只在状态变化（桥接启停、更新检查、设置保存）时调用，不会打断用户操作。
+pub(crate) fn refresh_tray(app: &AppHandle) {
+    let Some(tray) = app.tray_by_id("main") else {
+        return;
+    };
+    let state = app.state::<AppState>();
+    let version = app.package_info().version.to_string();
+    let text = tray_text(&state, &version);
+    match build_tray_menu(app, &state, &text) {
+        Ok(menu) => {
+            if let Err(err) = tray.set_menu(Some(menu)) {
+                tracing::warn!(error = %err, "更新托盘菜单失败");
+            }
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "重建托盘菜单失败");
+            return;
+        }
+    }
+    if let Err(err) = tray.set_tooltip(Some(text.tooltip.as_str())) {
+        tracing::warn!(error = %err, "更新托盘提示失败");
     }
 }
 
@@ -1363,7 +1530,6 @@ fn main() {
     state
         .close_to_tray
         .store(startup_config.service.close_to_tray, Ordering::Relaxed);
-    let check_on_startup = startup_config.updates.check_on_startup;
     let setup_args = args.clone();
 
     let app = tauri::Builder::default()
@@ -1382,6 +1548,7 @@ fn main() {
             get_settings,
             update_settings,
             set_window_theme,
+            quit_app,
             restart_service,
             get_logs,
             open_data_dir,
@@ -1399,36 +1566,24 @@ fn main() {
             let handle = app.handle().clone();
             let state = app.state::<AppState>();
 
-            // 使用固定的逻辑尺寸：Tauri 在部分 Windows 缩放环境下会错误上报 scale_factor，
-            // 按显示器反推尺寸反而会让窗口超出屏幕。1160×680 在 100%–200% 缩放下都能完整显示。
+            // 窗口尺寸以 tauri.conf.json 为准（默认 1040×720、最小 880×600，DE-01）：
+            // 这里再 set_size/set_min_size 会把设计尺寸覆盖掉，只保留居中。
             if let Some(window) = app.get_webview_window("main") {
-                let _ = window.set_min_size(Some(tauri::LogicalSize::new(880.0, 560.0)));
-                let _ = window.set_size(tauri::LogicalSize::new(1160.0, 680.0));
                 let _ = window.center();
             }
 
             // 第二个实例不会自己开窗口，而是通知首个实例把窗口提上来。
             spawn_show_listener(app.handle().clone());
-            let show = MenuItem::with_id(app, "show", "打开 pi carry", true, None::<&str>)?;
-            let pair = MenuItem::with_id(app, "pair", "开始配对", true, None::<&str>)?;
-            let check = MenuItem::with_id(app, "update", "检查更新", true, None::<&str>)?;
-            let logs = MenuItem::with_id(app, "logs", "打开日志目录", true, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &pair, &check, &logs, &quit])?;
             let tray_icon = if cfg!(target_os = "macos") {
                 // macOS 要求模板图：纯黑 + alpha，系统自动适配深浅色菜单栏。
                 tauri::image::Image::from_bytes(include_bytes!("../icons/tray-template.png"))?
             } else {
                 tauri::image::Image::from_bytes(include_bytes!("../icons/32x32.png"))?
             };
+            // DE-134：左键打开窗口、右键出菜单；菜单与 tooltip 由 refresh_tray 按状态生成。
             let tray = TrayIconBuilder::with_id("main")
                 .icon(tray_icon)
                 .icon_as_template(cfg!(target_os = "macos"))
-                .tooltip(format!(
-                    "pi carry · 本机桥接 · v{}",
-                    app.package_info().version
-                ))
-                .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => show_main(app),
@@ -1457,7 +1612,31 @@ fn main() {
                             tracing::warn!(error = %err, "打开日志目录失败");
                         }
                     }
-                    "quit" => app.exit(0),
+                    "autostart" => {
+                        match toggle_tray_autostart(app) {
+                            Ok(enabled) => {
+                                // 托盘改的是同一份配置：让已打开的设置页跟着刷新（DE-132）。
+                                let _ = app.emit(
+                                    "settings-changed",
+                                    json!({ "source": "tray", "autostart": enabled }),
+                                );
+                            }
+                            Err(err) => {
+                                // 托盘没有气泡，失败提示交给前端统一 toast。
+                                show_main(app);
+                                let _ = app
+                                    .emit("tray-toast", json!({ "message": err, "error": true }));
+                            }
+                        }
+                        // 勾选状态与注册项都以刚保存的配置为准，所以无条件重建。
+                        refresh_tray(app);
+                    }
+                    // DE-133：托盘退出不直接退出，交给前端统一确认框；
+                    // 用户确认后 invoke quit_app（见 Phase B FE 契约）。
+                    "quit" => {
+                        show_main(app);
+                        let _ = app.emit("tray-exit-requested", Value::Null);
+                    }
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
@@ -1472,7 +1651,12 @@ fn main() {
                 })
                 .build(app);
             match tray {
-                Ok(_) => state.set_tray_available(true),
+                Ok(_) => {
+                    state.set_tray_available(true);
+                    // 菜单与 tooltip 依赖运行时状态（桥接是否在线、是否有更新、自启勾选），
+                    // 托盘建好后统一生成一次。
+                    refresh_tray(app.handle());
+                }
                 // 托盘创建失败（例如 Linux 没有 StatusNotifier 宿主）不应阻止启动：
                 // 窗口仍可用，自检卡会提示；开机自启也不再追加 --minimized。
                 Err(err) => {
@@ -1528,25 +1712,23 @@ fn main() {
                     }
                 }
                 let _ = bridge_handle.emit("bridge-status", status_value(&state));
+                refresh_tray(&bridge_handle);
             });
 
-            // 启动 30s 后静默检查一次：太早会和桥接抢先占用 CPU/网络，也容易
-            // 在用户还没看到界面时弹横幅；失败只留 debug 日志，不打扰。
-            if check_on_startup {
-                let updater = handle.clone();
-                tauri::async_runtime::spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                    let state = updater.state::<AppState>();
-                    if let Err(err) = update::check_update(updater.clone(), state, false).await {
-                        tracing::debug!(error = %err, "自动检查更新失败");
-                    }
-                });
-            }
             Ok(())
         })
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 let state = window.state::<AppState>();
+                // DESK-18：安装阶段关闭窗口会打断系统安装器，这里拦下并提示前端。
+                if window.label() == "main" && state.is_installing() {
+                    api.prevent_close();
+                    let _ = window.app_handle().emit(
+                        "tray-toast",
+                        json!({ "message": "安装中，请勿关闭应用", "error": false }),
+                    );
+                    return;
+                }
                 // 托盘不可用时不能隐藏：否则窗口关不掉、托盘又找不到，用户只能杀进程。
                 if window.label() == "main"
                     && state.close_to_tray.load(Ordering::Relaxed)

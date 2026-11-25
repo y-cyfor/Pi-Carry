@@ -21,7 +21,8 @@ class CarryService : Service() {
         )
         val notification: Notification = NotificationCompat.Builder(this, PiCarryApp.CHANNEL_SERVICE)
             .setContentTitle("pi carry")
-            .setContentText("正在后台保持与 pi 节点的连接")
+            // C.9 MSY-01 / E.2.8：常驻通知正文统一为「桥接运行中」。
+            .setContentText("桥接运行中")
             .setSmallIcon(dev.picarry.app.R.drawable.ic_notification)
             .setContentIntent(open)
             .setOngoing(true)
