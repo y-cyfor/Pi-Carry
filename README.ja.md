@@ -51,7 +51,7 @@ Pi Carry は pi コーディングエージェントのリモート操作レイ�
 
 セッションを複製せず、クラウドアカウントも不要です。ブリッジはトレイアプリまたは CLI として動作し、pi の RPC モードで通信します。スマートフォンは複数のノードを保持でき、LAN では直結し、NAT 越えが必要な場合は n0 relay または自前の relay を使います。ツール呼び出しは pi 拡張で横取りされ、ブリッジが仲裁します。承認はタイムアウトで拒否になります。デスクを離れている間の長い作業を追うためのものであり、コード、セッション、認証情報を第三者に渡すためのものではありません。
 
-現在のバージョンは `0.3.1` です。Windows 10/11 x64 が主要な検証対象です。macOS 11+ Universal と Linux x64/arm64 のパッケージはリリース処理でビルドされますが、実機での受け入れ確認はまだ不完全です。macOS ビルドは**署名も公証もされていません**。手順は[未署名ビルドのインストール](#未署名ビルドのインストール)を参照してください。
+現在のバージョンは `0.3.2` です。Windows 10/11 x64 が主要な検証対象です。macOS 11+ Universal と Linux x64/arm64 のパッケージはリリース処理でビルドされますが、実機での受け入れ確認はまだ不完全です。macOS ビルドは**署名も公証もされていません**。手順は[未署名ビルドのインストール](#未署名ビルドのインストール)を参照してください。
 
 ## インストール
 
@@ -70,16 +70,16 @@ Pi Carry は pi、Node.js、モデルの認証情報を同梱しません。タ�
 
 ### ダウンロード
 
-リリース資産の名前は固定です。`0.3.1` の例：
+リリース資産の名前は固定です。`0.3.2` の例：
 
 | 資産 | 用途 |
 | --- | --- |
-| `pi-carry-windows-10-x64-0.3.1-setup.exe` | Windows インストーラー（NSIS、現在のユーザー向け、管理者権限不要） |
-| `pi-carry-windows-10-x64-0.3.1.zip` | Windows ポータブル版 |
-| `pi-carry-macos-11-universal-0.3.1.dmg` | macOS Universal ディスクイメージ |
-| `pi-carry-macos-11-universal-0.3.1.app.tar.gz`（`.sig` 付き） | アップデータ用。手動インストールには不要 |
-| `pi-carry-linux-22.04-x64-0.3.1.deb` / `.rpm` | Linux x64 用パッケージ |
-| `pi-carry-linux-24.04-arm64-0.3.1.deb` / `.rpm` | Linux arm64 用パッケージ（24.04 でビルド） |
+| `pi-carry-windows-10-x64-0.3.2-setup.exe` | Windows インストーラー（NSIS、現在のユーザー向け、管理者権限不要） |
+| `pi-carry-windows-10-x64-0.3.2.zip` | Windows ポータブル版 |
+| `pi-carry-macos-11-universal-0.3.2.dmg` | macOS Universal ディスクイメージ |
+| `pi-carry-macos-11-universal-0.3.2.app.tar.gz`（`.sig` 付き） | アップデータ用。手動インストールには不要 |
+| `pi-carry-linux-22.04-x64-0.3.2.deb` / `.rpm` | Linux x64 用パッケージ |
+| `pi-carry-linux-24.04-arm64-0.3.2.deb` / `.rpm` | Linux arm64 用パッケージ（24.04 でビルド） |
 | `latest.json` | 内蔵アップデータが使うマニフェスト |
 | `SHA256SUMS.txt` | 全資産のチェックサム |
 
@@ -87,9 +87,9 @@ CI はバージョンタグでこれらの資産をビルドし、**ドラフト
 
 ### Windows
 
-`pi-carry-windows-10-x64-0.3.1-setup.exe` を実行します。インストーラーは現在のユーザー向けで、管理者権限は不要です。スタートメニューの項目を作成し、`pi-carry://` ディープリンクを登録します。
+`pi-carry-windows-10-x64-0.3.2-setup.exe` を実行します。インストーラーは現在のユーザー向けで、管理者権限は不要です。スタートメニューの項目を作成し、`pi-carry://` ディープリンクを登録します。
 
-ポータブル版は `pi-carry-windows-10-x64-0.3.1.zip` を任意のフォルダーに展開し、`pi-carry-desktop.exe` と `WebView2Loader.dll` を同じ場所に置いて exe を実行します。既定ではウィンドウを閉じるとトレイに格納されます。ポータブル版にアンインストーラーはありません。初回起動時にはインストーラーと同じく `pi-carry://` ディープリンクを登録します。「アプリと機能」からの削除が必要な場合はインストーラーを使ってください。
+ポータブル版は `pi-carry-windows-10-x64-0.3.2.zip` を任意のフォルダーに展開し、`pi-carry-desktop.exe` と `WebView2Loader.dll` を同じ場所に置いて exe を実行します。既定ではウィンドウを閉じるとトレイに格納されます。ポータブル版にアンインストーラーはありません。初回起動時にはインストーラーと同じく `pi-carry://` ディープリンクを登録します。「アプリと機能」からの削除が必要な場合はインストーラーを使ってください。
 
 どちらも設定、鍵、状態、ログを `%USERPROFILE%\.pi-carry` に保存します。自動起動は既定で無効です。設定で有効にすると、現在のユーザーの自動起動項目（`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`、値名 `pi-carry`）を登録します。
 
@@ -97,7 +97,7 @@ WebView2 Runtime がない場合は、Microsoft の Evergreen Runtime をイン�
 
 ### macOS
 
-`pi-carry-macos-11-universal-0.3.1.dmg` を開き、**pi carry** を「アプリケーション」へドラッグし、イメージを排出してから起動します。Universal ビルドのため、Intel と Apple Silicon の両方でネイティブに動作します。
+`pi-carry-macos-11-universal-0.3.2.dmg` を開き、**pi carry** を「アプリケーション」へドラッグし、イメージを排出してから起動します。Universal ビルドのため、Intel と Apple Silicon の両方でネイティブに動作します。
 
 署名も公証もされていないため、初回起動は Gatekeeper に阻止されます。[未署名ビルドのインストール](#未署名ビルドのインストール)を参照してください。初回起動時に `~/.pi-carry/config.toml`、ローカル状態データベース、ペアリング秘密鍵用のキーチェーン項目が作成されます。
 
@@ -107,10 +107,10 @@ WebView2 Runtime がない場合は、Microsoft の Evergreen Runtime をイン�
 
 ```bash
 # Debian / Ubuntu x64
-sudo apt install ./pi-carry-linux-22.04-x64-0.3.1.deb
+sudo apt install ./pi-carry-linux-22.04-x64-0.3.2.deb
 
 # Fedora / RHEL x64
-sudo dnf install ./pi-carry-linux-22.04-x64-0.3.1.rpm
+sudo dnf install ./pi-carry-linux-22.04-x64-0.3.2.rpm
 ```
 
 arm64 ではファイル名の `x64` を `arm64` に置き換えます。パッケージが宣言する依存関係：
@@ -127,7 +127,7 @@ Windows のコード署名証明書はまだ取得しておらず、SignPath Fou
 **Windows SmartScreen。** 初回起動時に「Windows によって PC が保護されました」と表示されることがあります。**詳細情報 → 実行**をクリックします。先にダウンロードを検証してください：
 
 ```powershell
-Get-FileHash .\pi-carry-windows-10-x64-0.3.1-setup.exe -Algorithm SHA256
+Get-FileHash .\pi-carry-windows-10-x64-0.3.2-setup.exe -Algorithm SHA256
 # SHA256SUMS.txt の該当行と比較
 ```
 
@@ -335,8 +335,8 @@ bash scripts/package-macos.sh
 スクリプトはバージョン付きの資産と `SHA256SUMS.txt` を `dist/` に書き出します。リリース用の更新マニフェストを生成します：
 
 ```bash
-node scripts/gen-latest-json.mjs --dir dist --version 0.3.1 \
-  --base-url https://github.com/y-cyfor/Pi-Carry/releases/download/v0.3.1
+node scripts/gen-latest-json.mjs --dir dist --version 0.3.2 \
+  --base-url https://github.com/y-cyfor/Pi-Carry/releases/download/v0.3.2
 ```
 
 `scripts/package.ps1` は正式署名済みの Android APK も同梱し、署名 APK がない場合はデバッグ APK で代用せず失敗します。PowerShell 7 を推奨しますが Windows PowerShell 5.1 でも動作します（SHA-256 は `System.Security.Cryptography` で計算し、`Get-FileHash` に依存しません）。
