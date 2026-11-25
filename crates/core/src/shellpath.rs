@@ -80,6 +80,7 @@ fn read_registry_path(key: &str, attempts: &mut Vec<String>) -> Option<OsString>
 /// 解析 `reg query` 的输出：`    Path    REG_EXPAND_SZ    C:\a;D:\b`。
 ///
 /// 值本身可能包含空格，所以不能简单按空白切分后取固定下标。
+#[cfg(windows)]
 fn parse_reg_path(output: &str) -> Option<String> {
     for line in output.lines() {
         let line = line.trim_start();

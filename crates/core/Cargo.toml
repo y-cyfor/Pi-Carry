@@ -31,6 +31,10 @@ semver = "1"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading"] }
 
+[target.'cfg(unix)'.dependencies]
+# dirlock 用 flock 做数据目录互斥（Linux/macOS 构建必需）。
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = { workspace = true }
 tracing-subscriber = { workspace = true }
